@@ -28,6 +28,8 @@ const labels = {
   },
 }
 const menuPathStyle = { maxWidth: 'min(64vw, 18rem)' }
+// 输入栏的工作树操作沿用 DSH 权限与模型控件的文字规格。
+const composerTriggerStyle = { color: 'var(--dsw-alias-label-secondary)', fontSize: 13, fontWeight: 500, lineHeight: '20px' }
 const triggerLabelStyle = { maxWidth: 'min(36vw, 16rem)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
 
 function SwitchDirectory({ thread, path, shownPath, name, idleBlock, publishThread, close, t }) {
@@ -161,6 +163,7 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
       items={entries} selectedId={draft ? choice?.kind ?? 'local' : thread.cwd} submenuBackLabel={t('back')}
       onClose={() => setOpen(false)} onSelect={select}
       anchor={<Button ref={trigger} size="sm" variant="ghost" aria-haspopup="menu" aria-expanded={open}
+        style={draft ? composerTriggerStyle : undefined}
         title={draft ? choice?.path ?? choice?.baseRef ?? thread.cwd : thread.cwd} disabled={disabled} onClick={() => {
           if (!open) {
             setChoices(undefined)
@@ -193,7 +196,7 @@ function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktr
   return <>
     <WorktreePicker key={thread.cwd} {...{ thread, draft, choice, project, home, setDraft, publishThread, t }}
       idleBlock={draft ? undefined : idleBlock} disabled={draft && active} />
-    {draft && choice?.recovery && <Button size="sm" variant="ghost" disabled={active}
+    {draft && choice?.recovery && <Button size="sm" variant="ghost" style={composerTriggerStyle} disabled={active}
       title={choice.recovery.thread.cwd} onClick={() => openWorktree(choice.recovery, false)}>{t('recover')}</Button>}
   </>
 }
