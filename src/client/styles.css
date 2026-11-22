@@ -36,23 +36,12 @@
   padding: 0;
 }
 
-.dsh-codex-sidebar-toggle, .dsh-codex-more {
-  border: 0;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  border-radius: var(--dsw-radius-sm, 6px);
-  cursor: pointer;
-}
-
-.dsh-codex-sidebar-toggle {
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
+.dsh-codex-brand > .dsh-codex-sidebar-toggle {
+  width: 28px;
   padding: 0;
 }
 
-.dsh-codex-sidebar-toggle:hover, .dsh-codex-more:hover, .dsh-codex-workspace button:hover, .dsh-codex-workspace summary:hover {
+.dsh-codex-workspace summary:hover {
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
@@ -68,7 +57,7 @@
   overflow-y: auto;
 }
 
-.dsh-codex-workspace summary, .dsh-codex-workspace li > button {
+.dsh-codex-workspace summary {
   display: flex;
   gap: 7px;
   align-items: center;
@@ -108,23 +97,18 @@
 }
 
 .dsh-codex-workspace li > button {
+  justify-content: space-between;
   width: 100%;
-  min-height: 34px;
-  padding-inline-start: 26px;
-  border: 0;
-  background: transparent;
+  padding-inline: 26px 6px;
   text-align: left;
-  font: inherit;
 }
 
-.dsh-codex-workspace li > button[aria-current] {
-  background: var(--dsw-alias-interactive-bg-hover);
+.dsh-codex-workspace li > .dsh-codex-thread[aria-current] {
+  background: var(--dsw-alias-interactive-bg-active);
 }
 
 .dsh-codex-workspace li > .dsh-codex-workspace-more {
-  min-height: 28px;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 12px;
 }
 
 .dsh-codex-workspace li time {
@@ -253,27 +237,14 @@
   overflow: auto;
 }
 
-.dsh-codex-change > code {
-  display: block;
-  margin-block: 6px;
-  overflow-wrap: anywhere;
-}
-
 .dsh-codex-error {
   color: var(--dsw-alias-label-error, #b63d42);
   overflow-wrap: anywhere;
 }
 
-.dsh-codex-more {
-  display: block;
+.dsh-codex-list > .dsh-codex-more, .dsh-codex-transcript > .dsh-codex-more {
+  display: flex;
   margin: 8px auto 16px;
-  padding: 5px 11px;
-  font: inherit;
-}
-
-.dsh-codex-more:disabled {
-  opacity: .56;
-  cursor: wait;
 }
 
 @container (max-width: 480px) {

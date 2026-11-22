@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
+  Button,
   CodeBlock,
+  DiffBlock,
   DisclosureRow,
   IconCodeOutlineRegular,
   IconEditOutlineRegular,
@@ -12,6 +14,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { groupCommands } from './activities.js'
 import { directoryTitle, formatTime, mergePages, readPage } from './api.js'
+import { toDiffHunks } from './file-change.js'
 
 const copyLabels = { copyLabel: '复制', copiedLabel: '已复制' }
 const markdownLabels = { code: copyLabels, footnotes: '脚注' }
@@ -30,6 +33,17 @@ const terminalLabels = {
   collapse: '折叠',
   expandAria: lines => `展开剩余 ${lines} 行`,
   expand: lines => `展开 ${lines} 行`,
+}
+const diffLabels = {
+  codeLabel: '差异',
+  wrapLabel: '自动换行',
+  unwrapLabel: '取消自动换行',
+  copy: copyLabels.copyLabel,
+  copied: copyLabels.copiedLabel,
+  collapseAria: '折叠文件差异',
+  collapse: terminalLabels.collapse,
+  expandAria: terminalLabels.expandAria,
+  expand: terminalLabels.expand,
 }
 
 function Message({ item, startedAt }) {
@@ -69,6 +83,17 @@ function Command({ item }) {
   )
 }
 
+function FileChanges({ changes }) {
+  return changes.map(change => {
+    const diffs = toDiffHunks(change)
+    if (diffs) return <DiffBlock key={change.path} diffs={diffs} labels={diffLabels} />
+    return <div key={change.path}>
+      <code>{change.path}</code>
+      <CodeBlock code={change.diff} lang="diff" {...copyLabels} />
+    </div>
+  })
+}
+
 function Item({ item, startedAt }) {
   switch (item.type) {
     case 'userMessage':
@@ -84,12 +109,7 @@ function Item({ item, startedAt }) {
       return (
         <Activity title="文件变更" icon={<IconEditOutlineRegular />}
           summary={item.changes.map(change => directoryTitle(change.path)).join('、')}>
-          {() => item.changes.map((change, index) => (
-            <div className="dsh-codex-change" key={index}>
-              <code>{change.path}</code>
-              {change.diff && <CodeBlock code={change.diff} lang="diff" {...copyLabels} />}
-            </div>
-          ))}
+          {() => <FileChanges changes={item.changes} />}
         </Activity>
       )
     case 'reasoning':
@@ -194,7 +214,7 @@ export function Transcript({ thread, title }) {
       </header>
       <div className="dsh-codex-viewport" ref={viewport}>
         <div className="dsh-codex-transcript">
-          {nextCursor && <button className="dsh-codex-more" type="button" disabled={busy} onClick={() => load(nextCursor)}>载入更早记录</button>}
+          {nextCursor && <Button className="dsh-codex-more" size="sm" disabled={busy} onClick={() => load(nextCursor)}>载入更早记录</Button>}
           {error && <p className="dsh-codex-error" role="alert">{error}</p>}
           {busy && turns.length === 0 && <p className="dsh-codex-muted" role="status">正在载入历史…</p>}
           {!busy && !error && turns.length === 0 && <p className="dsh-codex-muted">暂无历史消息</p>}

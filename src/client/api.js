@@ -10,7 +10,11 @@ export async function readPage(collection, parameters, signal) {
 
 export function mergePages(previous, next, { prepend = false } = {}) {
   const entries = prepend ? [...next, ...previous] : [...previous, ...next]
-  return [...new Map(entries.map(entry => [entry.id, entry])).values()]
+  const unique = new Map()
+  for (const entry of entries) {
+    if (!unique.has(entry.id)) unique.set(entry.id, entry)
+  }
+  return [...unique.values()]
 }
 
 export function formatTime(seconds) {

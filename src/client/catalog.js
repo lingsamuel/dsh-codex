@@ -22,7 +22,7 @@ export function createHistoryCatalog(signal) {
     try {
       const page = await readPage('threads', cursor ? { cursor } : {}, signal)
       store.update(state => {
-        state.threads = cursor ? mergePages(state.threads, page.data) : page.data
+        state.threads = mergePages(cursor ? state.threads : [], page.data)
         state.nextCursor = page.nextCursor
       })
     } catch (error) {

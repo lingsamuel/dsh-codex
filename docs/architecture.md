@@ -8,4 +8,6 @@ DSH ChatGPT 运行在独立的 DSH Profile 中。DSH 提供网页启动、访问
 
 DSH 的根视图要求安装可选 Session scope。插件提供空绑定，并将当前选中的原生线程标题投影给 AppFrame。布局与主题服务只管理界面。
 
+会话列表按原生线程 ID 合并同一页和跨页记录，保留服务端的返回顺序。文件变更在浏览器中转换为 DSH DiffBlock 的显示输入，Codex 历史继续以原生格式读取。
+
 后续交互接入直接沿用 Codex App Server 的发送、插话、停止和服务端请求。Windows 原生接入复用同一协议，前提是目标 Codex 实例提供共享端点。

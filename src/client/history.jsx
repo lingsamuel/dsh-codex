@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import {
+  Button,
   IconCodeOutlineRegular,
   IconFolderCloseRegular,
   IconFolderOpenOutlineRegular,
@@ -49,9 +50,8 @@ function ThreadTime({ seconds }) {
 export function SidebarToggle({ collapsed, toggle }) {
   const label = collapsed ? '展开侧栏' : '折叠侧栏'
   return (
-    <button className="dsh-codex-sidebar-toggle" type="button" aria-label={label} title={label} onClick={toggle}>
-      <IconPanelLeftOutlineRegular size={18} />
-    </button>
+    <Button className="dsh-codex-sidebar-toggle" size="sm" aria-label={label} title={label}
+      icon={<IconPanelLeftOutlineRegular />} onClick={toggle} />
   )
 }
 
@@ -67,16 +67,16 @@ function Workspace({ group, initiallyOpen, selected, onSelect }) {
       <ul>
         {group.threads.slice(0, limit).map(thread => (
           <li key={thread.id}>
-            <button type="button" aria-current={selected?.id === thread.id ? 'true' : undefined} onClick={() => onSelect(thread)}>
+            <Button className="dsh-codex-thread" aria-current={selected?.id === thread.id ? 'true' : undefined} onClick={() => onSelect(thread)}>
               <span className="dsh-codex-thread-title" title={threadTitle(thread)}>{threadTitle(thread)}</span>
               <ThreadTime seconds={thread.updatedAt} />
-            </button>
+            </Button>
           </li>
         ))}
         {group.threads.length > limit && <li>
-          <button className="dsh-codex-workspace-more" type="button" onClick={() => setLimit(value => value + 10)}>
+          <Button className="dsh-codex-workspace-more" size="sm" onClick={() => setLimit(value => value + 10)}>
             显示更多会话
-          </button>
+          </Button>
         </li>}
       </ul>
     </details>
@@ -104,7 +104,7 @@ export function Sidebar({ collapsed, drawer, catalog, toggle, useCodexHistory })
         {groupThreads(threads, projects).map(([key, group], index) => (
           <Workspace key={key} group={group} initiallyOpen={index === 0} selected={selected} onSelect={select} />
         ))}
-        {nextCursor && <button className="dsh-codex-more" type="button" onClick={catalog.loadMore} disabled={busy}>载入更多会话</button>}
+        {nextCursor && <Button className="dsh-codex-more" size="sm" onClick={catalog.loadMore} disabled={busy}>载入更多会话</Button>}
       </div>
     </aside>
   )

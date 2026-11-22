@@ -22,6 +22,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "diff": "^9.0.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {
