@@ -24,10 +24,11 @@ function mockTransport(t) {
   const original = { document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
   let source
   globalThis.document = { baseURI: 'http://127.0.0.1:3190/' }
-  globalThis.EventSource = class {
-    constructor(url) { source = this; this.url = url }
+  globalThis.EventSource = class extends EventTarget {
+    constructor(url) { super(); source = this; this.url = url }
     close() { this.closed = true }
   }
+  t.mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => Object.assign(globalThis, original))
   return () => source
 }

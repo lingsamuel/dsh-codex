@@ -26,12 +26,24 @@ export function writeConversationAction(parameters, signal) {
 
 /** 使用正在等待的原生请求标识提交答案。 */
 export function writeQuestionAnswer(parameters, signal) {
-  return writeAction('question-answer', parameters, signal)
+  return writeAnswer('question-answer', parameters, signal)
 }
 
 /** 异步问题通过 Codex 原生用户输入入队。 */
 export function writeAsyncQuestionAnswer(parameters, signal) {
-  return writeAction('async-question-answer', parameters, signal)
+  return writeAnswer('async-question-answer', parameters, signal)
+}
+
+async function writeAnswer(route, parameters, signal) {
+  const deadline = AbortSignal.timeout(25_000)
+  try {
+    return await writeAction(route, parameters, signal ? AbortSignal.any([signal, deadline]) : deadline)
+  } catch (error) {
+    if (error === deadline.reason) {
+      throw new Error('等待答复确认超时。请查看会话和待发队列确认答案是否送达。', { cause: error })
+    }
+    throw error
+  }
 }
 
 function writeAction(route, parameters, signal) {

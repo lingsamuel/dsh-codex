@@ -124,3 +124,16 @@ test('旧式原生历史按末轮完整记录验证，并发网页答复只送�
   assert.equal(adds.length, 1)
   assert.deepEqual(questionReplies(adds[0].params.input), [reply(1, '明天')])
 })
+
+test('冷会话加载失败时标明失败阶段且不尝试入队', async t => {
+  const { post, frames } = await fakeCodex(t, {
+    'thread/read': () => ({ thread: { id: threadId, status: { type: 'notLoaded' }, historyMode: 'paginated' } }),
+    'thread/queue/list': () => ({ data: [] }),
+    'thread/items/read': () => ({ data: [{ turnId, item }] }),
+    'thread/items/list': () => ({ data: [] }),
+    'thread/turns/list': () => ({ data: [{ id: turnId }] }),
+  })
+  const response = await post([{ index: 0, answer: '测试' }])
+  assert.match((await response.json()).error, /加载会话失败.*thread\/resume/)
+  assert.equal(frames.some(frame => frame.method === 'thread/queue/add'), false)
+})

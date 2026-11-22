@@ -64,7 +64,14 @@ async function submit(request, threadId, turnId, itemId, answers) {
   if (!replies.length || answered.has(itemId)) return json({ submitted: false })
 
   if (!legacy && (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
-  if (thread.status?.type === 'notLoaded') await request('thread/resume', { threadId, excludeTurns: true })
+  if (thread.status?.type === 'notLoaded') {
+    try {
+      await request('thread/resume', { threadId, excludeTurns: true })
+    } catch (error) {
+      if (error instanceof CodexRpcError) return json({ error: `加载会话失败，答复尚未入队。${error.message}` }, 409)
+      return json({ error: '未收到加载会话的确认，答复尚未入队。' }, 503)
+    }
+  }
 
   const identity = JSON.stringify([threadId, ...replies.map(reply => reply.questionItemId)])
   const clientUserMessageId = `dsh-codex-question-${createHash('sha256').update(identity).digest('hex')}`

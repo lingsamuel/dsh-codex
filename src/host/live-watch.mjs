@@ -37,7 +37,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
             if (!signal.aborted && !cancelled) writer.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`))
           }
           const heartbeat = setInterval(() => {
-            if (!signal.aborted && !cancelled) writer.enqueue(encoder.encode(': keep-alive\n\n'))
+            if (!signal.aborted && !cancelled) writer.enqueue(encoder.encode('event: heartbeat\ndata: {}\n\n'))
           }, 15_000)
           heartbeat.unref()
           let timer
