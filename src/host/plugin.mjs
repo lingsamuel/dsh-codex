@@ -22,7 +22,7 @@ export async function apply(ctx) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
   const { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_MAX_RESULTS, DEFAULT_FILE_SEARCH_MAX_ENTRIES,
-    DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } = await ctx.loader.import('@deepseek-ai/dsh-file-reference-local/search')
+    DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } = await import('../../dist/file-reference-search.mjs')
   const searchConfig = { maxResults: DEFAULT_FILE_SEARCH_MAX_RESULTS, maxEntries: DEFAULT_FILE_SEARCH_MAX_ENTRIES,
     excludedDirectories: DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES }
   ctx.inject(['workspaceFiles', 'typert'], scope => {

@@ -25,3 +25,13 @@ await build({
   },
   footer: { js: 'return module.exports; } });' },
 })
+
+// 新版 DSH 随包发布搜索模块的 TypeScript 源码，由项目构建产出 Host 可加载的 JavaScript。
+await build({
+  absWorkingDir: root,
+  entryPoints: [fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-file-reference-local/src/search.ts'))],
+  outfile: 'dist/file-reference-search.mjs',
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+})

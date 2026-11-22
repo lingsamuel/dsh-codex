@@ -15,7 +15,7 @@ const catalogMethods = new Set([
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal, questions) {
+export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals) {
   return {
     path: '/api/codex/watch',
     methods: ['GET'],
@@ -24,6 +24,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
       const params = new URL(request.url).searchParams
       const threadId = params.get('threadId')
       const catalog = params.get('scope') === 'catalog'
+      const observeBackgroundTerminals = catalog && params.get('backgroundTerminals') === '1'
       const observeQueue = params.get('queue') === '1'
       const observeQuestions = !catalog && params.get('questions') === '1'
       if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
@@ -203,6 +204,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
                 for (const message of early) notify(message)
                 early.length = 0
                 watchNativeUnread(sqliteHome, send, signal)
+                if (observeBackgroundTerminals) backgroundTerminals?.watch(send, signal)
                 await connection.closed
                 return
               }

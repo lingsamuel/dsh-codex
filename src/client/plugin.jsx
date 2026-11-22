@@ -18,6 +18,7 @@ import { installSubagentActivity } from './native-dsh/subagent-activity.jsx'
 import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
 import { installPermissions } from './native-dsh/permissions.js'
+import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -45,5 +46,6 @@ export function apply(ctx) {
   installMessageEdit(ctx)
   installModelPicker(ctx, controller.signal)
   installCommands(ctx)
+  installBackgroundTerminals(ctx, catalog.backgroundTerminals)
   installReadReceipts(ctx, catalog)
 }

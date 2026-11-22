@@ -20,7 +20,7 @@ function historyUnavailable(thread) {
 }
 
 /** 只开放会话管理动作。浏览器不能指定要转发的 RPC 或改变原生线程控制权。 */
-export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue()) {
+export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), backgroundTerminals) {
   const historyActions = new Set()
   return {
     path: '/api/codex/thread-action',
@@ -31,7 +31,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
       if (contentType !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const input = await request.json().catch(() => null)
       const { threadId, action, expectedRevision, name, pinned, provider, model, reasoningEffort,
-        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId, modelDraft } = input ?? {}
+        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId, modelDraft, processId } = input ?? {}
       if (typeof threadId !== 'string' || !threadId.trim()) return json({ error: '缺少 Codex 线程 ID。' }, 400)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       let method
@@ -40,6 +40,8 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
         if (typeof expectedRevision !== 'string' || !expectedRevision) return json({ error: '缺少阅读回执版本。' }, 400)
         method = 'thread/readState/update'
         params = { threadId, operation: { type: action }, expectedRevision }
+      } else if (action === 'terminate-background-terminal' && backgroundTerminals) {
+        if (typeof processId !== 'string' || !processId.trim()) return json({ error: '缺少 Codex 后台进程 ID。' }, 400)
       } else if (action === 'rename' && typeof name === 'string' && name.trim()) {
         method = 'thread/name/set'
         params = { threadId, name }
@@ -68,6 +70,9 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
         historyActions.add(threadId)
       }
       try {
+        if (action === 'terminate-background-terminal') {
+          return json(await backgroundTerminals.terminate(threadId, processId, signal))
+        }
         if (action === 'model') {
           return json(await submit(threadId, () => withCodexReader(socketPath, signal,
             request => updateModelSelection(request, { threadId, provider, model, reasoningEffort }))))

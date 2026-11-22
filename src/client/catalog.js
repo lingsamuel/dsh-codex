@@ -28,6 +28,8 @@ function threadCreatedAt(thread) {
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
 export function createHistoryCatalog(signal) {
   const openedAt = Date.now()
+  const emptyTerminals = new Map()
+  const backgroundTerminals = createSnapshotStore(emptyTerminals)
   const store = createSnapshotStore({
     projects: [],
     threads: [],
@@ -246,6 +248,7 @@ export function createHistoryCatalog(signal) {
 
   const catalog = {
     store,
+    backgroundTerminals,
     loadChildren,
     resolveSubagent,
     setReadState,
@@ -343,6 +346,8 @@ export function createHistoryCatalog(signal) {
       const catchUp = connected || completeReadStarted
       connected = true
       if (catchUp) void refresh(true)
+    } else if (frame.type === 'background-terminals') {
+      backgroundTerminals.set(new Map(Object.entries(frame.byThread)))
     } else if (frame.type === 'unread') catalog.applyUnread(frame)
     else if (frame.type === 'notification') {
       const { method, params } = frame.notification
@@ -401,7 +406,11 @@ export function createHistoryCatalog(signal) {
     }
   }
 
-  openLiveWatch(null, { receive }, signal)
+  openLiveWatch(null, {
+    receive,
+    changeMode: () => backgroundTerminals.set(emptyTerminals),
+    backgroundTerminals: true,
+  }, signal)
   void refresh()
   void loadArchived()
   window.addEventListener('focus', () => { void refresh() }, { signal })

@@ -18,6 +18,8 @@
       name: '@deepseek-ai/dsh-credentials-local'
     - id: connection
       name: '@deepseek-ai/dsh-client-connection'
+    - id: authentication-token
+      name: '@deepseek-ai/dsh-host-authentication-token'
     - id: modules
       name: '@deepseek-ai/dsh-client-modules'
     - id: typert
@@ -52,6 +54,8 @@
       name: '@deepseek-ai/dsh-client-ui-layout'
     - id: ui-session
       name: '@deepseek-ai/dsh-client-ui-session'
+    - id: ui-session-status
+      name: '@deepseek-ai/dsh-client-ui-session-status'
     - id: ui-context-menu
       name: '@deepseek-ai/dsh-client-ui-context-menu'
     - id: ui-workspace
@@ -88,6 +92,8 @@
       name: '@deepseek-ai/dsh-client-ui-commands'
     - id: ui-chat
       name: '@deepseek-ai/dsh-client-ui-chat'
+    - id: ui-session-panel
+      name: '@deepseek-ai/dsh-client-ui-session-panel'
     - id: ui-subagent
       name: '@deepseek-ai/dsh-client-ui-subagent'
     - id: ui-attachment

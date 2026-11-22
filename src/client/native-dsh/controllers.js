@@ -29,6 +29,12 @@ function sessionDraft(storage, threadId) {
   } }
 }
 
+function changeRetainCount(counts, key, delta) {
+  const count = (counts[key] ?? 0) + delta
+  if (count > 0) counts[key] = count
+  else delete counts[key]
+}
+
 function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts) {
   const history = createCodexHistory(ctx, thread, catalog)
   const modelDraft = sessionDraft(modelDrafts, thread.id)
@@ -100,7 +106,7 @@ export function provideCodexControllers(ctx, catalog) {
 
   function retainInfo(id) {
     if (!retention.has(id)) {
-      retention.set(id, createSnapshotStore({ referenceCount: 0, retainedBy: {} }))
+      retention.set(id, createSnapshotStore({ referenceCount: 0, retainedBy: {}, retainedFacets: {} }))
     }
     return retention.get(id)
   }
@@ -122,7 +128,7 @@ export function provideCodexControllers(ctx, catalog) {
         return { ok: false, error: remoteFailure(error.message) }
       }
     },
-    retain(target, { source }) {
+    retain(target, { source, facets = {} }) {
       const id = typeof target === 'string' ? target : target.childSessionId
       const { threads, childThreads } = catalog.store.getSnapshot()
       const thread = childThreads[id] ?? threads.find(item => item.id === id)
@@ -136,19 +142,22 @@ export function provideCodexControllers(ctx, catalog) {
       }
       const { binding } = record
       const observer = retainInfo(id)
-      observer.update(state => {
-        state.referenceCount++
-        state.retainedBy[source] = (state.retainedBy[source] ?? 0) + 1
-      })
+      const heldFacets = Object.keys(facets).filter(facet => facets[facet] === true)
+      // DSH 仅在视图引用持有对应 facet 时组装对话，保留后台会话引用不会开启渲染。
+      function shiftRetention(delta) {
+        observer.update(state => {
+          state.referenceCount += delta
+          changeRetainCount(state.retainedBy, source, delta)
+          for (const facet of heldFacets) changeRetainCount(state.retainedFacets, facet, delta)
+        })
+      }
+      shiftRetention(1)
       if (source === 'mainView') catalog.select(thread, initialization !== 'opening')
       let released = false
       function release() {
         if (released) return
         released = true
-        observer.update(state => {
-          state.referenceCount--
-          if (--state.retainedBy[source] === 0) delete state.retainedBy[source]
-        })
+        shiftRetention(-1)
         const info = observer.getSnapshot()
         if (source === 'mainView' && !info.retainedBy.mainView && catalog.store.getSnapshot().selected?.id === id) {
           catalog.select(null)

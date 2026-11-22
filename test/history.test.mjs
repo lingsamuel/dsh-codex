@@ -1071,6 +1071,87 @@ test('会话详情分页读取已加载线程的原生后台终端', async t => 
   assert.equal(messages.some(message => message.method === 'thread/resume'), false)
 })
 
+async function watchBackgroundTerminals(t, get) {
+  const response = await get('/api/codex/watch?scope=catalog&backgroundTerminals=1')
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const decoder = new TextDecoder()
+  async function next(type) {
+    for (;;) {
+      const { value, done } = await reader.read()
+      assert.equal(done, false, `等待 ${type} 时目录流关闭`)
+      const event = decoder.decode(value)
+      if (!event.startsWith('data: ')) continue
+      const frame = JSON.parse(event.slice(6))
+      if (frame.type === type) return frame
+    }
+  }
+  await next('catalog-ready')
+  return { next: () => next('background-terminals'), close: () => reader.cancel() }
+}
+
+test('多个目录连接共用后台进程扫描，进程自然退出后自动更新', { timeout: 4000 }, async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const terminal = { processId: '42', command: 'sleep 60', cwd: '/repo' }
+  let idleRows = [terminal]
+  const { get, messages } = await fakeCodex(t, {
+    'thread/loaded/list': ({ cursor }) => ({ result: cursor
+      ? { data: ['idle'] } : { data: ['quiet'], nextCursor: 'second-page' } }),
+    'thread/backgroundTerminals/list': ({ threadId }) => ({ result: { data: threadId === 'idle' ? idleRows : [] } }),
+  })
+  const [first, second] = await Promise.all([watchBackgroundTerminals(t, get), watchBackgroundTerminals(t, get)])
+  const initial = { type: 'background-terminals', byThread: { idle: [terminal] } }
+  assert.deepEqual(await Promise.all([first.next(), second.next()]), [initial, initial])
+  assert.equal(messages.filter(({ method }) => method === 'thread/loaded/list').length, 2)
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/backgroundTerminals/list')
+    .map(({ params }) => params.threadId).sort(), ['idle', 'quiet'])
+
+  idleRows = []
+  await new Promise(setImmediate)
+  t.mock.timers.tick(10_000)
+  const empty = { type: 'background-terminals', byThread: {} }
+  assert.deepEqual(await Promise.all([first.next(), second.next()]), [empty, empty])
+  assert.equal(messages.filter(({ method }) => method === 'thread/loaded/list').length, 4)
+
+  await Promise.all([first.close(), second.close()])
+  t.mock.timers.tick(20_000)
+  idleRows = [terminal]
+  await new Promise(setImmediate)
+  assert.equal(messages.filter(({ method }) => method === 'thread/loaded/list').length, 4)
+  const reconnected = await watchBackgroundTerminals(t, get)
+  assert.deepEqual(await reconnected.next(), initial)
+  assert.equal(messages.filter(({ method }) => method === 'thread/loaded/list').length, 6)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume' || method === 'thread/read'), false)
+})
+
+test('从网页确认停止一个后台进程后，目录流立即保留其余进程', { timeout: 4000 }, async t => {
+  const target = { processId: '42', command: 'sleep 60', cwd: '/repo' }
+  const kept = { processId: '43', command: 'sleep 90', cwd: '/repo' }
+  let rows = [target, kept]
+  const { get, messages } = await fakeCodex(t, {
+    'thread/loaded/list': () => ({ result: { data: ['thread'] } }),
+    'thread/backgroundTerminals/list': () => ({ result: { data: rows } }),
+    'thread/backgroundTerminals/terminate': params => {
+      assert.deepEqual(params, { threadId: 'thread', processId: target.processId })
+      const terminated = rows.includes(target)
+      rows = [kept]
+      return { result: { terminated } }
+    },
+  })
+  const { next } = await watchBackgroundTerminals(t, get)
+  const stop = () => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'terminate-background-terminal', threadId: 'thread', processId: target.processId }),
+  })
+  assert.deepEqual((await next()).byThread, { thread: [target, kept] })
+  const stopped = await stop()
+  assert.equal(stopped.status, 200)
+  assert.deepEqual(await stopped.json(), { terminated: true })
+  assert.deepEqual((await next()).byThread, { thread: [kept] })
+  assert.deepEqual(await (await stop()).json(), { terminated: false })
+  assert.equal(messages.some(({ method }) => method === 'turn/interrupt' || method === 'thread/resume'), false)
+})
+
 test('已淘汰的分页游标返回上游错误', async t => {
   const { get } = await fakeCodex(t, {
     'thread/turns/list': () => ({ error: { code: -32602, message: 'invalid cursor' } }),

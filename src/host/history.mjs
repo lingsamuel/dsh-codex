@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
+import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage, readThreadSummary } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
@@ -13,6 +13,7 @@ import { createAsyncQuestionActionRoute } from './async-question-actions.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { createThreadSubmissionQueue } from './thread-runtime.mjs'
+import { createBackgroundTerminalMonitor, readBackgroundTerminals } from './background-terminals.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -37,6 +38,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()
+  const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const route = (path, read) => ({
@@ -60,12 +62,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     createProjectActionRoute(socketPath, ownerSignal),
     permissions.catalogRoute,
     permissions.actionRoute,
-    createThreadActionRoute(socketPath, ownerSignal, submit),
+    createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals),
     createConversationActionRoute(socketPath, ownerSignal, submit, permissions),
     questions.route,
     questions.approvalRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
-    createWatchRoute(socketPath, ownerSignal, questions),
+    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => {
@@ -91,9 +93,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
         ])
         const thread = reading?.thread
         const terminals = (!view || view === 'ps') && thread?.status?.type && thread.status.type !== 'notLoaded'
-          ? await readCodexPages(cursor => request('thread/backgroundTerminals/list', {
-            threadId, limit: 50, ...(cursor && { cursor }),
-          })).catch(unavailable)
+          ? await readBackgroundTerminals(request, threadId).catch(unavailable)
           : undefined
         return { model: thread?.model, reasoningEffort: thread?.reasoningEffort, goal: goalResult?.goal ?? null, terminals }
       })
