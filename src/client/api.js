@@ -21,6 +21,10 @@ export function writeThreadAction(parameters, signal) {
 
 /** 发送、继续、停止和队列操作沿用项目已有的同源传输。 */
 export function writeConversationAction(parameters, signal) {
+  if (parameters.action === 'prompt') {
+    return writeWithConfirmation('conversation-action', parameters, signal,
+      '等待发送确认超时。请查看会话和待发队列确认消息是否送达。')
+  }
   return writeAction('conversation-action', parameters, signal)
 }
 
@@ -34,13 +38,17 @@ export function writeAsyncQuestionAnswer(parameters, signal) {
   return writeAnswer('async-question-answer', parameters, signal)
 }
 
-async function writeAnswer(route, parameters, signal) {
+function writeAnswer(route, parameters, signal) {
+  return writeWithConfirmation(route, parameters, signal, '等待答复确认超时。请查看会话和待发队列确认答案是否送达。')
+}
+
+async function writeWithConfirmation(route, parameters, signal, timeoutMessage) {
   const deadline = AbortSignal.timeout(25_000)
   try {
     return await writeAction(route, parameters, signal ? AbortSignal.any([signal, deadline]) : deadline)
   } catch (error) {
     if (error === deadline.reason) {
-      throw new Error('等待答复确认超时。请查看会话和待发队列确认答案是否送达。', { cause: error })
+      throw new Error(timeoutMessage, { cause: error })
     }
     throw error
   }

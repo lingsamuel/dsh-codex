@@ -78,6 +78,13 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
 /** 原生编辑器负责发送手势和草稿。停止后，可在原生队列下方手动继续。 */
 export function installComposer(ctx, catalog) {
   ctx.effect(() => ctx.locale.register(locale, copy))
+  ctx.effect(() => {
+    // 发送时先隐藏文本。把草稿和选区留给原生编辑器，失败时可原样继续编辑。
+    const style = document.createElement('style')
+    style.textContent = '[data-composer-card] [data-composer-input][data-phase="sending"] { opacity: 0; }'
+    document.head.append(style)
+    return () => style.remove()
+  })
   const t = ctx.locale.bind(locale)
   installQueueImages(ctx)
 
