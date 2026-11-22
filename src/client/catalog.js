@@ -48,12 +48,11 @@ export function createHistoryCatalog(signal) {
 
   return {
     store,
-    observe({ method, params }) {
-      if (method !== 'thread/status/changed') return
-      observedStatuses.set(params.threadId, params.status)
+    setStatus(threadId, status) {
+      observedStatuses.set(threadId, status)
       store.update(state => {
-        const thread = state.threads.find(item => item.id === params.threadId)
-        if (thread) thread.status = params.status
+        const thread = state.threads.find(item => item.id === threadId)
+        if (thread) thread.status = status
       })
     },
     select(thread) {

@@ -41,7 +41,7 @@ test('stock window appends native tail changes, prepends older history, and keep
   const currentSource = mockTransport(t)
   const received = []
   let dispose
-  const history = createCodexHistory({ effect(callback) { dispose = callback() } }, { id: 'thread' }, notification => received.push(notification))
+  const history = createCodexHistory({ effect(callback) { dispose = callback() } }, { id: 'thread' }, (...update) => received.push(update))
   const source = currentSource()
   const emit = frame => source.onmessage({ data: JSON.stringify(frame) })
   assert.equal(source.url.searchParams.get('threadId'), 'thread')
@@ -49,6 +49,7 @@ test('stock window appends native tail changes, prepends older history, and keep
   const active = { type: 'active', activeFlags: [] }
   await emit({ type: 'snapshot', page: { data: [turn('new', 'inProgress', [ask])], nextCursor: 'older' }, status: active, mode: 'live' })
   await history.ready
+  assert.deepEqual(received, [['thread', active]])
   const initial = history.events.getSnapshot()
   assert.equal(history.session.getSnapshot().running, true)
   assert.equal(initial.change.kind, 'replace')
@@ -79,7 +80,8 @@ test('stock window appends native tail changes, prepends older history, and keep
 
   const notification = { method: 'thread/status/changed', params: { threadId: 'thread', status: { type: 'active', activeFlags: ['waitingOnApproval'] } } }
   await emit({ type: 'notification', notification })
-  assert.deepEqual(received, [notification])
+  await emit({ type: 'notification', notification: { ...notification, params: { ...notification.params, threadId: 'background' } } })
+  assert.deepEqual(received, [['thread', active], ['thread', notification.params.status], ['background', notification.params.status]])
   assert.deepEqual(history.session.getSnapshot().live.status.activeFlags, ['waitingOnApproval'])
   await source.onerror()
   assert.equal(history.session.getSnapshot().running, false)
@@ -87,6 +89,7 @@ test('stock window appends native tail changes, prepends older history, and keep
 
   await emit({ type: 'snapshot', page: { data: [turn('new', 'completed', [ask, corrected])], nextCursor: 'stale-cursor' }, status: { type: 'idle' }, mode: 'live' })
   const reconnected = history.events.getSnapshot()
+  assert.deepEqual(received.at(-1), ['thread', { type: 'idle' }])
   assert.equal(reconnected.change.kind, 'append')
   assert.strictEqual(reconnected.entries[0], expanded.entries[0])
   assert.equal(reconnected.hasMore, false)

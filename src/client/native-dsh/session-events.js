@@ -12,7 +12,7 @@ function pageBounds(entry) {
 }
 
 /** 给原版聊天渲染器提供由会话引用持有的历史窗口和只读实时状态。 */
-export function createCodexHistory(ctx, thread, observe) {
+export function createCodexHistory(ctx, thread, setStatus) {
   const controller = new AbortController()
   const { signal } = controller
   const state = createSnapshotStore({
@@ -177,6 +177,7 @@ export function createCodexHistory(ctx, thread, observe) {
     }
     publish()
     publishState({ mode, status })
+    if (status) setStatus?.(thread.id, status)
     markReady()
   }
 
@@ -203,8 +204,9 @@ export function createCodexHistory(ctx, thread, observe) {
         publishState()
       } else if (frame.type === 'notification') {
         const { method, params } = frame.notification
-        if (method === 'thread/status/changed' && params.threadId === thread.id) publishState({ status: params.status })
-        observe?.(frame.notification)
+        if (method !== 'thread/status/changed') return
+        if (params.threadId === thread.id) publishState({ status: params.status })
+        setStatus?.(params.threadId, params.status)
       }
     })
   }

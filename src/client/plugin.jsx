@@ -11,7 +11,7 @@ export function apply(ctx) {
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   provideCodexControllers(ctx, catalog)
-  installLiveStatus(ctx)
+  installLiveStatus(ctx, catalog.store)
   ctx.slots.inject('conversation.composer.bar', () => ctx.slots.register(
     { name: 'conversation.composer.bar', priority: -1 },
     HistoryStatus,
