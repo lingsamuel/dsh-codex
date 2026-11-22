@@ -1,4 +1,7 @@
-import { Button, CodeBlock, DiffBlock, DisclosureRow, FileTypeIcon, IconEditOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, CodeBlock, DiffBlock, DisclosureRow, FileTypeIcon,
+  IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconEditOutlineRegular,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import { codexTurnChanges } from '../native-chat/turn-changes.js'
 
@@ -28,6 +31,7 @@ function ChangedFileList({ files, copy, t }) {
   const [showAll, setShowAll] = useState(false)
   const [selectedPath, setSelectedPath] = useState(null)
   const visibleFiles = showAll ? files : files.slice(0, initiallyVisibleFiles)
+  const Chevron = showAll ? IconChevronUpOutlineRegular : IconChevronDownOutlineRegular
 
   function toggleList() {
     // 收起列表时解除被折叠文件的选择，重新展开只显示文件行。
@@ -43,8 +47,12 @@ function ChangedFileList({ files, copy, t }) {
         {selected && <FileDiffs file={file} copy={copy} />}
       </DisclosureRow>
     })}
-    {files.length > initiallyVisibleFiles && <Button size="sm" variant="toolbar" aria-expanded={showAll} onClick={toggleList}>
-      {showAll ? t('collapseFiles') : t('showAllFiles', { count: files.length })}
+    {files.length > initiallyVisibleFiles && <Button size="sm" variant="ghost" aria-expanded={showAll} onClick={toggleList}
+      style={{ justifySelf: 'start', color: 'var(--dsw-alias-label-tertiary)' }}>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.25rem' }}>
+        {showAll ? t('collapseFiles') : t('showAllFiles', { count: files.length })}
+        <Chevron size={14} />
+      </span>
     </Button>}
   </div>
 }
