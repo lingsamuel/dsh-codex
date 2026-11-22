@@ -1,5 +1,28 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { codexTurnChanges } from '../src/client/native-chat/turn-changes.js'
+
+test('轮次改动按原生路径归组，保留同一文件的多次变更并排除拒绝项', () => {
+  function edit(id, status, path, diff) {
+    return { id, type: 'fileChange', status, changes: [{ path, diff, kind: { type: 'update' } }] }
+  }
+  const entries = projectCodexTurns([{ id: 'turn', status: 'completed', items: [
+    edit('one', 'completed', 'a.txt', '@@ -1 +1 @@\n-old\n+middle'),
+    edit('two', 'completed', 'a.txt', '@@ -1 +1 @@\n-middle\n+new'),
+    edit('bad', 'declined', 'b.txt', '@@ -1 +1 @@\n-before\n+after'),
+    edit('raw', 'completed', 'c.txt', 'opaque native patch'),
+  ] }])
+  let state
+  for (const { event } of entries) {
+    const match = codexTurnChanges.match(event)
+    if (match?.role === 'start') state = codexTurnChanges.start({}, { event })
+    if (match?.role === 'update') state = codexTurnChanges.update({ state }, { event })
+  }
+  const { value } = codexTurnChanges.buildLocationData({ state }, 'turn')
+  assert.deepEqual(value.map(file => file.path), ['a.txt', 'c.txt'])
+  assert.deepEqual(value[0].edits.map(change => change.diffs[0].newText), ['middle\n', 'new\n'])
+  assert.equal(value[1].edits[0].raw, 'opaque native patch')
+})
 import { projectCodexTurns } from '../src/client/native-chat/events.js'
 
 function turn(id, items, fields = {}) {

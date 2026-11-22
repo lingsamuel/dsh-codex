@@ -17,17 +17,24 @@ function fileChange(item) {
   const hunks = item.changes.map(toDiffHunks)
   const [first] = hunks[0] ?? []
   const isError = item.status === 'failed' || item.status === 'declined'
+  const meta = {
+    codexStatus: item.status,
+    // 回合总览和工具行共享同一批解析结果，同时保留无法解析的原生补丁。
+    codexFileChanges: item.changes.map(({ path, diff }, index) => ({
+      path, diffs: hunks[index] ?? [], raw: hunks[index] ? undefined : diff,
+    })),
+  }
   // 原版 edit 工具行会在同一条结果中显示多文件差异。无法解析时保留原始补丁。
   if (first && hunks.every(Boolean)) {
     return {
       name: 'edit',
       args: { file_path: first.path, old_string: first.oldText ?? '', new_string: first.newText },
       output,
-      meta: { diffs: hunks.flat(), codexStatus: item.status },
+      meta: { ...meta, diffs: hunks.flat() },
       isError,
     }
   }
-  return { name: item.type, args: { paths: item.changes.map(change => change.path) }, output, isError }
+  return { name: item.type, args: { paths: item.changes.map(change => change.path) }, output, meta, isError }
 }
 
 /** 将原生命令、文件变更和工具输出交给 DSH 已注册的工具行。 */
