@@ -1,5 +1,6 @@
 import { inlineAttachmentId } from './attachments.js'
 import { projectTool } from './tools.js'
+import { projectFileLinks } from './file-links.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
 const newestHistoryBoundary = 2 ** 32
@@ -23,7 +24,7 @@ function assistantBlock(item) {
     ? item.summary?.join('\n\n')
     : item.text
   if (!text?.trim()) return undefined
-  return { type: item.type === 'reasoning' ? 'reasoning' : 'text', text }
+  return item.type === 'reasoning' ? { type: 'reasoning', text } : textBlock(projectFileLinks(text))
 }
 
 function turnEndReason({ status, error }) {

@@ -58,6 +58,12 @@
       name: '@deepseek-ai/dsh-client-resources'
     - id: ui-sidebar-right
       name: '@deepseek-ai/dsh-client-ui-sidebar-right'
+    - id: filesystem
+      name: '@deepseek-ai/dsh-fs-local'
+    - id: workspace-files
+      name: '@deepseek-ai/dsh-api-workspace-files'
+    - id: ui-sidebar-documentpreview
+      name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
     - id: ui-conversation
       name: '@deepseek-ai/dsh-client-ui-conversation'
     - id: ui-chat

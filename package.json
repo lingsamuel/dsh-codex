@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "diff": "^9.0.0",
+    "micromark": "^4.0.3",
     "ws": "^8.18.3"
   },
   "devDependencies": {
