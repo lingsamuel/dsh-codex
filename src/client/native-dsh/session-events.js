@@ -67,6 +67,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const inbox = createSnapshotStore({ 'next-turn': [], 'next-step': [] })
   const codexQuestions = createSnapshotStore([])
   const codexApprovals = createSnapshotStore([])
+  const codexMcpRequests = createSnapshotStore([])
   const permissions = createSnapshotStore({ permission: thread.webPermission })
   let lastSavedPermission
   let receivedSavedPermission = false
@@ -76,7 +77,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
   const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
-    ['codexApprovals', codexApprovals], ['permissions', permissions]])
+    ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -403,6 +404,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         return publishQuestions()
       }
       if (frame.type === 'approvals' && watchingInteractions) return codexApprovals.set(frame.requests)
+      if (frame.type === 'mcp-requests' && watchingInteractions) return codexMcpRequests.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime)
       if (frame.type === 'reading-receipt') {
@@ -475,6 +477,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (mode === 'disconnected') {
         liveQuestions = []
         codexApprovals.set([])
+        codexMcpRequests.set([])
       }
       publishState({ mode })
       if (mode !== 'disconnected' || opened || triedFallback) return
@@ -598,6 +601,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (!selected) {
       liveQuestions = []
       codexApprovals.set([])
+      codexMcpRequests.set([])
     }
     if (!nextWatch) {
       publishState({ mode: 'disconnected' })

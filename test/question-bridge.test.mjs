@@ -186,6 +186,75 @@ test('审批复用一次原生订阅，按请求可用的范围回复并随 CLI 
   assert.deepEqual(latest.find(entry => entry.requestId === 'patch').changes, fileChanges)
 })
 
+test('MCP 表单、外部授权与不支持的请求保留原生身份并随 CLI 答复关闭', { timeout: 5_000 }, async t => {
+  const status = { type: 'active', activeFlags: ['waitingOnApproval'] }
+  const elicitation = (id, mode, body) => ({ id, method: 'mcpServer/elicitation/request',
+    params: { threadId, turnId: null, serverName: 'fixture', message: 'Enter values', mode, ...body },
+  })
+  const requestedSchema = {
+    type: 'object', required: ['count', 'channel', 'labels', 'checked'], properties: {
+      count: { type: 'integer', minimum: 1 }, channel: { type: 'string', oneOf: [{ const: 'web', title: 'Web' }] },
+      labels: { type: 'array', items: { enum: ['one', 'two'], type: 'string' }, minItems: 1 },
+      checked: { type: 'boolean', default: false }, email: { type: 'string', format: 'email' },
+    },
+  }
+  const native = await nativeQuestions(t, { status, approvals: [elicitation(17, 'form', { requestedSchema }),
+    elicitation('url', 'url', { url: 'https://example.invalid/request', elicitationId: 'server-form' }),
+    elicitation('unsupported', 'form', { requestedSchema: { type: 'object', properties: { nested: { type: 'object' } } } }),
+  ] })
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const bridge = createQuestionBridge(native.socketPath, lifetime.signal)
+  assert.ok(bridge.mcpRoute, '需要明确的原生 MCP 回应路由')
+  const { promise: ready, resolve: collected } = Promise.withResolvers()
+  const { promise: resolved, resolve: removed } = Promise.withResolvers()
+  let pending = []
+  const observer = bridge.observe(threadId, frame => {
+    if (frame.type !== 'mcp-requests') return
+    if (pending.some(entry => entry.requestId === 'url') && !frame.requests.some(entry => entry.requestId === 'url')) removed()
+    pending = frame.requests
+    if (pending.length === 3) collected()
+  }, lifetime.signal)
+  observer.update(status)
+  await ready
+  const [client] = native.sockets.clients
+  const post = (requestId, action, content, key = pending.find(entry => entry.requestId === requestId)?.key) =>
+    bridge.mcpRoute.fetch(new Request('http://local/api/codex/mcp-elicitation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId, requestId, action, content, key }),
+    }))
+  assert.equal(pending[1].url, 'https://example.invalid/request')
+  assert.match(pending[2].error, /不支持/)
+  const content = { count: 3, channel: 'web', labels: ['one'], checked: false }
+  assert.equal((await post(17, 'accept', { ...content, count: '3' })).status, 400)
+  assert.equal((await post(17, 'accept', { ...content, email: 'invalid' })).status, 400)
+  assert.equal((await post(17, 'accept', { ...content, extra: 0 })).status, 400)
+  assert.equal((await post(17, 'accept', content, 'stale')).status, 409)
+  assert.equal((await post('url', 'accept', content)).status, 400)
+  assert.equal((await post('unsupported', 'accept', {})).status, 400)
+  assert.equal((await post(17, 'accept', content)).status, 200)
+  assert.deepEqual(await native.response, { id: 17, result: { action: 'accept', content } })
+  native.resolved(client, 'url')
+  await resolved
+  assert.equal((await post('url', 'accept')).status, 409)
+  const { promise: urlReady, resolve: urlSent } = Promise.withResolvers()
+  const urlWatcher = bridge.observe(threadId, frame => {
+    if (frame.type === 'mcp-requests' && frame.requests.some(entry => entry.requestId === 'url-web')) urlSent()
+  }, lifetime.signal)
+  urlWatcher.update(status)
+  client.send(JSON.stringify(elicitation('url-web', 'url', { url: 'https://example.invalid/next', elicitationId: 'form-next' })))
+  await urlReady
+  const urlReply = once(client, 'message')
+  assert.equal((await post('url-web', 'accept')).status, 200)
+  await urlReply
+  const nativeReply = once(client, 'message')
+  assert.equal((await post('unsupported', 'decline')).status, 200)
+  await nativeReply
+  assert.deepEqual(native.answers, [{ id: 17, result: { action: 'accept', content } },
+    { id: 'url-web', result: { action: 'accept' } },
+    { id: 'unsupported', result: { action: 'decline' } }])
+})
+
 
 test('文件审批等待完整的原生变更后才允许批准，等待期间仍能取消', { timeout: 5_000 }, async t => {
   const { promise: fileDetails, resolve: finishFileRead } = Promise.withResolvers()
