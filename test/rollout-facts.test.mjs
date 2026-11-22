@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
+import { setImmediate } from 'node:timers/promises'
 import { createRolloutFacts } from '../src/host/rollout-facts.mjs'
 
 test('只投影已确认的结构化计划，跟随追加并回放 Codex 回退', async t => {
@@ -46,4 +47,30 @@ test('上下文表采用原生上次上下文总量和窗口容量', async t => 
   assert.equal(await reader.read(), null)
   await appendFile(path, frame({ last_token_usage: { total_tokens: 5000 }, model_context_window: 20000 }))
   assert.deepEqual((await reader.read()).contextPressure, { pressureTokens: 5000, contextWindow: 20000 })
+})
+
+test('读取文件状态期间取消 rollout 扫描会安全结束', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'facts-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  await writeFile(path, JSON.stringify({ type: 'event_msg', payload: {
+    type: 'plan_update', plan: [{ step: '正在运行', status: 'in_progress' }],
+  } }) + '\n')
+
+  const abort = new AbortController()
+  const file = await open(path, 'r')
+  const prototype = Object.getPrototypeOf(file)
+  const { stat } = prototype
+  await file.close()
+  t.mock.method(prototype, 'stat', async function (...args) {
+    const info = await stat.apply(this, args)
+    abort.abort()
+    return info
+  })
+
+  const reader = createRolloutFacts(path, abort.signal)
+  assert.equal(await reader.read(), null)
+  // 等待读流可能延后触发的 error 事件，由测试运行器捕获未处理异常。
+  await setImmediate()
 })

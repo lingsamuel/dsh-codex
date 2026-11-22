@@ -106,6 +106,8 @@ export function createRolloutFacts(path, signal, threadId) {
     const file = await open(path, 'r')
     try {
       const { size, dev, ino } = await file.stat()
+      // 连接可能在等待文件状态时关闭。用已取消的信号创建读流会提前触发流错误。
+      signal.throwIfAborted()
       const current = `${dev}:${ino}`
       if (identity !== current || size < offset) {
         identity = current

@@ -24,7 +24,7 @@ DSH 的会话搜索调用 Codex `thread/search`，在内存清单补上此前未
 
 原生 DSH 命令菜单按需执行 `/status`、`/goal`、`/ps` 和 `/rename`。状态读取 `thread/read`，目标读取 `thread/goal/get` 并消费实时通知，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
 
-DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近上下文 token 总量与模型窗口容量，在原生输入栏和 `/status` 中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。
+DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近上下文 token 总量与模型窗口容量，在原生输入栏和 `/status` 中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。实时连接关闭时取消该连接的扫描，读取文件状态后再次检查取消信号，再开始读取内容。
 
 浏览器投影把 Codex 的本地 URI 和行号转换为 DSH 支持的写法，复制操作沿用 DSH 显示的链接目标。右侧预览复用 DSH Workspace Files 的读取、分页和渲染，文件作用域只从 Codex 线程读取工作目录。文件读取服务不需要创建 DSH 会话或会话存储。
 
