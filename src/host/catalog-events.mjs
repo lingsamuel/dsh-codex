@@ -1,5 +1,5 @@
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
-import { readProjects, withBlankDraft } from './catalog.mjs'
+import { readProjectSnapshot, withBlankDraft } from './catalog.mjs'
 import { CodexRpcError } from './app-server.mjs'
 
 async function summarize({ thread, readState }) {
@@ -35,13 +35,8 @@ export async function readCatalogEvent(notification, request) {
       if (method === 'thread/archived') details.thread = { ...details.thread, archived: true }
       return { type: 'thread', id: details.thread.id, ...details }
     }
-    case 'project/changed': {
+    case 'project/changed':
       // 移动项目与更新项目发相同事件。只读项目排序，保留线程列表和当前聊天。
-      const projects = await readProjects(request)
-      return {
-        type: 'projects', projects,
-        workspacePaths: await resolveWorkspacePaths(projects.flatMap(project => project.roots.map(root => root.path))),
-      }
-    }
+      return { type: 'projects', ...await readProjectSnapshot(request) }
   }
 }

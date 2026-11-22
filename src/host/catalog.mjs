@@ -25,6 +25,12 @@ export function readProjects(request) {
   return collectPages(params => readProjectPage(request, params))
 }
 
+/** 目录快照用于项目变更推送和操作回读，保持原生项目顺序。 */
+export async function readProjectSnapshot(request) {
+  const projects = await readProjects(request)
+  return { projects, workspacePaths: await resolveWorkspacePaths(projects.flatMap(project => project.roots.map(root => root.path))) }
+}
+
 export async function readThreads(request, filters) {
   return collectPages(async params => {
     const page = await request('thread/list', {

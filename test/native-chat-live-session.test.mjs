@@ -14,12 +14,17 @@ const storeModule = `data:text/javascript,${encodeURIComponent(`
 const hook = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
+    if (specifier === '@deepseek-ai/dsh-client-ui-primitives' || specifier === 'react') {
+      const url = 'data:text/javascript,export const Toast = null; export const createElement = () => null'
+      return { shortCircuit: true, url }
+    }
     return next(specifier, context)
   },
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
 const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
+const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
 
@@ -43,6 +48,38 @@ function turn(id, status, items) {
 
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
+
+test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原生权限', async t => {
+  mockTransport(t)
+  const owner = new AbortController()
+  const catalog = createSnapshotStore({ selected: { id: 'thread' } })
+  const generation = createSnapshotStore(0)
+  const cached = { profileId: ':read-only', source: 'saved' }
+  const native = { profileId: ':workspace', source: 'saved' }
+  const projection = createSnapshotStore({ permission: native })
+  const session = { projections: { faceOf: () => projection }, publishPermission: permission => projection.set({ permission }) }
+  const remote = {}
+  const cleanups = []
+  const ctx = {
+    locale: { bind: () => key => key, register: () => () => {} },
+    slots: { entries: () => [], inject() {} },
+    on: () => () => {},
+    effect(callback) { cleanups.push(callback()) },
+    inject(keys, callback) {
+      if (!keys.includes('remote.permissionPresets')) return
+      callback({ ...this, connection: { generation }, get: () => remote, sessions: { binding: () => ({ session }) } })
+    },
+  }
+  globalThis.fetch = async () => Response.json({ profiles: [], permission: cached })
+  t.after(() => { owner.abort(); for (const stop of cleanups.reverse()) stop?.() })
+  installPermissions(ctx, catalog, owner.signal)
+  await new Promise(setImmediate)
+  assert.deepEqual(projection.getSnapshot().permission, native)
+  projection.set({ permission: undefined })
+  generation.set(1)
+  await new Promise(setImmediate)
+  assert.deepEqual(projection.getSnapshot().permission, cached)
+})
 
 test('网页分叉、CLI 增量和重连补齐共用手动顺序', async t => {
   const currentSource = mockTransport(t)
@@ -169,6 +206,35 @@ test('实时问题使用原生请求身份，原生确认完成后清理当前�
   assert.deepEqual(pending.getSnapshot(), [request])
   await emit([])
   assert.deepEqual(pending.getSnapshot(), [])
+})
+
+test('快速切走再返回会话时，已排入队列的旧审批不会出现在新连接', async t => {
+  const source = mockTransport(t)
+  const thread = { id: 'thread' }
+  const catalog = { store: createSnapshotStore({ selected: thread }) }
+  const disposers = []
+  t.after(() => disposers.reverse().forEach(dispose => dispose()))
+  const history = createCodexHistory({ effect(install) { disposers.push(install()) } }, thread, catalog)
+  await Promise.resolve()
+  const approvals = history.session.projections.faceOf('codexApprovals')
+  const first = source()
+  const emit = (from, key) => from.onmessage({ data: JSON.stringify({ type: 'approvals', requests: [{ key }] }) })
+  assert.equal(first.url.searchParams.get('questions'), '1')
+  await emit(first, 'shown')
+  assert.deepEqual(approvals.getSnapshot(), [{ key: 'shown' }])
+
+  const stale = emit(first, 'stale')
+  catalog.store.set({ selected: { id: 'different' } })
+  const passive = source()
+  assert.equal(first.closed, true)
+  assert.equal(passive.url.searchParams.has('questions'), false)
+  catalog.store.set({ selected: thread })
+  assert.equal(passive.closed, true)
+  await stale
+  assert.deepEqual(approvals.getSnapshot(), [])
+
+  await emit(source(), 'current')
+  assert.deepEqual(approvals.getSnapshot(), [{ key: 'current' }])
 })
 
 test('异步问答随当前轮次的原生条目弹出，即使没有等待状态或后面还有回复', async t => {

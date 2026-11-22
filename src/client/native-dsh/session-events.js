@@ -9,6 +9,7 @@ import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
+import { permissionOf } from '../../shared/permissions.js'
 import { userInputText } from '../../shared/user-input.js'
 import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
@@ -61,10 +62,15 @@ export function createCodexHistory(ctx, thread, catalog) {
   const queueStore = createSnapshotStore([])
   const inbox = createSnapshotStore({ 'next-turn': [], 'next-step': [] })
   const codexQuestions = createSnapshotStore([])
+  const codexApprovals = createSnapshotStore([])
+  const permissions = createSnapshotStore({ permission: thread.webPermission })
+  let lastSavedPermission
+  let receivedSavedPermission = false
   const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
   const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
-    ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions]])
+    ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
+    ['codexApprovals', codexApprovals], ['permissions', permissions]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -74,6 +80,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   let triedFallback = false
   let outlineRevision = 0
   let liveQuestions = []
+  let watchingInteractions
   let markReady
   const ready = new Promise(resolve => { markReady = resolve })
   ctx.effect(() => () => {
@@ -139,6 +146,12 @@ export function createCodexHistory(ctx, thread, catalog) {
     modelSelection.set({ lastUsed: null, next: selection })
   }
 
+  function publishPermission(permission) {
+    if (permission && JSON.stringify(permissions.getSnapshot().permission) !== JSON.stringify(permission)) {
+      permissions.set({ permission })
+    }
+  }
+
   async function collectAttachments(turns) {
     const loaded = await readInlineCodexAttachments(turns, signal)
     signal.throwIfAborted()
@@ -197,9 +210,9 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
-  async function loadPage(cursor) {
-    const page = await readPage('turns', { threadId: thread.id, ...(cursor ? { cursor } : {}) }, signal)
-    signal.throwIfAborted()
+  async function loadPage(cursor, lifetime = signal) {
+    const page = await readPage('turns', { threadId: thread.id, ...(cursor ? { cursor } : {}) }, lifetime)
+    lifetime.throwIfAborted()
     return page
   }
 
@@ -289,8 +302,10 @@ export function createCodexHistory(ctx, thread, catalog) {
     markReady()
   }
 
-  function enqueue(operation) {
-    queue = queue.then(() => { if (!signal.aborted) return operation() }).catch(fail)
+  function enqueue(operation, lifetime = signal) {
+    queue = queue.then(() => { if (!lifetime.aborted) return operation() }).catch(error => {
+      if (!lifetime.aborted) fail(error)
+    })
     return queue
   }
 
@@ -309,19 +324,20 @@ export function createCodexHistory(ctx, thread, catalog) {
     catalog?.acceptThread({ ...summary, ...(state.getSnapshot().archived && { archived: true }) })
   }
 
-  function receive(frame) {
+  function receive(frame, lifetime) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
-      if (frame.type === 'questions') {
+      if (frame.type === 'questions' && watchingInteractions) {
         liveQuestions = frame.requests
         return publishQuestions()
       }
+      if (frame.type === 'approvals' && watchingInteractions) return codexApprovals.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'queue') {
         const { submissions } = frame
-        const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, signal, queueImages)))
-        signal.throwIfAborted()
+        const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, lifetime, queueImages)))
+        lifetime.throwIfAborted()
         // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
         queueImages = new Map(images.flat().filter(Boolean))
         inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
@@ -338,6 +354,18 @@ export function createCodexHistory(ctx, thread, catalog) {
       if (frame.type === 'rollout-facts') {
         todos.set(frame.todos)
         contextPressure.set(frame.contextPressure)
+        const recorded = frame.permission
+        if (recorded) {
+          const saved = JSON.stringify(recorded)
+          const { permission: current } = permissions.getSnapshot()
+          // 初次历史扫描可晚于本次切换；之后仅在最新落盘设置改变时更新。
+          if (saved !== lastSavedPermission && (current?.source !== 'runtime' || (receivedSavedPermission
+            && (current.profileId !== recorded.profileId
+              || (recorded.approvalPolicy && current.approvalPolicy !== recorded.approvalPolicy)
+              || (recorded.approvalsReviewer && current.approvalsReviewer !== recorded.approvalsReviewer))))) publishPermission(recorded)
+          lastSavedPermission = saved
+          receivedSavedPermission = true
+        }
         return
       }
       if (frame.type === 'change') {
@@ -357,6 +385,7 @@ export function createCodexHistory(ctx, thread, catalog) {
         } else if (method === 'thread/settings/updated') {
           const { effort, ...settings } = params.threadSettings
           publishModel(modelSelectionOf({ ...settings, reasoningEffort: effort }))
+          publishPermission(permissionOf(settings))
         } else if (method === 'thread/archived' || method === 'thread/unarchived') {
           publishState({ archived: method === 'thread/archived' })
         } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
@@ -366,17 +395,25 @@ export function createCodexHistory(ctx, thread, catalog) {
           })
         }
       }
-    })
+    }, lifetime)
   }
 
-  function changeMode(mode) {
+  function changeMode(mode, lifetime) {
     return enqueue(async () => {
-      if (mode === 'disconnected') liveQuestions = []
+      if (mode === 'disconnected') {
+        liveQuestions = []
+        codexApprovals.set([])
+      }
       publishState({ mode })
       if (mode !== 'disconnected' || opened || triedFallback) return
       triedFallback = true
-      await receiveSnapshot({ page: await loadPage(), mode: 'history' })
-    })
+      try {
+        const page = await loadPage(undefined, lifetime)
+        await receiveSnapshot({ page, mode: 'history' })
+      } finally {
+        if (lifetime.aborted) triedFallback = false
+      }
+    }, lifetime)
   }
 
   function loadOlder() {
@@ -465,7 +502,34 @@ export function createCodexHistory(ctx, thread, catalog) {
       hasAttachments: message.content.some(part => part.type !== 'text') }
   }
 
-  openLiveWatch(thread.id, { receive, changeMode, queue: true, questions: !thread.archived }, signal)
+  const visibleCatalog = catalog?.store
+  let watch
+  function syncWatch() {
+    if (signal.aborted) return
+    const selected = !visibleCatalog || visibleCatalog.getSnapshot().selected?.id === thread.id
+    if (selected === watchingInteractions) return
+    watchingInteractions = selected
+    watch?.abort()
+    watch = new AbortController()
+    if (!selected) {
+      liveQuestions = []
+      codexApprovals.set([])
+      publishQuestions()
+    }
+    // 队列可能还在等上一帧的异步读取。让已排队的帧携带自己的连接寿命，防止切回时显示旧审批。
+    const lifetime = AbortSignal.any([signal, watch.signal])
+    openLiveWatch(thread.id, {
+      receive: frame => receive(frame, lifetime), changeMode: mode => changeMode(mode, lifetime),
+      queue: true, questions: selected,
+    }, lifetime)
+  }
+  if (visibleCatalog) {
+    ctx.effect(() => {
+      const unsubscribe = visibleCatalog.subscribe(syncWatch)
+      queueMicrotask(syncWatch)
+      return () => { unsubscribe(); watch?.abort() }
+    })
+  } else syncWatch()
   return {
     events,
     ready,
@@ -483,6 +547,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       latestTurnId,
       editableInput,
       publishModel,
+      publishPermission,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       queuedImageUrl: id => queueImages.get(id)?.url,
       async readAttachment({ attachmentId }) {

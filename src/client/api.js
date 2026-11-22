@@ -19,6 +19,10 @@ export function writeThreadAction(parameters, signal) {
   return writeAction('thread-action', parameters, signal)
 }
 
+export function writeProjectAction(parameters, signal) {
+  return writeAction('project-action', parameters, signal)
+}
+
 /** 发送、继续、停止和队列操作沿用项目已有的同源传输。 */
 export function writeConversationAction(parameters, signal) {
   if (parameters.action === 'prompt') {
@@ -31,6 +35,14 @@ export function writeConversationAction(parameters, signal) {
 /** 使用正在等待的原生请求标识提交答案。 */
 export function writeQuestionAnswer(parameters, signal) {
   return writeAnswer('question-answer', parameters, signal)
+}
+
+export function writeApprovalDecision(parameters, signal) {
+  return writeAction('approval-decision', parameters, signal)
+}
+
+export function writePermissionAction(parameters, signal) {
+  return writeAction('permission-action', parameters, signal)
 }
 
 /** 异步答复优先通过 Codex 原生输入送进提问所在的轮次。 */

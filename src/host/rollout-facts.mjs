@@ -1,6 +1,7 @@
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { permissionOf } from '../shared/permissions.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
 
@@ -10,7 +11,7 @@ function normalizePlan(value) {
 }
 
 /** 仅消费 Codex 原生 rollout 中已落盘的结构化事实。后续读取从上次字节位置继续。 */
-export function createRolloutFacts(path, signal) {
+export function createRolloutFacts(path, signal, threadId) {
   if (!path || !isAbsolute(path)) return undefined
   const pendingPlans = new Map()
   let turns = []
@@ -20,6 +21,10 @@ export function createRolloutFacts(path, signal) {
   let identity
   let generation = 0
   let settingsChanges = 0
+  let ownedPermission
+  let legacyPermission
+  let followsOwner = false
+  let permissionSequence = 0
   let previous = '{}'
   let queue = Promise.resolve()
 
@@ -29,10 +34,15 @@ export function createRolloutFacts(path, signal) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
+    if (record.type === 'turn_context') {
+      const permission = permissionOf(value, 'saved')
+      if (permission) currentTurn().permission = { sequence: ++permissionSequence, permission }
+      return
+    }
     if (record.type === 'event_msg') {
       if (value?.type === 'task_started' || value?.type === 'turn_started') {
         turns.push({})
@@ -52,6 +62,12 @@ export function createRolloutFacts(path, signal) {
         }
       } else if (value?.type === 'thread_settings_applied') {
         settingsChanges++
+        if (value.thread_id) followsOwner = value.thread_id === threadId
+        const permission = permissionOf(value.thread_settings, 'saved')
+        if (!permission) return
+        // 已开始的旧轮次可以晚写上下文。同一线程的完整设置检查点才是随后权限的依据。
+        if (followsOwner) ownedPermission = permission
+        if (!value.thread_id) legacyPermission = { sequence: ++permissionSequence, permission }
       }
       return
     }
@@ -78,6 +94,9 @@ export function createRolloutFacts(path, signal) {
         identity = current
         generation++
         settingsChanges = 0
+        ownedPermission = legacyPermission = undefined
+        followsOwner = false
+        permissionSequence = 0
         turns = []
         pendingPlans.clear()
         offset = 0
@@ -92,10 +111,15 @@ export function createRolloutFacts(path, signal) {
           for (const text of lines) consume(text)
         }
       }
+      const turnPermission = turns.findLast(turn => turn.permission)?.permission
+      const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
+        ? turnPermission : legacyPermission
+      const permission = ownedPermission ?? latestPermission?.permission
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
         settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
+        ...(permission && { permission }),
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

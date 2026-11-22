@@ -166,6 +166,11 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
               return
             }
             send({ type: 'notification', notification: message })
+            if (message.method === 'thread/archived' || message.method === 'thread/unarchived') {
+              // 原生归档会移动 rollout。浏览器重连后按新路径观察，不沿用旧文件和历史游标。
+              connection.close()
+              return
+            }
             if (!goal && !settings) wake()
           }
 
@@ -206,7 +211,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
                 configRead,
               ])
               const { thread } = reading
-              rolloutFacts = createRolloutFacts(thread.path, signal)
+              rolloutFacts = createRolloutFacts(thread.path, signal, threadId)
               const watching = watchNativeHistory({
                 thread,
                 sqliteHome: sqliteDirectory(config),

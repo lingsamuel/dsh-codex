@@ -1,5 +1,9 @@
 import { directoryTitle } from './api.js'
 
+export function workspaceProjectId(workspaceId) {
+  return workspaceId?.startsWith('project:') ? workspaceId.slice('project:'.length) : undefined
+}
+
 export function threadTitle(thread) {
   return thread.name || thread.preview || thread.id
 }

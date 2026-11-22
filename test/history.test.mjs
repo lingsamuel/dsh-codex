@@ -55,6 +55,41 @@ async function fakeCodex(t, methods) {
   }
 }
 
+test('工作区改名、排序和删除返回 Codex 原生项目列表', async t => {
+  const alpha = { id: 'alpha', name: 'Alpha', roots: [] }
+  const beta = { id: 'beta', name: 'Beta', roots: [] }
+  let projects = [alpha, beta]
+  const { get, messages } = await fakeCodex(t, {
+    'project/update': ({ name }) => {
+      alpha.name = name
+      return { result: { project: alpha } }
+    },
+    'project/move': () => {
+      projects = [beta, alpha]
+      return { result: {} }
+    },
+    'project/delete': () => {
+      projects = [beta]
+      return { result: {} }
+    },
+    'project/list': () => ({ result: { data: projects, nextCursor: null } }),
+  })
+  const post = body => get('/api/codex/project-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  assert.deepEqual((await (await post({ action: 'rename', projectId: 'alpha', name: 'Renamed' })).json()).projects,
+    [{ ...alpha, name: 'Renamed' }, beta])
+  assert.deepEqual((await (await post({ action: 'move', projectId: 'beta', beforeProjectId: 'alpha' })).json()).projects,
+    [beta, alpha])
+  assert.deepEqual((await (await post({ action: 'delete', projectId: 'alpha' })).json()).projects, [beta])
+  assert.deepEqual(messages.filter(({ method }) => ['project/update', 'project/move', 'project/delete'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['project/update', { projectId: 'alpha', name: 'Renamed' }],
+    ['project/move', { projectId: 'beta', beforeProjectId: 'alpha' }],
+    ['project/delete', { projectId: 'alpha' }],
+  ])
+})
+
 test('普通发送按需恢复原生会话，恢复失败时保留消息未入队', async t => {
   const thread = { id: 'native-thread', cwd: '/mock', status: { type: 'notLoaded' } }
   const input = [{ type: 'text', text: '请继续', text_elements: [] }]
@@ -103,6 +138,76 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
     ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' }],
     ['turn/interrupt', { threadId: thread.id, turnId: 'active-turn' }],
   ])
+})
+
+test('发送归档会话先按原生目录确认，再取消归档并恢复同一个线程', async t => {
+  const thread = { id: 'archived-thread', status: { type: 'notLoaded' } }
+  let archived = true
+  let canResume = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': ({ archived: onlyArchived, includedThreadIds }) => ({ result: {
+      data: archived && onlyArchived && includedThreadIds.includes(thread.id) ? [thread] : [], nextCursor: null,
+    } }),
+    'thread/unarchive': () => {
+      archived = false
+      return { result: { thread } }
+    },
+    'thread/resume': () => {
+      assert.equal(archived, false)
+      if (!canResume) return { error: { code: -32600, message: 'fixture runtime unavailable' } }
+      thread.status = { type: 'active' }
+      return { result: { thread } }
+    },
+    'thread/queue/add': () => ({ result: { accepted: true } }),
+  })
+  const send = () => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'prompt', threadId: thread.id, input: [{ type: 'text', text: '继续原会话' }],
+      clientUserMessageId: 'draft', mode: 'queue', unarchive: true,
+    }),
+  })
+  const failed = await send()
+  assert.match((await failed.json()).error, /恢复会话.*fixture runtime unavailable/)
+  assert.equal(archived, false)
+  assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
+  canResume = true
+  assert.equal((await send()).status, 200)
+  assert.deepEqual(messages.map(({ method }) => method).filter(method => method.startsWith('thread/') && method !== 'thread/read'),
+    ['thread/list', 'thread/unarchive', 'thread/resume', 'thread/list', 'thread/resume', 'thread/queue/add'])
+  assert.deepEqual(messages.find(({ method }) => method === 'thread/list').params,
+    { archived: true, includedThreadIds: [thread.id], modelProviders: [], limit: 1 })
+})
+
+test('继续归档会话的队列先取消归档，再确认目标消息', async t => {
+  const thread = { id: 'archived-queue', status: { type: 'notLoaded' } }
+  const target = { id: 'first', clientUserMessageId: 'browser' }
+  let archived = true
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: archived ? [thread] : [], nextCursor: null } }),
+    'thread/unarchive': () => {
+      archived = false
+      return { result: { thread } }
+    },
+    'thread/queue/list': () => archived ? { error: { code: -32600, message: 'session is archived' } }
+      : { result: { data: [target], nextCursor: null } },
+    'thread/resume': () => {
+      thread.status = { type: 'active' }
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'thread/queue/start': () => ({ result: { started: true } }),
+  })
+  const response = await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'queue', operation: 'start', threadId: thread.id, unarchive: true,
+    }),
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(messages.filter(({ method }) => ['thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/start'].includes(method))
+    .map(({ method }) => method), ['thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/start'])
+  assert.equal(messages.find(({ method }) => method === 'thread/queue/start').params.queuedSubmissionId, target.id)
 })
 
 test('网页图片可单独入队、随文本插话并在队列编辑时保留', async t => {
@@ -865,6 +970,21 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
   assert.deepEqual(fixture.messages.map(message => message.method).sort(),
     ['initialize', 'initialized', 'config/read'].sort())
   await reader.cancel()
+})
+
+test('取消归档通知后重连历史流以读取移动后的原生记录', { timeout: 2000 }, async t => {
+  const threadId = 'moving-rollout'
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, historyMode: 'paginated' } } }),
+    'thread/turns/list': () => ({ result: { data: [], nextCursor: null } }),
+  })
+  const reader = (await fixture.get(`/api/codex/watch?threadId=${threadId}`)).body.getReader()
+  t.after(() => reader.cancel())
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal((await read()).type, 'snapshot')
+  fixture.broadcast({ method: 'thread/unarchived', params: { threadId } })
+  assert.equal((await read()).notification.method, 'thread/unarchived')
+  assert.equal((await reader.read()).done, true)
 })
 
 test('回退通知在同一 SSE 连接替换历史尾部和游标', { timeout: 5000 }, async t => {

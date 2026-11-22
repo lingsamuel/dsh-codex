@@ -1,6 +1,9 @@
+import { randomUUID } from 'node:crypto'
 import { openCodexReader } from './app-server.mjs'
+import { approvalResponse, hydrateFileApproval, projectApprovalRequest } from './approval-requests.mjs'
 
-const isWaiting = status => status?.type === 'active' && status.activeFlags?.includes('waitingOnUserInput')
+const isWaiting = status => status?.type === 'active'
+  && status.activeFlags?.some(flag => flag === 'waitingOnUserInput' || flag === 'waitingOnApproval')
 const isRequestId = value => (typeof value === 'string' && value.length > 0) || Number.isSafeInteger(value)
 const isObject = value => value && typeof value === 'object' && !Array.isArray(value)
 
@@ -17,24 +20,24 @@ function requestAnswers(questions, answers) {
   return Object.fromEntries(entries.map(([id, { answers }]) => [id, { answers }]))
 }
 
-/** 为正在查看且等待回答的线程建立短期订阅，从原生请求重放取得题目并转交答复。 */
+/** 为正在查看且等待用户操作的线程建立一次短期订阅，转交原生问答和审批。 */
 export function createQuestionBridge(socketPath, ownerSignal) {
   const watched = new Map()
 
-  function frame(state) {
-    return { type: 'questions', requests: [...state.requests.values()] }
+  function frame(state, type) {
+    return { type, requests: [...state.requests.values()].filter(entry => entry.type === type).map(entry => entry.request) }
   }
 
-  function publish(state) {
-    const current = frame(state)
+  function publish(state, type) {
+    const current = frame(state, type)
     for (const listener of state.listeners) listener(current)
   }
 
   function clearRequests(state) {
-    if (!state.requests.size) return
+    const types = new Set([...state.requests.values()].map(entry => entry.type))
     state.requests.clear()
     state.submitting.clear()
-    publish(state)
+    for (const type of types) publish(state, type)
   }
 
   function release(state) {
@@ -44,23 +47,51 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     clearRequests(state)
   }
 
+  function publishRequest(state, id, type, request) {
+    const entry = { type, request: { ...request, requestId: id, ...(type === 'approvals' && { key: randomUUID() }) } }
+    state.requests.set(id, entry)
+    publish(state, type)
+    if (request.kind !== 'file-change') return
+
+    // 文件审批请求只携带关联 itemId。尽量读回这项原生变更，供用户在确认前核对。
+    const { threadId, turnId, itemId } = request
+    void state.connection.request('thread/items/read', { threadId, turnId, itemIds: [itemId] }).then(({ data }) => {
+      const change = data?.find(({ item }) => item.id === itemId && item.type === 'fileChange')?.item
+      if (state.requests.get(id) !== entry) return
+      const hydrated = hydrateFileApproval(entry.request, change?.changes)
+      if (!hydrated) return
+      entry.request = hydrated
+      publish(state, type)
+    }).catch(() => {})
+  }
+
   function receive(state, { id, method, params }) {
     if (params?.threadId !== state.threadId) return
+    if (method === 'serverRequest/resolved') {
+      const entry = state.requests.get(params.requestId)
+      if (!entry) return
+      state.requests.delete(params.requestId)
+      state.submitting.delete(params.requestId)
+      publish(state, entry.type)
+      if (!state.waiting && !state.requests.size) release(state)
+      return
+    }
+    if (method === 'thread/status/changed') {
+      state.waiting = isWaiting(params.status)
+      if (!state.waiting) release(state)
+      return
+    }
+    if (!isRequestId(id) || state.requests.has(id)) return
     if (method === 'item/tool/requestUserInput') {
       const { questions } = params
       // DSH 的问答面板会在本地保存答复。要求保密的请求仍可在 Codex CLI 作答。
-      if (!isRequestId(id) || state.requests.has(id) || !Array.isArray(questions) || !questions.length
-        || questions.some(question => question.isSecret)) return
-      state.requests.set(id, { ...params, requestId: id })
-      publish(state)
-    } else if (method === 'serverRequest/resolved' && state.requests.delete(params.requestId)) {
-      state.submitting.delete(params.requestId)
-      publish(state)
-      if (!state.waiting && !state.requests.size) release(state)
-    } else if (method === 'thread/status/changed') {
-      state.waiting = isWaiting(params.status)
-      if (!state.waiting) release(state)
+      if (Array.isArray(questions) && questions.length && !questions.some(question => question.isSecret)) {
+        publishRequest(state, id, 'questions', params)
+      }
+      return
     }
+    const approval = projectApprovalRequest(method, params)
+    if (approval) publishRequest(state, id, 'approvals', approval)
   }
 
   async function attach(state) {
@@ -105,7 +136,9 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     }
     const state = watched.get(threadId)
     state.listeners.add(listener)
-    if (state.requests.size) listener(frame(state))
+    for (const type of new Set([...state.requests.values()].map(entry => entry.type))) {
+      listener(frame(state, type))
+    }
     lifetime.addEventListener('abort', () => {
       state.listeners.delete(listener)
       if (state.listeners.size) return
@@ -123,30 +156,46 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     }
   }
 
-  const route = {
-    path: '/api/codex/question-answer',
-    methods: ['POST'],
-    requestBody: 'buffered',
-    async fetch(request) {
-      const type = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
-      if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
-      const { threadId, requestId, answers } = (await request.json().catch(() => null)) ?? {}
-      if (typeof threadId !== 'string' || !threadId || !isRequestId(requestId) || !isObject(answers)) {
-        return json({ error: '问答请求或答案格式无效。' }, 400)
-      }
-      const state = watched.get(threadId)
-      const pending = state?.requests.get(requestId)
-      if (!pending || state.submitting.has(requestId)) return json({ error: '该问题已处理或不再等待回答。' }, 409)
-      const validAnswers = requestAnswers(pending.questions, answers)
-      if (!validAnswers) return json({ error: '答案与当前问题不匹配。' }, 400)
-      state.submitting.add(requestId)
-      try {
-        await state.connection.respond(requestId, { answers: validAnswers })
-        return json({ submitted: true })
-      } catch {
-        return json({ error: '无法向 Codex 发送答案。' }, 503)
-      }
-    },
+  function replyRoute({ path, type, invalid, unavailable, mismatch, failed, resultFor }) {
+    return {
+      path: `/api/codex/${path}`,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const contentType = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
+        if (contentType !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
+        const body = await request.json().catch(() => null)
+        const { threadId, requestId } = body ?? {}
+        if (typeof threadId !== 'string' || !threadId || !isRequestId(requestId)) return json({ error: invalid }, 400)
+        const state = watched.get(threadId)
+        const pending = state?.requests.get(requestId)
+        if (pending?.type !== type || state.submitting.has(requestId)
+          || (type === 'approvals' && body.key !== pending.request.key)) return json({ error: unavailable }, 409)
+        const result = resultFor(pending.request, body)
+        if (!result) return json({ error: mismatch }, 400)
+        state.submitting.add(requestId)
+        try {
+          await state.connection.respond(requestId, result)
+          return json({ submitted: true })
+        } catch {
+          if (state.requests.get(requestId) === pending) state.submitting.delete(requestId)
+          return json({ error: failed }, 503)
+        }
+      },
+    }
   }
-  return { observe, route }
+
+  const route = replyRoute({
+    path: 'question-answer', type: 'questions', invalid: '问答请求或答案格式无效。', unavailable: '该问题已处理或不再等待回答。',
+    mismatch: '答案与当前问题不匹配。', failed: '无法向 Codex 发送答案。', resultFor(question, { answers }) {
+      const valid = requestAnswers(question.questions, answers)
+      return valid && { answers: valid }
+    },
+  })
+  const approvalRoute = replyRoute({
+    path: 'approval-decision', type: 'approvals', invalid: '审批请求格式无效。', unavailable: '该审批已处理或已结束。',
+    mismatch: '该决定不适用于此审批。', failed: '无法向 Codex 提交审批决定。',
+    resultFor: (approval, { decision }) => approvalResponse(approval, decision),
+  })
+  return { observe, route, approvalRoute }
 }

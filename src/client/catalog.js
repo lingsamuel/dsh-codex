@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../shared/pages.js'
-import { readPage, writeThreadAction } from './api.js'
+import { readPage, writeProjectAction, writeThreadAction } from './api.js'
 import { openLiveWatch } from './live-watch.js'
 import { subagentAddress } from './native-dsh/subagents.js'
 
@@ -255,6 +255,12 @@ export function createHistoryCatalog(signal) {
     acceptProject(project, workspacePaths) {
       const projects = mergePages(store.getSnapshot().projects, [project])
       receive({ type: 'projects', projects, workspacePaths })
+    },
+    async updateProject(action) {
+      const previous = store.getSnapshot().projects
+      const snapshot = await writeProjectAction(action, signal)
+      // 广播可能已应用更近的原生列表。操作回读只补齐尚未观察到的更新。
+      if (store.getSnapshot().projects === previous) receive({ type: 'projects', ...snapshot })
     },
     removeThread(id) {
       receive({ type: 'thread', id, thread: null })

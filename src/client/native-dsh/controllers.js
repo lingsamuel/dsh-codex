@@ -4,6 +4,7 @@ import { createCodexHistory } from './session-events.js'
 import { createSessionInput } from './session-input.js'
 import { subagentAddress } from './subagents.js'
 import { writeConversationAction, writeThreadAction } from '../api.js'
+import { workspaceProjectId } from '../workspaces.js'
 
 const searchResultLimit = 20
 const flatSessionOrderKey = '__flat_session_order__'
@@ -156,11 +157,11 @@ export function provideCodexControllers(ctx, catalog) {
       const workspace = workspaces.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
       const directory = cwd ?? workspace?.path
       if (!directory) throw new Error('请先选择新会话的工作目录。')
-      const projectId = workspace?.workspaceId.startsWith('project:') ? workspace.workspaceId.slice('project:'.length) : undefined
+      const projectId = workspaceProjectId(workspace?.workspaceId)
       const summaries = list.getSnapshot().byId
       const reuseThreadId = sessionId ?? workspace?.sessionIds.find(id => summaries[id]?.blank)
-      const { thread, workspacePaths } = await writeConversationAction({ action: 'create', cwd: directory, projectId, reuseThreadId })
-      catalog.acceptThread(thread, workspacePaths)
+      const { thread, workspacePaths, permission } = await writeConversationAction({ action: 'create', cwd: directory, projectId, reuseThreadId })
+      catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths)
       return thread.id
     },
     async fork({ sessionId: threadId, atSeq, onCreated }) {
@@ -192,9 +193,10 @@ export function provideCodexControllers(ctx, catalog) {
       catalog.acceptProject(project, workspacePaths)
       return workspaces.list.getSnapshot().items.find(item => item.workspaceId === `project:${project.id}`)
     },
-    rename: rejectWrite,
-    delete: rejectWrite,
-    insertBefore: rejectWrite,
+    rename: (workspaceId, name) => catalog.updateProject({ action: 'rename', projectId: workspaceProjectId(workspaceId), name }),
+    delete: workspaceId => catalog.updateProject({ action: 'delete', projectId: workspaceProjectId(workspaceId) }),
+    insertBefore: (workspaceId, beforeWorkspaceId) => catalog.updateProject({ action: 'move',
+      projectId: workspaceProjectId(workspaceId), beforeProjectId: workspaceProjectId(beforeWorkspaceId) }),
     async archiveSession(threadId, { stopActivity } = {}) {
       try {
         await writeThreadAction({ threadId, action: 'archive', stopActivity })

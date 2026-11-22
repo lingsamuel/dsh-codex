@@ -1,9 +1,12 @@
+import { join } from 'node:path'
 import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage, readThreadSummary } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
+import { createProjectActionRoute } from './project-actions.mjs'
+import { createPermissionActions } from './permissions.mjs'
 import { createConversationActionRoute } from './conversation-actions.mjs'
 import { createQuestionBridge } from './question-bridge.mjs'
 import { createAsyncQuestionActionRoute } from './async-question-actions.mjs'
@@ -34,6 +37,8 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()
+  const permissions = createPermissionActions(socketPath, ownerSignal,
+    cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const route = (path, read) => ({
     path: `/api/codex/${path}`,
     methods: ['GET'],
@@ -52,9 +57,13 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
+    createProjectActionRoute(socketPath, ownerSignal),
+    permissions.catalogRoute,
+    permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit),
-    createConversationActionRoute(socketPath, ownerSignal, submit),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions),
     questions.route,
+    questions.approvalRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
     createWatchRoute(socketPath, ownerSignal, questions),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),

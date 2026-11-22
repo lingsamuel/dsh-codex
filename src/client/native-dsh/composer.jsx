@@ -7,11 +7,11 @@ const bar = 'conversation.composer.bar'
 const dock = 'conversation.composer.dock'
 const locale = 'codex.composer'
 const copy = {
-  zh: { readonly: '此会话无法直接发送消息', archived: '请先取消归档',
+  zh: { readonly: '此会话无法直接发送消息', unarchiveAndSend: '取消归档并发送', unarchiveAndContinue: '取消归档并继续队列',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
     select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列',
     imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
-  en: { readonly: 'Direct messages are unavailable for this session', archived: 'Unarchive the session to send messages',
+  en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
     select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue',
     imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
@@ -25,9 +25,10 @@ function CatalogStatus({ catalog, t }) {
   return <p role="status">{t(busy ? 'loading' : 'select')}</p>
 }
 
-function ComposerBar({ Native, commandsLabel, ...props }) {
+function ComposerBar({ Native, commandsLabel, unarchiveLabel, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
+  const archived = props.useSession(state => state.archived)
   useLayoutEffect(() => {
     if (!blocked || disabled || !toggleCommandMenu) return
     const card = keyboard.editor.getRootElement()?.closest('[data-composer-card]')
@@ -56,15 +57,21 @@ function ComposerBar({ Native, commandsLabel, ...props }) {
     }
   }, [blocked, commandsLabel, disabled, keyboard, toggleCommandMenu])
   return <Native {...props} stop={!blocked && knownTurn ? props.stop : undefined}
-    t={(key, ...args) => key === 'input.commands' && toggleCommandMenu ? commandsLabel : t(key, ...args)} />
+    t={(key, ...args) => {
+      if (key === 'input.commands' && toggleCommandMenu) return commandsLabel
+      if (key === 'input.send' && archived) return unarchiveLabel
+      return t(key, ...args)
+    }} />
 }
 
 function ContinueQueue({ useSession, useProjection, startQueue, t }) {
-  const ready = useSession(state => state.openState === 'open' && !state.archived && !state.subagent
+  const archived = useSession(state => state.archived)
+  const ready = useSession(state => state.openState === 'open' && !state.subagent
     && state.canAcceptDirectInput !== false && ['idle', 'notLoaded'].includes(state.live.status?.type))
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
   const [starting, setStarting] = useState(false)
-  if (!ready || !queued) return null
+  // Codex 在取消归档前不允许查询此会话的原生队列。
+  if (!ready || (!archived && !queued)) return null
   return <Button size="sm" variant="outline" disabled={starting} onClick={async () => {
     setStarting(true)
     try {
@@ -72,7 +79,7 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
     } finally {
       setStarting(false)
     }
-  }}>{t('continueQueue')}</Button>
+  }}>{t(archived ? 'unarchiveAndContinue' : 'continueQueue')}</Button>
 }
 
 /** 原生编辑器负责发送手势和草稿。停止后，可在原生队列下方手动继续。 */
@@ -98,8 +105,8 @@ export function installComposer(ctx, catalog) {
           binding.ctx.effect(() => {
             const { sessionId, session } = binding
             const sync = () => {
-              const { archived, subagent, canAcceptDirectInput, openState } = session.getSnapshot()
-              const reason = archived ? 'archived' : subagent || canAcceptDirectInput === false ? 'readonly'
+              const { subagent, canAcceptDirectInput, openState } = session.getSnapshot()
+              const reason = subagent || canAcceptDirectInput === false ? 'readonly'
                 : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : undefined
               blocks.set(sessionId, reason ? { reason: t(reason) } : undefined)
             }
@@ -158,7 +165,7 @@ export function installComposer(ctx, catalog) {
         } }
       }
       function Composer(props) {
-        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} />
+        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')} />
       }
       entry.inject = injectComposer
       entry.component = Composer

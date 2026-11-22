@@ -8,7 +8,7 @@ import { isComposerImageUrl } from '../shared/composer-images.js'
 import { readProjects } from './catalog.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
-import { addressableThread, createThreadSubmissionQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
+import { addressableThread, createThreadSubmissionQueue, resumeThread, unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -118,15 +118,19 @@ async function deleteQueued(request, params) {
   return result
 }
 
-async function startQueued(request, threadId, queuedSubmissionId, signal) {
+async function startQueued(request, threadId, queuedSubmissionId, signal, unarchive, onResume) {
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
-  const thread = await addressableThread(request, threadId)
+  const current = await addressableThread(request, threadId, unarchive)
+  const thread = unarchive ? await unarchiveForSubmission(request, current) : current
   if (thread.status?.type !== 'notLoaded') return request('thread/queue/start', { threadId, queuedSubmissionId })
 
   const queue = await readConversationQueue(request, threadId)
   const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
-  if (!target) throw missingQueueItem()
-  const resumed = await resumeThread(request, thread)
+  if (!target) {
+    if (unarchive && queuedSubmissionId === undefined) return { queueEmpty: true }
+    throw missingQueueItem()
+  }
+  const resumed = await resumeThread(request, thread, onResume)
   async function claimedTurn() {
     const turn = await readLatestTurn(request, threadId, 'full')
     if (turn?.items?.some(item => item.type === 'userMessage' && item.clientId === target.clientUserMessageId)) {
@@ -158,9 +162,9 @@ async function startQueued(request, threadId, queuedSubmissionId, signal) {
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }, signal) {
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text, unarchive }, signal, onResume) {
   if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
-  if (operation === 'start') return startQueued(request, threadId, queuedSubmissionId, signal)
+  if (operation === 'start') return startQueued(request, threadId, queuedSubmissionId, signal, unarchive === true, onResume)
   if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
@@ -205,7 +209,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 }
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
-export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue()) {
+export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions) {
   const creatingProjects = new Map()
   return {
     path: '/api/codex/conversation-action',
@@ -233,8 +237,12 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           if (reuseThreadId !== undefined) required(reuseThreadId, '草稿会话 ID 无效。')
           return json(await withCodexReader(socketPath, signal, async rpc => {
             const reused = await reusableDraft(rpc, reuseThreadId, cwd, projectId)
-            const thread = reused ?? (await rpc('thread/start', { cwd, historyMode: 'paginated', ...(projectId && { projectId }) })).thread
-            return workspaceThread({ ...thread, blank: true })
+            if (reused) return workspaceThread({ ...reused, blank: true })
+            const started = await rpc('thread/start', {
+              cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...await permissions?.startOptions(rpc, cwd),
+            })
+            const permission = permissions?.remember(started.thread.id, started)
+            return { ...await workspaceThread({ ...started.thread, blank: true }), ...(permission && { permission }) }
           }))
         }
         if (!['prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')
@@ -244,9 +252,11 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           const params = { threadId, input: promptInput(input), clientUserMessageId: required(clientUserMessageId, '缺少消息 ID。') }
           if (mode === 'steer' && expectedTurnId !== undefined) required(expectedTurnId, '当前轮次 ID 无效。')
           return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
-            const thread = await addressableThread(rpc, threadId)
-            validateModelDraft(thread, modelDraft)
-            await resumeThread(rpc, thread)
+            const unarchive = fields.unarchive === true
+            const current = await addressableThread(rpc, threadId, unarchive)
+            validateModelDraft(current, modelDraft)
+            const thread = unarchive ? await unarchiveForSubmission(rpc, current) : current
+            await resumeThread(rpc, thread, permissions?.remember)
             if (modelDraft) await updateModelSelection(rpc, { ...modelDraft, threadId }, signal)
             if (thread.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
@@ -268,7 +278,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        const run = () => withCodexReader(socketPath, signal, rpc => queueAction(rpc, threadId, fields, signal))
+        const run = () => withCodexReader(socketPath, signal, rpc => queueAction(rpc, threadId, fields, signal, permissions?.remember))
         return json(await (fields.operation === 'start' || fields.operation === 'steer' ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {
