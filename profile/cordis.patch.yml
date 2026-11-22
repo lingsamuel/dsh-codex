@@ -1,3 +1,17 @@
+# Codex 提供会话状态与文件作用域，保留 DSH Base 的通用配置和服务。
+- id: session
+  disabled: true
+- id: session-persistence-jsonl
+  disabled: true
+- id: sandbox-policy
+  disabled: true
+- id: fs-sandbox
+  disabled: true
+- id: permission
+  disabled: true
+- id: image-offload
+  disabled: true
+
 - insert:
     - id: web-startup
       name: '@deepseek-ai/dsh-web-app/startup'
@@ -14,28 +28,14 @@
         openBrowser: !!js ctx.webStartup.openBrowser
         printUrl: true
         surfaceContext: false
-    - id: credentials
-      name: '@deepseek-ai/dsh-credentials-local'
     - id: connection
       name: '@deepseek-ai/dsh-client-connection'
     - id: authentication-token
       name: '@deepseek-ai/dsh-host-authentication-token'
     - id: modules
       name: '@deepseek-ai/dsh-client-modules'
-    - id: typert
-      name: '@deepseek-ai/dsh-typert-registry'
-    - id: typert-loader
-      name: '@deepseek-ai/dsh-typert-loader'
-    - id: remote-access
-      name: '@deepseek-ai/dsh-api-remote-access'
-    - id: typert-gateway
-      name: '@deepseek-ai/dsh-api-gateway'
     - id: api-remotes
       name: '@deepseek-ai/dsh-api-remotes'
-    - id: config-editor
-      name: '@deepseek-ai/dsh-config-editor'
-    - id: settings
-      name: '@deepseek-ai/dsh-settings'
     - id: settings-controller
       name: '@deepseek-ai/dsh-api-settings-controller'
     - id: ui-renderer

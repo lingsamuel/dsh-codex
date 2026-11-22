@@ -14,7 +14,7 @@ await copyFile(join(root, 'profile', 'cordis.patch.yml'), join(profile, 'cordis.
 await writeFile(join(profile, 'package.json'), JSON.stringify({
   name: 'dsh-chatgpt-profile',
   private: true,
-  dsh: { profile: { bundles: [] } },
+  dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
 }))
 try {
   await symlink(root, plugin, process.platform === 'win32' ? 'junction' : 'dir')

@@ -1,3 +1,4 @@
+import { join } from 'node:path'
 import { createHistoryRoutes } from './history.mjs'
 import { readCodex } from './app-server.mjs'
 import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs'
@@ -8,6 +9,8 @@ export const inject = ['connection', 'loader']
 
 export async function apply(ctx) {
   const owner = new AbortController()
+  const profile = ctx.get('profileContext')
+  const cacheDirectory = process.env.DSH_CHATGPT_CACHE_DIR ?? (profile && join(profile.dir, 'dsh-chatgpt'))
   ctx.effect(() => () => owner.abort())
   // DSH 文件服务的冷读查询只需要 cwd。直接从 Codex 读取该字段，不实例化 DSH 会话。
   ctx.provide('sessions', { get: () => undefined })
@@ -18,7 +21,7 @@ export async function apply(ctx) {
     },
   })
   ctx.provide('sandboxPolicy', { workspaceRoot: process.cwd() })
-  for (const route of createHistoryRoutes(undefined, owner.signal, process.env.DSH_CHATGPT_CACHE_DIR)) {
+  for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory)) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
   const { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_MAX_RESULTS, DEFAULT_FILE_SEARCH_MAX_ENTRIES,

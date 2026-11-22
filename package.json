@@ -1,34 +1,52 @@
 {
   "name": "dsh-chatgpt",
   "version": "0.1.0",
-  "private": true,
+  "description": "在 DeepSeek Harness 中展示和操作本机 Codex 会话",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lingsamuel/dsh-codex.git"
+  },
   "type": "module",
+  "files": [
+    "dist/client.js",
+    "dist/file-reference-search.mjs",
+    "manual/",
+    "profile/cordis.patch.yml",
+    "src/host/",
+    "src/shared/"
+  ],
   "exports": {
     ".": "./src/host/plugin.mjs",
     "./client": "./dist/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
+    "bundle": {
+      "patch": "./profile/cordis.patch.yml"
+    },
     "client": {
       "platform": "web"
     }
   },
   "engines": {
-    "node": "^24.22.3 || >=26.13.1"
+    "node": "^24.22.3 || >=26.13.1",
+    "dsh": ">=0.2.3-alpha.2 <0.3.0"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "prepack": "npm run build",
+    "package:plugin": "node scripts/package.mjs",
     "start": "node scripts/start.mjs",
     "test": "node --test"
   },
   "dependencies": {
-    "@deepseek-ai/dsh": "0.2.3-alpha.2",
-    "@deepseek-ai/dsh-file-reference-local": "0.2.3-alpha.2",
-    "diff": "^9.0.0",
-    "micromark": "^4.0.3",
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "esbuild": "^0.27.0"
+    "@deepseek-ai/dsh": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-file-reference-local": "0.2.3-alpha.2",
+    "diff": "^9.0.0",
+    "esbuild": "^0.27.0",
+    "micromark": "^4.0.3"
   }
 }
