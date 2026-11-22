@@ -95,44 +95,79 @@ function mergeCancelledToolCalls(items, cancelled) {
   return [...merged, ...recovered.slice(index)]
 }
 
-function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput, goalCompletion) {
+function turnEvents(turn, number, {
+  provider = 'codex', model = '', createdAt, attachments, cancelledToolCalls, turnWorkingDirectories,
+  goalInputs, goalCompletions, renderMarkdown = renderChatMarkdown, liveTurns,
+}, firstChanged = 0) {
+  const source = { kind: 'model', provider, model }
+  const cancelled = cancelledToolCalls?.get(turn.id)
+  const cwd = turnWorkingDirectories?.[turn.id]
+  const goalInput = goalInputs?.[turn.id]
+  const goalCompletion = goalCompletions?.[turn.id]
+  // 补录工具按时间插入，原生条目位置无法直接映射到合并后的事件位置。
+  const previous = cancelled?.length ? undefined : liveTurns?.get(turn.id)
+  const checkpoints = previous?.checkpoints ?? (!cancelled?.length && turn.status === 'inProgress' && liveTurns ? [] : undefined)
+  let from = previous ? Math.min(firstChanged, checkpoints.length) : 0
+  // 成功结束时，旧记录中尚未确认完成的压缩也会生成结束事件。
+  if (turn.status === 'completed') from = Math.min(from, previous?.openCompactionIndex ?? Infinity)
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
   }
 
-  let items = mergeCancelledToolCalls(turn.items, cancelled)
-  const firstTimedItem = items.find(item => item.startedAtMs != null || item.completedAtMs != null)
-  const startedAt = milliseconds(turn.startedAt) ?? firstTimedItem?.startedAtMs
-    ?? firstTimedItem?.completedAtMs ?? milliseconds(createdAt) ?? 0
-  const turnIdentity = { turn: number, codexTurnId: turn.id }
-  emit('turn/start', startedAt, turnIdentity)
-
-  let goalMessageId = goalInput?.messageId
-  if (goalInput && !goalMessageId) {
-    goalMessageId = items.find(item => item.type === 'userMessage' && goalCommandObjective(item.content) === goalInput.objective)?.id
-    if (!goalMessageId) {
-      goalMessageId = `codex:goal:${turn.id}`
-      items = [{
-        type: 'userMessage', id: goalMessageId, startedAtMs: goalInput.time ?? startedAt,
-        content: [textBlock(`/goal ${goalInput.objective}`)],
-      }, ...items]
+  const items = mergeCancelledToolCalls(turn.items, cancelled)
+  const explicitStart = milliseconds(turn.startedAt)
+  let firstTimedIndex = previous?.firstTimedIndex ?? Infinity
+  if (explicitStart == null && from <= firstTimedIndex) {
+    firstTimedIndex = Infinity
+    for (let index = from; index < items.length; index++) {
+      const { startedAtMs, completedAtMs } = items[index]
+      if (startedAtMs == null && completedAtMs == null) continue
+      firstTimedIndex = index
+      break
     }
   }
-  let step = 0
-  let activity = false
-  let hasUserInput = false
-  let lastTime = startedAt
+  const firstTimedItem = items[firstTimedIndex]
+  const startedAt = explicitStart ?? firstTimedItem?.startedAtMs
+    ?? firstTimedItem?.completedAtMs ?? milliseconds(createdAt) ?? 0
+
+  let goalMessageId = goalInput?.messageId
+  let goalItemIndex = previous?.goalItemIndex ?? Infinity
+  let syntheticGoal
+  if (goalInput && !goalMessageId) {
+    if (from <= goalItemIndex) {
+      goalItemIndex = Infinity
+      for (let index = from; index < items.length; index++) {
+        const item = items[index]
+        if (item.type !== 'userMessage' || goalCommandObjective(item.content) !== goalInput.objective) continue
+        goalItemIndex = index
+        break
+      }
+    }
+    goalMessageId = items[goalItemIndex]?.id
+    if (!goalMessageId) {
+      goalMessageId = `codex:goal:${turn.id}`
+      syntheticGoal = { type: 'userMessage', id: goalMessageId, startedAtMs: goalInput.time ?? startedAt,
+        content: [textBlock(`/goal ${goalInput.objective}`)] }
+    }
+  }
+  const turnIdentity = { turn: number, codexTurnId: turn.id }
+  if (startedAt !== previous?.startedAt || goalMessageId !== previous?.goalMessageId) from = 0
+  if (from === 0) emit('turn/start', startedAt, turnIdentity)
+
+  // 每条原生记录保存后续投影所需的步号、时间和事件位置。改写时从首条变化恢复。
+  let { offset = 0, step = 0, activity = false, hasUserInput = false, lastTime = startedAt } = checkpoints?.[from - 1] ?? {}
+  if (checkpoints) checkpoints.length = from
   const coordinates = () => ({ turn: number, step })
-  for (const item of items) {
+  function projectItem(item) {
     const isSubagentActivity = item.type === 'subAgentActivity'
-    if (isSubagentActivity && !subagentActivityKinds.includes(item.kind)) continue
+    if (isSubagentActivity && !subagentActivityKinds.includes(item.kind)) return
     const isUser = item.type === 'userMessage'
     const replies = isUser ? questionReplies(item.content) : undefined
     const reviewPhase = item.type === 'enteredReviewMode' ? 'commentary' : item.type === 'exitedReviewMode' ? 'final_answer' : undefined
     const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan' || reviewPhase != null
     const block = isAssistant ? assistantBlock(item, cwd, renderMarkdown) : undefined
-    if (isAssistant && !block) continue
+    if (isAssistant && !block) return
 
     const start = item.startedAtMs ?? item.completedAtMs ?? lastTime
     const end = item.completedAtMs ?? start
@@ -157,7 +192,7 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
         }
         emit('user/message', start, message, 'append')
         hasUserInput = true
-        continue
+        return
       }
       hasUserInput = true
     }
@@ -165,14 +200,14 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
     if (isSubagentActivity) {
       const { id, kind, agentThreadId, agentPath } = item
       emit(subagentActivityEvent, end, { ...coordinates(), id, kind, agentThreadId, agentPath })
-      continue
+      return
     }
     if (item.type === 'contextCompaction') {
       // 使用 DSH 自带的压缩行，完成时间来自原生条目。旧记录也可用成功结束的轮次确认完成。
       const data = { ...coordinates(), compactionId: item.id }
       emit('compaction/start', start, data)
       if (item.completedAtMs != null || turn.status === 'completed') emit('compaction/end', end, data)
-      continue
+      return
     }
     if (isAssistant) {
       const phase = reviewPhase ?? item.phase
@@ -182,12 +217,12 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
         stream: [],
         ...(phase != null && { codexPhase: phase }),
       }, 'append')
-      continue
+      return
     }
 
     const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies) : projectTool(item, cwd)
     emit('tool/call', start, { ...coordinates(), callId: item.id, name, arguments: JSON.stringify(args) })
-    if (item.status === 'inProgress') continue
+    if (item.status === 'inProgress') return
     emit('tool/result', end, {
       ...coordinates(),
       message: {
@@ -202,6 +237,19 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
     }, 'append')
   }
 
+  if (from === 0 && syntheticGoal) projectItem(syntheticGoal)
+  let openCompactionIndex = previous?.openCompactionIndex ?? Infinity
+  if (from <= openCompactionIndex) openCompactionIndex = Infinity
+  for (let index = from; index < items.length; index++) {
+    const item = items[index]
+    projectItem(item)
+    checkpoints?.push({ offset: offset + events.length, step, activity, hasUserInput, lastTime })
+    if (item.type === 'contextCompaction' && item.completedAtMs == null) openCompactionIndex = Math.min(openCompactionIndex, index)
+  }
+  if (checkpoints && turn.status === 'inProgress') {
+    liveTurns.set(turn.id, { checkpoints, firstTimedIndex, startedAt, goalMessageId, goalItemIndex, openCompactionIndex })
+  } else liveTurns?.delete(turn.id)
+
   if (turn.status !== 'inProgress') {
     if (step > 0) emit('step/end', lastTime, coordinates())
     emit('turn/end', milliseconds(turn.completedAt) ?? lastTime, {
@@ -211,7 +259,17 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
       ...(turn.error && { codexError: turn.error }),
     })
   }
-  return events
+  return { offset, events }
+}
+
+function eventEntries(events, start) {
+  return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
+}
+
+/** 从首个变化的原生条目继续转换，给出应替换的事件后缀及其位置。 */
+export function projectCodexTurnUpdate(turn, { firstSeq, beforeTurn = newestHistoryBoundary, ...options }, firstChanged) {
+  const { offset, events } = turnEvents(turn, beforeTurn - 1, options, firstChanged)
+  return { offset, entries: eventEntries(events, (firstSeq ?? newestHistoryBoundary - events.length) + offset) }
 }
 
 /** 将按时间正序排列的 Codex 轮次投影为原版 DSH Conversation 的内存事件窗口。 */
@@ -219,20 +277,9 @@ export function projectCodexTurns(turns, {
   beforeSeq = newestHistoryBoundary,
   beforeTurn = newestHistoryBoundary,
   firstSeq,
-  provider = 'codex',
-  model = '',
-  createdAt,
-  attachments,
-  cancelledToolCalls,
-  turnWorkingDirectories,
-  goalInputs,
-  goalCompletions,
-  renderMarkdown = renderChatMarkdown,
+  ...options
 } = {}) {
-  const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
-  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments,
-    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id], goalCompletions?.[turn.id]))
-  const start = firstSeq ?? beforeSeq - events.length
-  return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
+  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, options).events)
+  return eventEntries(events, firstSeq ?? beforeSeq - events.length)
 }

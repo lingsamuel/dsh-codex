@@ -3,7 +3,7 @@ import { mergePages } from '../../shared/pages.js'
 import { readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
 import { readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
-import { projectCodexTurns, projectUserContent } from '../native-chat/events.js'
+import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
@@ -18,6 +18,10 @@ import { projectAsyncQuestions, projectNativeQuestions } from './native-question
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
 const outlineSequenceStart = 2 ** 40
+
+function questionItem(item) {
+  return item?.type === 'userMessage' || (item?.type === 'agentMessage' && item.questions?.length)
+}
 
 function pageBounds(entry) {
   return entry && { beforeSeq: entry.event.seq, beforeTurn: entry.event.data.turn }
@@ -91,6 +95,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
   const outlineTargets = new Map()
   const rows = []
+  const rowsById = new Map()
+  const liveTurns = new Map()
+  let windowEntries = []
+  let appendedEntries = []
+  let rebuildWindow = false
+  let asyncQuestionInputs
+  let asyncQuestions = []
   let nextCursor
   let pending
   let queue = Promise.resolve()
@@ -107,18 +118,29 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     markReady()
   })
 
-  function publish(prepended = false) {
+  function publish(prepended) {
     const previous = events.getSnapshot()
-    const entries = rows.flatMap(row => row.entries)
     const hasMore = Boolean(nextCursor)
-    const samePrefix = previous.entries.every((entry, index) => entry === entries[index])
-    if (samePrefix && previous.entries.length === entries.length && previous.hasMore === hasMore) return
-    let change = { kind: 'replace', entries }
-    if (prepended) change = { kind: 'prepend', entries: entries.slice(0, entries.length - previous.entries.length) }
-    else if (samePrefix && previous.entries.length && previous.hasMore === hasMore) {
-      change = { kind: 'append', entries: entries.slice(previous.entries.length) }
+    if (!rebuildWindow && !appendedEntries.length && !prepended?.length && previous.hasMore === hasMore) return
+    let change
+    if (rebuildWindow || (prepended ? appendedEntries.length : previous.hasMore !== hasMore)) {
+      windowEntries = rows.flatMap(row => row.entries)
+    } else if (prepended) {
+      windowEntries = prepended.concat(windowEntries)
+      change = { kind: 'prepend', entries: prepended }
+    } else {
+      if (windowEntries.length) change = { kind: 'append', entries: appendedEntries }
+      for (const entry of appendedEntries) windowEntries.push(entry)
     }
-    events.set({ entries, hasMore, revision: previous.revision + 1, change })
+    rebuildWindow = false
+    appendedEntries = []
+    // DSH 连续消费增量，只在首次折叠、错过修订或替换时需要完整窗口。旧快照仍绑定原来的长度。
+    const backing = windowEntries
+    const length = backing.length
+    let entries
+    const readEntries = () => entries ??= backing.slice(0, length)
+    change ??= { kind: 'replace', get entries() { return readEntries() } }
+    events.set({ get entries() { return readEntries() }, hasMore, revision: previous.revision + 1, change })
   }
 
   function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
@@ -201,58 +223,89 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     for (const [id, entry] of loaded) attachments.set(id, entry)
   }
 
-  function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, goalInputs, goalCompletions, ...options })
+  function projectionOptions(bounds) {
+    return { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls,
+      turnWorkingDirectories, goalInputs, goalCompletions, liveTurns, ...bounds }
   }
 
   async function addOlderPage(page) {
     const turns = mergePages([], page.data.toReversed())
       .filter(turn => !transcript.getTurn(turn.id))
-      .map(turn => transcript.reconcile(turn))
+      .map(turn => transcript.reconcile(turn).turn)
     await collectAttachments(turns)
-    const pageEntries = project(turns, pageBounds(rows[0]?.entries[0]))
+    const pageEntries = projectCodexTurns(turns, projectionOptions(pageBounds(rows[0]?.entries[0])))
     const older = []
     for (const entry of pageEntries) {
-      if (entry.event.type === 'turn/start') older.push({ id: entry.event.data.codexTurnId, entries: [] })
+      if (entry.event.type === 'turn/start') {
+        const row = { id: entry.event.data.codexTurnId, entries: [] }
+        older.push(row)
+        rowsById.set(row.id, row)
+      }
       older.at(-1).entries.push(entry)
     }
     rows.unshift(...older)
     nextCursor = page.nextCursor
+    return pageEntries
   }
 
   async function updateTurn(turn, updates = turn.items ?? []) {
-    const previous = transcript.getTurn(turn.id)
-    const next = transcript.reconcile(turn, updates)
-    if (!next) return
-    const changedItems = next.items.filter((item, index) => item !== previous?.items[index])
-    await collectAttachments([{ items: changedItems }])
-    renderTurn(next)
+    const merged = transcript.reconcile(turn, updates)
+    if (!merged) return
+    const { turn: next, firstChanged, changes } = merged
+    const items = changes.flatMap(({ item }) => item.type === 'userMessage' ? [item] : [])
+    if (items.length) await collectAttachments([{ items }])
+    if (asyncQuestionInputs?.turnId === next.id && changes.some(({ item, previous }) => questionItem(item) || questionItem(previous))) {
+      asyncQuestionInputs = undefined
+    }
+    renderTurn(next, firstChanged)
   }
 
-  function renderTurn(next) {
-    const index = rows.findIndex(row => row.id === next.id)
-    const existing = rows[index]?.entries
-    const tail = rows.at(-1)?.entries
+  function renderTurn(next, firstChanged) {
+    const row = rowsById.get(next.id)
+    const existing = row?.entries
+    const tailRow = rows.at(-1)
+    const tail = tailRow?.entries
     const options = tail && {
       firstSeq: existing?.[0].event.seq ?? tail.at(-1).event.seq + 1,
       beforeTurn: existing ? existing[0].event.data.turn + 1 : tail[0].event.data.turn + 2,
     }
-    // 尽量沿用已经发布的事件对象。原生窗口仅追加记录时，DSH 无需重新装配历史。
-    const entries = project([next], options).map((entry, offset) => {
-      const current = existing?.[offset]
-      return current && JSON.stringify(current) === JSON.stringify(entry) ? current : entry
-    })
-    if (index < 0) {
-      rows.push({ id: next.id, entries })
+    const { offset, entries } = projectCodexTurnUpdate(next, projectionOptions(options), firstChanged)
+    if (!row) {
+      const added = { id: next.id, entries }
+      rows.push(added)
+      rowsById.set(next.id, added)
+      for (const entry of entries) appendedEntries.push(entry)
       return
     }
-    rows[index] = { id: next.id, entries }
+    // 投影已保留前缀，只比较重新生成的后缀，以便未变化的事件继续保留对象身份。
+    const length = offset + entries.length
+    let changed = length < existing.length
+    for (const [index, entry] of entries.entries()) {
+      const current = existing[offset + index]
+      if (!current) break
+      if (JSON.stringify(current) === JSON.stringify(entry)) entries[index] = current
+      else changed = true
+    }
+    if (!changed && length === existing.length) return
+    if (!changed && row === tailRow) {
+      for (let index = existing.length - offset; index < entries.length; index++) {
+        const entry = entries[index]
+        existing.push(entry)
+        appendedEntries.push(entry)
+      }
+      return
+    }
+    rebuildWindow = true
+    existing.length = offset
+    for (const entry of entries) existing.push(entry)
+    if (row === tailRow) return
+    const index = rows.indexOf(row)
     const following = rows[index + 1]
     if (!following) return
-    const overlap = entries.at(-1).event.seq - following.entries[0].event.seq + 1
+    const overlap = row.entries.at(-1).event.seq - following.entries[0].event.seq + 1
     if (overlap <= 0) return
-    for (const row of rows.slice(index + 1)) {
-      row.entries = row.entries.map(entry => ({ ...entry, event: { ...entry.event, seq: entry.event.seq + overlap } }))
+    for (const later of rows.slice(index + 1)) {
+      later.entries = later.entries.map(entry => ({ ...entry, event: { ...entry.event, seq: entry.event.seq + overlap } }))
     }
   }
 
@@ -276,7 +329,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     const before = turnWorkingDirectories
     turnWorkingDirectories = directories
     let changed = false
-    for (const { id } of rows) {
+    for (const id of new Set([...Object.keys(before), ...Object.keys(directories)])) {
       if (before[id] === directories[id]) continue
       const turn = transcript.getTurn(id)
       if (!turn) continue
@@ -293,10 +346,12 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     savedGoalCompletions = savedCompletions
     goalCompletions = { ...Object.fromEntries(announcedGoalCompletions), ...savedCompletions }
     let changed = false
-    for (const { id } of rows) {
+    for (const id of new Set([...Object.keys(before), ...Object.keys(inputs), ...Object.keys(previousCompletions), ...Object.keys(goalCompletions)])) {
       if (JSON.stringify(before[id]) === JSON.stringify(inputs[id])
         && previousCompletions[id]?.timeUsedSeconds === goalCompletions[id]?.timeUsedSeconds) continue
-      renderTurn(transcript.getTurn(id))
+      const turn = transcript.getTurn(id)
+      if (!turn) continue
+      renderTurn(turn)
       changed = true
     }
     if (changed) publish()
@@ -346,8 +401,16 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }
   }
 
+  function forgetTurn(id) {
+    transcript.forgetTurn(id)
+    rowsById.delete(id)
+    liveTurns.delete(id)
+    if (asyncQuestionInputs?.turnId === id) asyncQuestionInputs = undefined
+    rebuildWindow = true
+  }
+
   function clearHistory() {
-    for (const { id } of rows) transcript.forgetTurn(id)
+    for (const { id } of rows) forgetTurn(id)
     rows.length = 0
     attachments.clear()
   }
@@ -355,7 +418,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
     if (!opened || replace) {
       if (replace) clearHistory()
-      await addOlderPage(page)
+      const entries = await addOlderPage(page)
+      if (entries.length) rebuildWindow = true
       opened = true
     } else {
       let recent = mergePages([], page.data.toReversed())
@@ -379,7 +443,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         const currentIds = new Set(refreshed.map(turn => turn.id))
         for (let index = rows.length - 1; index >= anchor; index--) {
           if (currentIds.has(rows[index].id)) continue
-          transcript.forgetTurn(rows[index].id)
+          forgetTurn(rows[index].id)
           rows.splice(index, 1)
         }
       }
@@ -429,12 +493,17 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
 
   function publishQuestions() {
     const { canAcceptDirectInput } = state.getSnapshot()
-    const latest = transcript.getTurn(rows.at(-1)?.id)
+    const turnId = rows.at(-1)?.id
     const queued = queueStore.getSnapshot()
     const steers = inbox.getSnapshot().queuedSteers
-    const awaitingDelivery = steers ? [...queued, ...steers.map(({ item }) => item)] : queued
-    const asynchronous = canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, awaitingDelivery)
-    const requests = [...liveQuestions, ...asynchronous]
+    // 工具输出不会改变异步题面、已答消息或队列，保留这些输入对应的问答投影。
+    if (!asyncQuestionInputs || asyncQuestionInputs.turnId !== turnId || asyncQuestionInputs.queued !== queued
+      || asyncQuestionInputs.steers !== steers || asyncQuestionInputs.canAcceptDirectInput !== canAcceptDirectInput) {
+      const awaitingDelivery = steers ? [...queued, ...steers.map(({ item }) => item)] : queued
+      asyncQuestions = canAcceptDirectInput === false ? [] : projectAsyncQuestions(transcript.getTurn(turnId), awaitingDelivery)
+      asyncQuestionInputs = { turnId, queued, steers, canAcceptDirectInput }
+    }
+    const requests = [...liveQuestions, ...asyncQuestions]
     if (JSON.stringify(requests) === JSON.stringify(codexQuestions.getSnapshot())) return
     codexQuestions.set(requests)
     userQuestions.set(projectNativeQuestions(requests))
@@ -589,8 +658,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       try {
         if (!opened) await receiveSnapshot({ page: await loadPage(), mode: 'history' })
         else if (nextCursor) {
-          await addOlderPage(await loadPage(nextCursor))
-          publish(true)
+          const entries = await addOlderPage(await loadPage(nextCursor))
+          publish(entries)
           publishState()
         }
       } finally {
@@ -616,7 +685,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   async function loadTurn(turnId, requestSignal = signal) {
     await ready
     while (!signal.aborted && !requestSignal.aborted) {
-      const row = rows.find(turn => turn.id === turnId)
+      const row = rowsById.get(turnId)
       if (row) return row
       const cursor = nextCursor
       if (!cursor) return
