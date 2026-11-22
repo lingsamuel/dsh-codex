@@ -33,7 +33,7 @@ const requests = {
 
 const fileChanges = [{ path: '/work/note.txt', diff: '+hi', kind: { type: 'update', move_path: '/work/renamed.txt' } }]
 
-async function nativeQuestions(t, { status = waiting, approvals = [], fileDetails = Promise.resolve(fileChanges) } = {}) {
+async function nativeQuestions(t, { status = waiting, approvals = [], fileDetails = Promise.resolve(fileChanges), questions = [question] } = {}) {
   await mkdir('.runtime', { recursive: true })
   const directory = await mkdtemp(join(process.cwd(), '.runtime', 'question-rpc-'))
   const socketPath = join(directory, 'app.sock')
@@ -41,7 +41,7 @@ async function nativeQuestions(t, { status = waiting, approvals = [], fileDetail
   const sockets = new WebSocketServer({ server: http })
   const frames = []
   const send = (client, frame) => client.send(JSON.stringify(frame))
-  const request = (client, id) => send(client, { id, method: 'item/tool/requestUserInput', params })
+  const request = (client, id) => send(client, { id, method: 'item/tool/requestUserInput', params: { ...params, questions } })
   const resolved = (client, requestId) => send(client, { method: 'serverRequest/resolved', params: { threadId, requestId } })
   const { promise: response, resolve: receivedResponse } = Promise.withResolvers()
   const answers = []
@@ -62,8 +62,6 @@ async function nativeQuestions(t, { status = waiting, approvals = [], fileDetail
       if (frame.method === 'thread/resume') {
         for (const approval of approvals) send(client, approval)
         send(client, { id: 'empty', method: 'item/tool/requestUserInput', params: { ...params, questions: [] } })
-        send(client, { id: 'secret', method: 'item/tool/requestUserInput',
-          params: { ...params, questions: [question, { ...question, id: 'secret-input', isSecret: true }] } })
         request(client, 42)
       }
     })
@@ -104,7 +102,6 @@ test('原生等待问答只在被查看时订阅，并保留 CLI 决定的解析
   assert.deepEqual(native.frames.find(frame => frame.method === 'thread/resume').params, { threadId, excludeTurns: true })
   assert.equal((await post('approval')).status, 409)
   assert.equal((await post('empty')).status, 409)
-  assert.equal((await post('secret')).status, 409)
   assert.equal((await post(42, answer, 'different-thread')).status, 409)
   assert.equal((await post(42, { other: { answers: ['value'] } })).status, 400)
   assert.equal((await post(42)).status, 200)
@@ -131,6 +128,24 @@ test('原生等待问答只在被查看时订阅，并保留 CLI 决定的解析
   assert.deepEqual(await nextFrame.promise, { type: 'questions', requests: [] })
   assert.equal((await post('before-archive')).status, 409)
   await closed
+})
+
+test('含保密题的整组请求可通过原生应答渠道提交', { timeout: 5_000 }, async t => {
+  const questions = [question, { id: 'secret-input', question: '保密说明？', isSecret: true }]
+  const native = await nativeQuestions(t, { questions })
+  const controller = new AbortController()
+  t.after(() => controller.abort())
+  const bridge = createQuestionBridge(native.socketPath, controller.signal)
+  const ready = Promise.withResolvers()
+  bridge.observe(threadId, frame => ready.resolve(frame), controller.signal).update(waiting)
+  assert.deepEqual(await ready.promise, { type: 'questions', requests: [{ requestId: 42, ...params, questions }] })
+
+  const answers = { ...answer, 'secret-input': { answers: ['user_note: fixture'] } }
+  const reply = await bridge.route.fetch(new Request('http://local/api/codex/question-answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId, requestId: 42, answers }),
+  }))
+  assert.equal(reply.status, 200)
+  assert.deepEqual(await native.response, { id: 42, result: { answers } })
 })
 
 
