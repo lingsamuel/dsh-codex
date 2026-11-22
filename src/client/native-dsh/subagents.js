@@ -8,6 +8,11 @@ export function subagentAddress(thread, canAcceptDirectInput = thread?.canAccept
   return { parentSessionId, childSessionId: thread.id, mode: continuable ? 'continuable' : 'unknown' }
 }
 
+/** 原生能力优先，旧版子会话沿用导航地址判断是否能输入。 */
+export function allowsDirectInput({ canAcceptDirectInput, subagent }) {
+  return canAcceptDirectInput ?? (!subagent || subagent.address.mode === 'continuable')
+}
+
 /** 路径是原生线程的当前显示名，历史事件使用各自记录的路径。 */
 export function subagentPath(thread) {
   return thread.source?.subAgent?.thread_spawn?.agent_path

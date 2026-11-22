@@ -2,18 +2,24 @@ import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 import { installQueueImages } from './queue-images.jsx'
+import { allowsDirectInput } from './subagents.js'
 
+const composer = 'conversation.composer'
 const bar = 'conversation.composer.bar'
 const dock = 'conversation.composer.dock'
 const locale = 'codex.composer'
 const copy = {
   zh: { readonly: '此会话无法直接发送消息', unarchiveAndSend: '取消归档并发送', unarchiveAndContinue: '取消归档并继续队列',
+    subagentReadonly: '此子智能体为只读', subagentReadonlyBody: 'Codex 不允许直接向此子智能体发送消息。',
+    subagentCapabilityUnknown: 'Codex 尚未提供此子会话的直接输入能力。',
     goalPlaceholder: '输入要交给 Codex 的目标', goalSend: '创建目标', goalUnarchiveAndSend: '取消归档并创建目标',
     changingPlan: '正在等待 Codex 确认计划模式…',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
     commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
     filesOnly: '请选择文件。工作区目录可以用 @ 引用。', fileInputUnavailable: '当前无法添加文件。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
+    subagentReadonly: 'This subagent is read-only', subagentReadonlyBody: 'Codex does not allow direct messages to this subagent.',
+    subagentCapabilityUnknown: 'Codex has not reported whether this child session accepts direct input.',
     goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
     changingPlan: 'Waiting for Codex to confirm Plan mode…',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
@@ -71,8 +77,9 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
     }} />
 }
 
-function composerUnavailable({ removed, canAcceptDirectInput, openState }) {
-  return removed || canAcceptDirectInput === false ? 'readonly'
+function composerUnavailable(state) {
+  const { openState } = state
+  return state.removed || !allowsDirectInput(state) ? 'readonly'
     : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : undefined
 }
 
@@ -90,6 +97,36 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
       setStarting(false)
     }
   }}>{t(archived ? 'unarchiveAndContinue' : 'continueQueue')}</Button>
+}
+
+/** DSH 的地址模式用于路由。只读提示需要保留 Codex 明确拒绝与能力缺失的区别。 */
+function adaptSubagentNotice(scope, translate) {
+  let native
+  let restore
+  function sync() {
+    const entry = scope.slots.entries(composer).find(entry => entry.locale === 'subagent')
+    if (entry === native) return
+    restore?.()
+    native = entry
+    restore = undefined
+    const Native = entry?.component
+    if (!Native) return
+    function CodexSubagentNotice({ session, matched, t, ...props }) {
+      const denied = matched.reason === 'unknown' && session?.canAcceptDirectInput === false
+      const capabilityMissing = matched.reason === 'unknown' && session?.openState === 'open' && session.canAcceptDirectInput == null
+      return <Native {...props} session={session} matched={matched} t={(key, ...args) => {
+        if (denied && key === 'readonly.title') return translate('subagentReadonly')
+        if (denied && key === 'readonly.unknown.body') return translate('subagentReadonlyBody')
+        if (capabilityMissing && key === 'readonly.unknown.body') return translate('subagentCapabilityUnknown')
+        return t(key, ...args)
+      }} />
+    }
+    entry.component = CodexSubagentNotice
+    restore = () => { if (entry.component === CodexSubagentNotice) entry.component = Native }
+  }
+  const unsubscribe = scope.on('slots/changed', name => { if (name === composer) sync() })
+  sync()
+  return () => { unsubscribe(); restore?.() }
 }
 
 /** 原生编辑器负责发送手势和草稿。停止后，可在原生队列下方手动继续。 */
@@ -136,6 +173,7 @@ export function installComposer(ctx, catalog) {
   })
 
   ctx.inject(['sessions'], scope => {
+    scope.effect(() => adaptSubagentNotice(scope, t))
     scope.slots.inject(dock, () => scope.slots.register({
       name: dock, id: 'codex-continue-queue', order: 50, locale,
       inject: sessionId => ({ startQueue: scope.sessions.binding(sessionId)?.session.startQueue }),

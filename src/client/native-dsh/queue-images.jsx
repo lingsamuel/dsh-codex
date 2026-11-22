@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { userInputText } from '../../shared/user-input.js'
 import { QueueSteerDock } from './queue-steer.jsx'
 import { FileDownloads } from './file-downloads.jsx'
+import { allowsDirectInput } from './subagents.js'
 
 const dock = 'conversation.input.dock'
 const locale = 'codex.queue.images'
@@ -21,7 +22,7 @@ const copy = {
 }
 
 function QueueImageEdit({ useSession, useProjection, updateQueue, notify, t }) {
-  const editable = useSession(state => !state.archived && state.canAcceptDirectInput !== false)
+  const editable = useSession(state => !state.archived && allowsDirectInput(state))
   const inbox = useProjection('inbox')
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -97,7 +98,7 @@ export function installQueueImages(ctx) {
       function Queue(props) {
         // DSH 的队列组件通过会话地址判断只读状态。此映射只传给队列组件。
         function useQueueSession(select) {
-          return props.useSession(state => select(state.archived || state.canAcceptDirectInput === false
+          return props.useSession(state => select(state.archived || !allowsDirectInput(state)
             ? { ...state, subagent: readOnlyQueue } : state))
         }
         const dockProps = { ...props, useSession: useQueueSession }

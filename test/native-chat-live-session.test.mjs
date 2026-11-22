@@ -30,8 +30,10 @@ const hook = registerHooks({
     return next(specifier, context)
   },
   load(url, context, next) {
-    if (!url.endsWith('.jsx')) return next(url, context)
-    const { code } = transformSync(readFileSync(new URL(url), 'utf8'), { loader: 'jsx', jsx: 'automatic' })
+    if (url.endsWith('.module.css')) return { format: 'module', shortCircuit: true, source: 'export default {}' }
+    const loader = /\.(jsx|tsx|ts)$/.exec(url)?.[1]
+    if (!loader) return next(url, context)
+    const { code } = transformSync(readFileSync(new URL(url), 'utf8'), { loader, jsx: 'automatic' })
     return { format: 'module', shortCircuit: true, source: code }
   },
 })
@@ -41,6 +43,8 @@ const { provideCodexControllers } = await import('../src/client/native-dsh/contr
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
 const { installComposer } = await import('../src/client/native-dsh/composer.jsx')
+const { SubagentReadOnlyComposer } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/SubagentReadOnlyComposer.tsx')
+const { zh: subagentCopy } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/locales.ts')
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
 
@@ -79,9 +83,13 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   let continueQueue
   let starts = 0
   const dock = { options: { id: 'queue' }, component() {}, inject() {} }
+  const readonly = { locale: 'subagent', component: SubagentReadOnlyComposer }
+  const locales = new Map()
+  Object.assign(document, { createElement: () => ({ remove() {} }), head: { append() {} } })
   installComposer({
-    locale: { bind: () => key => key, subscribe: () => () => {} },
-    effect() {},
+    locale: { bind: name => key => locales.get(name)?.[key], subscribe: () => () => {},
+      register: (name, { zh }) => { locales.set(name, zh) } },
+    effect: activate => { const dispose = activate(); if (dispose) t.after(dispose) },
     inject(services, install) {
       if (services.includes('uiSession')) install({
         conversation: { blocks: { set: (id, value) => { block = value }, forget() {} } },
@@ -90,7 +98,7 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
       })
       if (services.length === 1) install({
         slots: { inject: (name, activate) => activate(), register: (options, component) => { continueQueue = component },
-          entries: () => [dock] },
+          entries: name => [name === 'conversation.composer' ? readonly : dock] },
         effect: activate => t.after(activate()), on: () => () => {},
       })
     },
@@ -98,9 +106,16 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   const continueButton = () => continueQueue({ useSession, useProjection, t: key => key, startQueue: () => { starts++ } })
   const queueAddress = () => dock.component({ useSession }).props.children[0].props.useSession(state => state.subagent.address)
   const address = () => session.getSnapshot().subagent.address
+  function readOnlyNotice() {
+    const output = readonly.component({ session: session.getSnapshot(), matched: { reason: 'unknown' }, t: key => subagentCopy[key] })
+    const notice = typeof output.type === 'function' ? output.type(output.props) : output
+    return notice.props.children.map(element => element.props.children)
+  }
+  assert.deepEqual(readOnlyNotice(), [subagentCopy['readonly.title'], subagentCopy['readonly.unknown.body']])
   await snapshot({})
   await emit({ type: 'queue', submissions: [{ id: 'queued', input: [{ type: 'text', text: '待发' }] }] })
-  assert.equal(block.reason, 'readonly')
+  assert.equal(block.reason, '此会话无法直接发送消息')
+  assert.deepEqual(readOnlyNotice(), ['此子智能体暂时只读', 'Codex 尚未提供此子会话的直接输入能力。'])
   assert.equal(continueButton(), null)
   assert.equal(queueAddress().mode, 'unknown')
 
@@ -122,7 +137,8 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   assert.equal(continueButton().props.children, 'unarchiveAndContinue')
 
   await snapshot({ canAcceptDirectInput: false, archived: false })
-  assert.equal(block.reason, 'readonly')
+  assert.equal(block.reason, '此会话无法直接发送消息')
+  assert.deepEqual(readOnlyNotice(), ['此子智能体为只读', 'Codex 不允许直接向此子智能体发送消息。'])
   assert.equal(queueAddress().mode, 'unknown')
   assert.equal(continueButton(), null)
 
@@ -131,8 +147,9 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   assert.equal(block, undefined)
   assert.equal(address().mode, 'continuable')
   store.update(state => { state.childThreads.child.canAcceptDirectInput = null })
-  assert.equal(block.reason, 'readonly')
+  assert.equal(block.reason, '此会话无法直接发送消息')
   assert.equal(address().mode, 'unknown')
+  assert.deepEqual(readOnlyNotice(), ['此子智能体暂时只读', 'Codex 尚未提供此子会话的直接输入能力。'])
 })
 
 test('最近会话和草稿只保留缓存，视图重开时续读原生历史', async t => {

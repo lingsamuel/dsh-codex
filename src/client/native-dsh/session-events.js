@@ -6,7 +6,7 @@ import { readInlineCodexAttachments, readInlineUserImages } from '../native-chat
 import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
-import { subagentAddress } from './subagents.js'
+import { allowsDirectInput, subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
 import { permissionOf } from '../../shared/permissions.js'
@@ -34,7 +34,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     sessionId: thread.id,
     historyMode: thread.historyMode,
     archived: Boolean(thread.archived),
-    canAcceptDirectInput: address ? address.mode === 'continuable' : thread.canAcceptDirectInput,
+    canAcceptDirectInput: thread.canAcceptDirectInput,
     pendingSubmissions: [],
     running: false,
     subagent: address ? { address } : null,
@@ -149,7 +149,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (historyMode !== undefined) current.historyMode = historyMode
       if (canAcceptDirectInput !== undefined) {
         const nextAddress = subagentAddress(thread, canAcceptDirectInput)
-        current.canAcceptDirectInput = nextAddress ? nextAddress.mode === 'continuable' : canAcceptDirectInput
+        current.canAcceptDirectInput = canAcceptDirectInput
         if (nextAddress && current.subagent.address.mode !== nextAddress.mode) current.subagent.address = nextAddress
       }
       if (archived !== undefined) current.archived = Boolean(archived)
@@ -482,7 +482,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function publishQuestions() {
-    const { canAcceptDirectInput } = state.getSnapshot()
+    const canAcceptDirectInput = allowsDirectInput(state.getSnapshot())
     const turnId = rows.at(-1)?.id
     const queued = queueStore.getSnapshot()
     const steers = inbox.getSnapshot().queuedSteers

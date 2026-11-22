@@ -1,6 +1,7 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useMemo, useState } from 'react'
 import { FileDownloads } from './file-downloads.jsx'
+import { allowsDirectInput } from './subagents.js'
 
 const empty = []
 const states = ['steering', 'unconfirmed', 'recoverable']
@@ -18,7 +19,7 @@ function download(item) {
 export function QueueSteerDock({ Dock, dockProps, t }) {
   const { useProjection, useSession, updateQueue, notify } = dockProps
   const records = useProjection('inbox', inbox => inbox?.queuedSteers) ?? empty
-  const canRestore = useSession(state => !state.archived && state.canAcceptDirectInput !== false)
+  const canRestore = useSession(state => !state.archived && allowsDirectInput(state))
   const groups = useMemo(() => Map.groupBy(records, record => record.status), [records])
   const [busy, setBusy] = useState(false)
 
