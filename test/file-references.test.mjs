@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { createFileReferenceRoute } from '../src/host/file-references.mjs'
 
@@ -35,6 +37,24 @@ test('文件补全以原生会话的工作目录为准，并将含空格的路�
   }
 })
 
+test('本地草稿从已选工作目录取得路径候选，无需查找原生线程', async t => {
+  const cwd = await mkdtemp(join(process.cwd(), '.runtime', 'draft-references-'))
+  const owner = new AbortController()
+  t.after(async () => {
+    owner.abort()
+    await rm(cwd, { recursive: true, force: true })
+  })
+  const roots = []
+  const route = createFileReferenceRoute(() => assert.fail('草稿没有原生线程'), root => {
+    roots.push(root)
+    return { list: query => [{ path: `${query}.md`, kind: 'file' }], dispose() {} }
+  }, owner.signal)
+  const get = root => route.fetch(new Request(`http://local${route.path}?${new URLSearchParams({ cwd: root, query: 'notes' })}`))
+  assert.deepEqual(await (await get(cwd)).json(), [{ path: 'notes.md', kind: 'file' }])
+  assert.equal((await get('relative/path')).status, 400)
+  assert.deepEqual(roots, [cwd])
+})
+
 test('DSH 目录补全保留可深入的草稿路径，发送时闭合含空格路径的引号', async () => {
   const { installFileReferences } = await import('../src/client/native-dsh/file-references.js')
   const files = {}
@@ -57,4 +77,35 @@ test('DSH 目录补全保留可深入的草稿路径，发送时闭合含空格�
     for (const dispose of cleanup.reverse()) dispose()
   }
   assert.equal(inputTriggers.serializeReference, normal)
+})
+
+test('DSH 草稿 @ 补全随编辑器的工作目录切换，原生会话仍按 ID 查询', async t => {
+  const { installFileReferences } = await import('../src/client/native-dsh/file-references.js')
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  const files = {}
+  const services = { 'remote.fileReferences': files, 'remote.sessionReferenceResolver': {} }
+  let cwd = '/one'
+  const draft = 'draft-local'
+  const sessions = {
+    binding: id => ({ session: { getSnapshot: () => ({ localDraft: id === draft }) } }),
+    list: { getSnapshot: () => ({ byId: { [draft]: { cwd } } }) },
+  }
+  installFileReferences({ inject(keys, apply) {
+    if (!keys.includes('remote.fileReferences')) return
+    apply({ sessions, get: key => services[key], effect: effect => t.after(effect()) })
+  } })
+  const calls = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    calls.push(Object.fromEntries(url.searchParams))
+    return Response.json([{ path: 'notes.md', kind: 'file' }])
+  })
+  assert.equal((await files.list(draft, 'notes')).ok, true)
+  cwd = '/two'
+  assert.equal((await files.list(draft, 'notes')).ok, true)
+  assert.equal((await files.list('native', 'notes')).ok, true)
+  assert.deepEqual(calls, [
+    { cwd: '/one', query: 'notes' }, { cwd: '/two', query: 'notes' }, { threadId: 'native', query: 'notes' },
+  ])
 })

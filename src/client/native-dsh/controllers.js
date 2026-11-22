@@ -3,12 +3,29 @@ import { observe, projectCatalog, remoteFailure } from './catalog.js'
 import { createCodexHistory } from './session-events.js'
 import { createSessionInput } from './session-input.js'
 import { subagentAddress } from './subagents.js'
-import { writeConversationAction, writeThreadAction } from '../api.js'
+import { directoryTitle, writeConversationAction, writeThreadAction } from '../api.js'
 import { workspaceProjectId } from '../workspaces.js'
 import { searchResultLimit } from '../thread-search.js'
+import { isLocalSessionId } from '../../shared/local-session.js'
 
 const flatSessionOrderKey = '__flat_session_order__'
 const workspaceSlot = 'sidebar.workspaces'
+const localSessionKey = 'dsh.codex.local-sessions'
+
+function localThread({ id, cwd, projectId }) {
+  return { id, cwd, projectId, name: directoryTitle(cwd), localDraft: true, blank: true,
+    firstRequestId: crypto.randomUUID(),
+    historyMode: 'paginated', status: { type: 'idle' } }
+}
+
+function readLocalSessions() {
+  try {
+    const saved = JSON.parse(globalThis.window?.sessionStorage?.getItem(localSessionKey) ?? '[]')
+    return Array.isArray(saved) ? saved.filter(row => isLocalSessionId(row?.id) && typeof row.cwd === 'string').map(localThread) : []
+  } catch {
+    return []
+  }
+}
 
 // 切换会话会释放历史绑定。输入设置与原生文本草稿一样在返回后可继续使用。
 function sessionDraft(storage, threadId) {
@@ -36,6 +53,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
   const permissionDraft = sessionDraft(permissionDrafts, thread.id)
   const worktreeDraft = sessionDraft(worktreeDrafts, thread.id)
   const goalDraft = sessionDraft(goalDrafts, thread.id)
+  const newSession = thread.localDraft ? { cwd: thread.cwd, projectId: thread.projectId ?? undefined } : undefined
   return {
     ctx,
     sessionId: thread.id,
@@ -43,7 +61,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft),
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession, thread.firstRequestId),
       goalDraft,
       worktreeDraft,
       openWorktree,
@@ -64,7 +82,37 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
 
 /** 为 DSH 提供 Codex 会话与工作区控制器。选择与保留引用都留在当前页面。 */
 export function provideCodexControllers(ctx, catalog, withForkFeedback) {
-  const projected = observe(catalog.store, projectCatalog)
+  const localSessions = createSnapshotStore(readLocalSessions())
+  const localSession = id => localSessions.getSnapshot().find(thread => thread.id === id)
+  const setLocalSessions = sessions => {
+    localSessions.set(sessions)
+    // 仅保留占位身份，让 DSH 自己的输入缓存能在重载后用同一个会话 ID 恢复。
+    try {
+      const identities = sessions.map(({ id, cwd, projectId }) => ({ id, cwd, projectId }))
+      globalThis.window?.sessionStorage?.setItem(localSessionKey, JSON.stringify(identities))
+    } catch { /* 当前页仍然可以打开占位会话。 */ }
+  }
+  const forgetLocalSession = id => setLocalSessions(localSessions.getSnapshot().filter(thread => thread.id !== id))
+  const projected = observe({
+    subscribe(listener) {
+      const stopNative = catalog.store.subscribe(listener)
+      const stopLocal = localSessions.subscribe(listener)
+      return () => { stopNative(); stopLocal() }
+    },
+    getSnapshot: (() => {
+      let native, local, merged
+      return () => {
+        const nextNative = catalog.store.getSnapshot()
+        const nextLocal = localSessions.getSnapshot()
+        if (nextNative !== native || nextLocal !== local) {
+          native = nextNative
+          local = nextLocal
+          merged = { ...native, threads: [...native.threads, ...local] }
+        }
+        return merged
+      }
+    })(),
+  }, projectCatalog)
   const list = createSnapshotStore({ ...projected.getSnapshot().sessions, phase: 'pending' })
   let initialization = 'waiting'
   let handledNewThreads = 0
@@ -104,7 +152,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   function syncSessions() {
     syncManualOrder()
     const snapshot = projected.getSnapshot().sessions
-    list.set(initialization === 'ready' ? snapshot : { ...snapshot, phase: 'pending' })
+    list.set({ ...snapshot, phase: initialization === 'ready' ? snapshot.phase : 'pending' })
   }
 
   function retainInfo(id) {
@@ -122,7 +170,9 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     sessionOf: scope => bindings.get(scope[scopeId])?.binding.session,
     retainInfo,
     subagentAddress: id => subagentAddress(catalog.store.getSnapshot().childThreads[id]),
-    refreshProjections: id => catalog.loadChildren(id, true),
+    async refreshProjections(id) {
+      if (!localSession(id)) return catalog.loadChildren(id, true)
+    },
     searchResultLimit,
     async search(query, signal) {
       try {
@@ -134,13 +184,13 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     retain(target, { source, facets = {}, connection = source !== 'recentViews' }) {
       const id = typeof target === 'string' ? target : target.childSessionId
       const { threads, childThreads } = catalog.store.getSnapshot()
-      const thread = childThreads[id] ?? threads.find(item => item.id === id)
+      const thread = childThreads[id] ?? threads.find(item => item.id === id) ?? localSession(id)
       if (!thread) throw new Error(`找不到 Codex 会话 ${id}`)
       const observer = retainInfo(id)
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        const openWorktree = ({ thread, workspacePaths, permission }, confirmed = true, handoff) => {
+        const openWorktree = ({ thread, workspacePaths, permission }, confirmed = true, handoff, keepInput = false) => {
           const current = catalog.store.getSnapshot().threads.find(item => item.id === thread.id)
           if (confirmed || !current) {
             catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, confirmed)
@@ -157,12 +207,13 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
                 reference?.release()
               }
             } else handoff?.()
+            if (confirmed && !keepInput && localSession(id)) forgetLocalSession(id)
           }, 0)
         }
         record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,
           modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, observer, openWorktree), fiber }
         bindings.set(id, record)
-        void catalog.loadChildren(id)
+        if (!thread.localDraft) void catalog.loadChildren(id)
       }
       const { binding } = record
       const heldFacets = Object.keys(facets).filter(facet => facets[facet] === true)
@@ -172,11 +223,11 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
           state.referenceCount += delta
           changeRetainCount(state.retainedBy, source, delta)
           for (const facet of heldFacets) changeRetainCount(state.retainedFacets, facet, delta)
-          if (connection) changeRetainCount(state, 'connectionCount', delta)
+          if (connection && !thread.localDraft) changeRetainCount(state, 'connectionCount', delta)
         })
       }
       shiftRetention(1)
-      if (source === 'mainView') catalog.select(thread, initialization !== 'opening')
+      if (source === 'mainView') catalog.select(thread, !thread.localDraft && initialization !== 'opening')
       let released = false
       function release() {
         if (released) return
@@ -194,15 +245,17 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
       const ready = connection ? binding.ready.then(() => binding) : Promise.resolve(binding)
       return { sessionId: id, binding, ready, release, [Symbol.dispose]: release }
     },
-    async create({ workspaceId, cwd, sessionId } = {}) {
-      const workspace = workspaces.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+    async create({ workspaceId, cwd } = {}) {
+      const workspace = workspaces.list.getSnapshot().items.find(item => workspaceId === undefined
+        ? item.path === cwd : item.workspaceId === workspaceId)
       const directory = cwd ?? workspace?.path
       if (!directory) throw new Error('请先选择新会话的工作目录。')
       const projectId = workspaceProjectId(workspace?.workspaceId)
-      const summaries = list.getSnapshot().byId
-      const reuseThreadId = sessionId ?? workspace?.sessionIds.find(id => summaries[id]?.blank)
-      const { thread, workspacePaths, permission } = await writeConversationAction({ action: 'create', cwd: directory, projectId, reuseThreadId })
-      catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths)
+      const current = localSessions.getSnapshot()
+      const existing = current.find(thread => projectId ? thread.projectId === projectId : !thread.projectId && thread.cwd === directory)
+      if (existing) return existing.id
+      const thread = localThread({ id: `web-new-${crypto.randomUUID()}`, cwd: directory, projectId })
+      setLocalSessions([...current, thread])
       return thread.id
     },
     async fork({ sessionId: threadId, atSeq, onCreated }) {
@@ -266,28 +319,29 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
 
   ctx.provide('sessions', sessions)
   ctx.provide('workspaces', workspaces)
-  ctx.effect(() => catalog.store.subscribe(syncSessions))
+  ctx.effect(() => projected.subscribe(syncSessions))
   ctx.effect(() => ctx.slots.subscribe(workspaceSlot, syncManualOrder))
-  ctx.inject(['uiWorkspace'], scope => {
+  ctx.inject(['uiWorkspace', 'layout'], scope => {
     scope.effect(() => {
       const currentNavigation = scope.uiWorkspace
       navigation = currentNavigation
       function reconcile() {
-        const { busy, error, selected, threads, childThreads } = catalog.store.getSnapshot()
-        if (initialization === 'ready' && selected && !childThreads[selected.id]
+        const { busy, selected, threads, childThreads } = catalog.store.getSnapshot()
+        if (initialization === 'ready' && selected && !localSession(selected.id) && !childThreads[selected.id]
           && !threads.some(thread => thread.id === selected.id)) {
           const next = threads.find(thread => !thread.archived)
           if (next) scope.uiWorkspace.openSession(next.id)
           else scope.uiWorkspace.clearMain()
           return
         }
-        if (initialization !== 'waiting' || busy || error) return
+        if (initialization !== 'waiting' || busy) return
         // DSH 自己保存上次选中的会话，包括只留草稿的空白会话。
         initialization = 'opening'
         const saved = currentNavigation.selection?.getSnapshot()?.sessionId
-        const thread = selected ?? threads.find(thread => thread.id === saved)
+        const thread = selected ?? localSession(saved) ?? threads.find(thread => thread.id === saved)
           ?? threads.find(thread => !thread.archived && !thread.blank) ?? threads[0]
-        if (thread) scope.uiWorkspace.openSession(thread.id)
+        // 原生启动恢复会保留全局面板。只有会话占据主栏时，才主动揭示初始会话。
+        if (thread && !scope.layout?.panelInfo.getSnapshot().activePanelId) currentNavigation.openSession(thread.id)
         initialization = 'ready'
         syncSessions()
       }
@@ -301,6 +355,11 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   })
 
   return async threadId => {
+    if (localSession(threadId)) {
+      forgetLocalSession(threadId)
+      if (catalog.store.getSnapshot().selected?.id === threadId) navigation?.clearMain()
+      return
+    }
     await writeThreadAction({ threadId, action: 'delete' })
     catalog.removeThread(threadId)
   }

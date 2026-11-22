@@ -103,6 +103,8 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   const locales = new Map()
   Object.assign(document, { createElement: () => ({ remove() {} }), head: { append() {} } })
   installComposer({
+    on: () => () => {},
+    slots: { entries: () => [] },
     locale: { bind: name => key => locales.get(name)?.[key], subscribe: () => () => {},
       register: (name, { zh }) => { locales.set(name, zh) } },
     effect: activate => { const dispose = activate(); if (dispose) t.after(dispose) },
@@ -405,6 +407,51 @@ test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原�
   assert.deepEqual(projection.getSnapshot().permission, cached)
 })
 
+test('草稿权限按当前工作目录读取，选择后只写入编辑器草稿', async t => {
+  mockTransport(t)
+  const owner = new AbortController()
+  const id = 'draft-local'
+  const catalog = createSnapshotStore({ selected: { id, cwd: '/first', localDraft: true } })
+  const list = createSnapshotStore({ byId: {} })
+  const generation = createSnapshotStore(0)
+  const permissionDraft = { ...createSnapshotStore(undefined), clear() {} }
+  const projection = createSnapshotStore({ permission: undefined })
+  const session = {
+    permissionDraft,
+    getSnapshot: () => ({ openState: 'open', localDraft: true, live: { status: { type: 'idle' } } }),
+    projections: { faceOf: () => projection },
+    publishPermission: permission => projection.set({ permission }),
+  }
+  const calls = []
+  globalThis.fetch = async (url, { method }) => {
+    calls.push([method, Object.fromEntries(url.searchParams)])
+    return Response.json(method ? { permission: { profileId: ':read-only', source: 'runtime' } }
+      : { profiles: [{ id: ':read-only' }] })
+  }
+  const slot = { locale: 'permission.access', inject: () => ({ hooks: {} }), component: () => null }
+  const remote = {}
+  const cleanups = []
+  const ctx = {
+    locale: { bind: () => key => key, register: () => () => {} },
+    slots: { entries: name => name === 'conversation.input.permission' ? [slot] : [], inject() {} },
+    on: () => () => {},
+    effect(callback) { cleanups.push(callback()) },
+    inject(_keys, callback) { callback(this) },
+    connection: { generation },
+    get: () => remote,
+    sessions: { binding: () => ({ session }), list },
+  }
+  t.after(() => { owner.abort(); for (const stop of cleanups.reverse()) stop?.() })
+  installPermissions(ctx, catalog, owner.signal)
+  await new Promise(setImmediate)
+  assert.equal(await slot.inject(id).select('read-only'), true)
+  assert.equal(permissionDraft.getSnapshot(), ':read-only')
+  assert.equal(projection.getSnapshot().permission, undefined)
+  list.set({ byId: { [id]: { cwd: '/second' } } })
+  await new Promise(setImmediate)
+  assert.deepEqual(calls, [[undefined, { cwd: '/first' }], [undefined, { cwd: '/second' }]])
+})
+
 test('运行中有正文且下轮权限有变化时才提示插话范围', async t => {
   mockTransport(t)
   const owner = new AbortController()
@@ -641,13 +688,12 @@ test('空闲会话提交后立即回显，队列确认与历史推送之间气�
   assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0]?.id, queuedForLater.id)
 })
 
-test('首条消息切换到工作树会话时接续本地气泡，直到原生历史接手', async t => {
+test('首条消息切换到原生会话时接续本地气泡，直到原生历史接手', async t => {
   const source = mockTransport(t)
-  const original = { id: 'original', cwd: '/workspace', blank: true, status: { type: 'idle' } }
   const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
-  const store = createSnapshotStore({ threads: [original], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+  const store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
   const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
-    acceptThread(thread) { store.update(state => { state.threads.push(thread) }) } }
+    acceptThread(thread) { store.update(state => { state.threads = [thread] }) } }
   const services = new Map()
   const ctx = { slots: { subscribe() {} }, provide: (key, value) => services.set(key, value), effect: install => t.after(install()),
     inject(services, install) { install({ ...ctx, uiWorkspace }) },
@@ -664,9 +710,15 @@ test('首条消息切换到工作树会话时接续本地气泡，直到原生�
     view = next
   } }
   provideCodexControllers(ctx, catalog)
+  const createFetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('新建空会话无需 Host 请求') })
+  const id = await services.get('sessions').create({ cwd: native.cwd })
+  assert.match(id, /^web-new-/)
+  assert.equal(createFetch.mock.callCount(), 0)
+  assert.notEqual(await services.get('sessions').create({ cwd: '/different-workspace' }), id)
+  assert.equal(await services.get('sessions').create({ cwd: native.cwd }), id)
+  uiWorkspace.openSession(id)
   t.after(() => view.release())
   const draft = view.binding.session
-  draft.worktreeDraft.set({ kind: 'new', id: crypto.randomUUID() })
   const reply = Promise.withResolvers()
   globalThis.fetch = () => reply.promise
   const content = [{ type: 'text', text: '这是新会话的首条消息' }]
@@ -1749,4 +1801,23 @@ test('以问答开头的轮次保留答复定位，后续插话不会成为轮�
   assert.equal(history.session.editableInput(start.data.turn, inserted.seq), undefined)
   assert.equal(history.session.finishedTurnOfReply(answer.id), 'reply-turn')
   assert.deepEqual(await history.session.findMessage({ turnId: 'reply-turn', itemId: reply.id }), { kind: 'tool-call', id: 'qa' })
+})
+
+test('目录加载完成时保留用户先打开的全局面板', t => {
+  const opened = []
+  const services = new Map()
+  const store = createSnapshotStore({ busy: true, threads: [{ id: 'existing', cwd: '/workspace' }],
+    projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+  const ctx = {
+    provide: (id, value) => services.set(id, value),
+    slots: { subscribe() {} },
+    effect(install) { const stop = install(); if (stop) t.after(stop) },
+    inject(_services, install) { install(this) },
+    uiWorkspace: { openSession: id => opened.push(id) },
+    layout: { panelInfo: createSnapshotStore({ activePanelId: 'settings' }) },
+  }
+  provideCodexControllers(ctx, { store })
+  store.update(state => { state.busy = false })
+  assert.deepEqual(opened, [])
+  assert.equal(services.get('sessions').list.getSnapshot().phase, 'ready')
 })

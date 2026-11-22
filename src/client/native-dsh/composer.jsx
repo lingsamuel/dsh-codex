@@ -3,6 +3,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 import { installQueueImages } from './queue-images.jsx'
 import { allowsDirectInput } from './subagents.js'
+import { isLocalSessionId } from '../../shared/local-session.js'
 
 const composer = 'conversation.composer'
 const bar = 'conversation.composer.bar'
@@ -180,6 +181,32 @@ export function installComposer(ctx, catalog) {
     }, ContinueQueue))
   })
 
+  ctx.effect(() => {
+    const content = 'main.conversation'
+    let current
+    let restore
+    function sync() {
+      const entry = ctx.slots.entries(content)[0]
+      if (entry === current) return
+      restore?.()
+      current = entry
+      const Native = entry?.component
+      if (!Native) return
+      function Content(props) {
+        // 选择另一工作区时打开它自己的新会话，保留原输入栏的草稿。
+        const openWorkspace = isLocalSessionId(props.sessionId)
+          ? workspaceId => props.openWorkspace(workspaceId)
+          : props.openWorkspace
+        return <Native {...props} openWorkspace={openWorkspace} />
+      }
+      entry.component = Content
+      restore = () => { if (entry.component === Content) entry.component = Native }
+    }
+    const stop = ctx.on('slots/changed', name => { if (name === content) sync() })
+    sync()
+    return () => { stop(); restore?.() }
+  })
+
   ctx.inject(['conversation', 'sessions'], scope => scope.effect(() => {
     const { conversation, sessions } = scope
     const rebindDraftFiles = conversation.rebindDraftFiles
@@ -202,7 +229,8 @@ export function installComposer(ctx, catalog) {
       const injectComposer = (sessionId, ...args) => {
         const props = inject(sessionId, ...args)
         if (sessionId === undefined) return props
-        return { ...props, goalDraft: sessions.binding(sessionId)?.session.goalDraft, addFiles(files, directories) {
+        const binding = sessions.binding(sessionId)
+        return { ...props, goalDraft: binding?.session.goalDraft, addFiles(files, directories) {
           if (!sessions.binding(sessionId)) return t('fileInputUnavailable')
           if (directories?.size) return t('filesOnly')
           // DSH 会暂存普通文件。图片草稿仍由原生组件在提交时编码。

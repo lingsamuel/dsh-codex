@@ -56,7 +56,8 @@ export function useCommandAction(session, archived) {
     setError('')
     const before = session.getSnapshot()
     try {
-      const result = await writeCommandAction({ threadId: session.sessionId, ...parameters, ...(archived && { unarchive: true }) })
+      const result = await (session.runCommand?.(parameters)
+        ?? writeCommandAction({ threadId: session.sessionId, ...parameters, ...(archived && { unarchive: true }) }))
       accept?.(result, before)
     } catch (failure) {
       if (mounted.current) setError(failure.message)

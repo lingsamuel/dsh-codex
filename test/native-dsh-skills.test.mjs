@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import { join } from 'node:path'
 import { test } from 'node:test'
+import { WebSocketServer } from 'ws'
 
 test('技能来源沿用 DSH 的触发菜单，按会话读取并只替换光标处的技能词', async t => {
   const previousDocument = globalThis.document
@@ -27,14 +32,15 @@ test('技能来源沿用 DSH 的触发菜单，按会话读取并只替换光标
       return () => { source = undefined }
     },
   }
-  const scope = { inputTriggers, effect: effect => effect() }
-  const ctx = { inject: (keys, install) => {
-    assert.deepEqual(keys, ['inputTriggers'])
-    return install(scope)
-  } }
+  const sessions = {
+    binding: id => ({ session: { getSnapshot: () => ({ localDraft: id === 'draft-local' }) } }),
+    list: { getSnapshot: () => ({ byId: { 'draft-local': { cwd: '/workspace' } } }) },
+  }
+  const scope = { inputTriggers, sessions, effect: effect => effect() }
+  const ctx = { inject: (_keys, install) => install(scope) }
   const actx = { effect: effect => effect() }
   t.mock.method(globalThis, 'fetch', async (url, { signal }) => {
-    requests.push({ path: url.pathname, threadId: url.searchParams.get('threadId'), signal })
+    requests.push({ path: url.pathname, query: Object.fromEntries(url.searchParams), signal })
     return Response.json({ skills: [{ name: 'review', label: 'Code review', description: 'Inspect code' },
       { name: 'draft', description: 'Draft a report' }] })
   })
@@ -53,7 +59,11 @@ test('技能来源沿用 DSH 的触发菜单，按会话读取并只替换光标
   const signal = new AbortController().signal
   const found = await source.candidates({ sessionId: 'old-session' }, { query: 'CODE', signal })
   assert.deepEqual(found, [{ name: 'review', label: 'Code review', description: 'Inspect code' }])
-  assert.deepEqual(requests, [{ path: '/api/codex/skills', threadId: 'old-session', signal }])
+  assert.deepEqual(await source.candidates({ sessionId: 'draft-local' }, { query: 'CODE', signal }), found)
+  assert.deepEqual(requests, [
+    { path: '/api/codex/skills', query: { threadId: 'old-session' }, signal },
+    { path: '/api/codex/skills', query: { cwd: '/workspace' }, signal },
+  ])
   assert.deepEqual(source.onPick({ candidate: found[0] }), { text: '$review ' })
 
   controller.track('/goal', 5, guard, 5)
@@ -65,4 +75,40 @@ test('技能来源沿用 DSH 的触发菜单，按会话读取并只替换光标
   assert.equal(source, undefined)
   assert.equal(inputTriggers.sessionOf, sessionOf)
   assert.equal(controller.track, nativeTrack)
+})
+
+test('Host 为草稿按工作目录读取启用的技能，不启动或读取会话', async t => {
+  const { createSkillsRoute } = await import('../src/host/skills.mjs')
+  const directory = await mkdtemp(join(process.cwd(), '.runtime', 'draft-skill-'))
+  const socket = join(directory, 'api.sock')
+  const server = createServer()
+  const ws = new WebSocketServer({ server })
+  const calls = []
+  ws.on('connection', client => client.on('message', raw => {
+    const { id, method, params } = JSON.parse(raw)
+    if (id === undefined) return
+    if (method !== 'initialize') calls.push([method, params])
+    const result = method === 'initialize' ? {} : { data: [{ cwd: directory, skills: [
+      { name: 'review', path: '/skills/review/SKILL.md', enabled: true },
+      { name: 'hidden', path: '/skills/hidden/SKILL.md', enabled: false },
+    ] }] }
+    client.send(JSON.stringify({ id, result }))
+  }))
+  server.listen(socket)
+  await once(server, 'listening')
+  t.after(async () => {
+    for (const client of ws.clients) client.terminate()
+    ws.close()
+    const closed = once(server, 'close')
+    server.close()
+    await closed
+    await rm(directory, { recursive: true, force: true })
+  })
+  const route = createSkillsRoute(socket)
+  const get = cwd => route.fetch(new Request(`http://local${route.path}?${new URLSearchParams({ cwd })}`))
+  const response = await get(directory)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { skills: [{ name: 'review', path: '/skills/review/SKILL.md' }] })
+  assert.equal((await get('relative/path')).status, 400)
+  assert.deepEqual(calls, [['skills/list', { cwds: [directory] }]])
 })

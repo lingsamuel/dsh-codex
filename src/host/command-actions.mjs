@@ -1,6 +1,7 @@
 import { clearTimeout, setTimeout } from 'node:timers'
 import { CodexRpcError, openCodexReader, withCodexReader } from './app-server.mjs'
 import { submissionRuntime, validateSubmissionSettings } from './conversation-actions.mjs'
+import { isLocalSessionId } from '../shared/local-session.js'
 import { readLatestTurn } from './live-history.mjs'
 import { addressableThread, isArchived, readConversationQueue, resumeThread, unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 import { isPlanMode, planModeOf } from '../shared/plan-mode.js'
@@ -56,15 +57,15 @@ async function resumeForCommand(request, thread, onResume) {
   return resumeThread(request, thread, onResume)
 }
 
-async function startCommandTurn(request, thread, action, target, signal) {
+async function startCommandTurn(request, thread, action, target, signal, prepare = () => resumeForCommand(request, thread), write = request) {
   const threadId = thread.id
   if (!['idle', 'notLoaded'].includes(thread.status?.type)) conflict('请在当前轮次结束后执行此命令。')
   if (action === 'compact' && !(await readLatestTurn(request, threadId, 'notLoaded'))) conflict('此会话还没有可压缩的历史。')
-  await resumeForCommand(request, thread)
+  await prepare()
   // 恢复响应可能先于原生队列或目标调度，开始命令前重新读取运行状态。
   if ((await addressableThread(request, threadId)).status?.type !== 'idle') conflict('请在当前轮次结束后执行此命令。')
   const result = action === 'compact' ? await request('thread/compact/start', { threadId })
-    : await request('review/start', { threadId, target })
+    : await write('review/start', { threadId, target })
   await waitForThreadActivity(request, threadId, signal)
   return result
 }
@@ -87,7 +88,7 @@ function goalUpdate({ action, objective, tokenBudget, expectedGoal }) {
     ...((tokenBudget !== undefined || expectedGoal) && { tokenBudget: tokenBudget ?? null }) }
 }
 
-async function updateGoal(request, threadId, fields, update, signal, permissions) {
+async function updateGoal(request, threadId, fields, update, signal, permissions, write = request, selectMode, creationPermission) {
   const { action, expectedGoal, unarchive, modelDraft, permissionDraft } = fields
   const hasDraft = action === 'goal-create' && (modelDraft !== undefined || permissionDraft !== undefined)
   const thread = await readCommandThread(request, threadId, unarchive === true,
@@ -114,14 +115,16 @@ async function updateGoal(request, threadId, fields, update, signal, permissions
   }
 
   let permission
-  if (hasDraft || (update.status === 'active' && thread.status?.type === 'notLoaded')) {
+  const prepare = hasDraft || (update.status === 'active' && thread.status?.type === 'notLoaded')
+  if (prepare) {
     await checkColdQueue(request, thread)
-    const ready = await submissionRuntime(request, thread, hasDraft ? fields : {}, signal, permissions)
+    const ready = await submissionRuntime(request, thread, hasDraft ? fields : {}, signal, permissions, undefined, creationPermission)
     permission = ready.permission
-    await readCurrentGoal()
   }
+  await selectMode?.()
+  if (prepare || selectMode) await readCurrentGoal()
   // 一次原生写入更新目标与预算，并以 Codex 返回的阶段和用量为准。
-  const result = await request('thread/goal/set', { threadId, origin: 'user', ...update })
+  const result = await write('thread/goal/set', { threadId, origin: 'user', ...update })
   return { goal: result.goal, ...(permission && { permission }) }
 }
 
@@ -153,8 +156,9 @@ export async function selectPlanMode(socketPath, signal, threadId, mode, unarchi
       runtime = settings.thread
     }
     if (planModeOf(settings ?? draftSettings ?? runtime) === mode) return { mode, confirmed: true }
-    const model = settings?.model ?? draftSettings?.model ?? runtime.model
-    const effort = settings?.reasoningEffort ?? draftSettings?.effort ?? draftSettings?.reasoningEffort ?? runtime.reasoningEffort ?? null
+    // 线程刚确认的模型选择可能还未进入创建连接的旧设置快照。
+    const model = settings?.model ?? runtime.model ?? draftSettings?.model
+    const effort = settings?.reasoningEffort ?? runtime.reasoningEffort ?? draftSettings?.effort ?? draftSettings?.reasoningEffort ?? null
     await request('thread/settings/update', { threadId, collaborationMode: { mode, settings: {
       model: requiredText(model, 'Codex 尚未提供当前会话的模型。'), reasoning_effort: effort, developer_instructions: null,
     } } })
@@ -171,7 +175,38 @@ export async function selectPlanMode(socketPath, signal, threadId, mode, unarchi
 }
 
 /** 各命令通过同一个会话提交顺序转成明确的原生操作。 */
-export function createCommandActionRoute(socketPath, ownerSignal, submit, permissions) {
+export function createCommandActionRoute(socketPath, ownerSignal, submit, permissions, submitFirst) {
+  function runFirstCommand(fields, input, signal) {
+    const { action, planMode } = fields
+    const isGoal = action === 'goal-create'
+    return submitFirst(fields, input, signal, (target, writeNative, creationPermission) =>
+      withCodexReader(socketPath, signal, async rpc => {
+        const mode = planMode && (isGoal ? 'default' : planMode)
+        const selectMode = mode && (async () => {
+          const { confirmed } = await selectPlanMode(socketPath, signal, target.id, mode, false, permissions.observeDraftSettings)
+          if (!confirmed) conflict('Codex 尚未确认协作模式。')
+        })
+        const write = (method, params) => writeNative(rpc, method, params)
+        if (isGoal) return updateGoal(rpc, target.id, fields, input, signal, permissions, write, selectMode, creationPermission)
+
+        const thread = await readCommandThread(rpc, target.id, false,
+          current => validateSubmissionSettings(rpc, current, fields, permissions))
+        let permission
+        const result = await startCommandTurn(rpc, thread, action, input, signal, async () => {
+          await checkColdQueue(rpc, thread)
+          const ready = await submissionRuntime(rpc, thread, fields, signal, permissions, undefined, creationPermission)
+          permission = ready.permission
+          await selectMode?.()
+        }, write)
+        return { ...result, ...(permission && { permission }) }
+      }),
+    // 原生审查没有客户端提交 ID，连接丢失后应在目标线程中核对。
+    isGoal ? async (rpc, thread) => {
+      const { goal } = await rpc('thread/goal/get', { threadId: thread.id })
+      if (goal?.objective === input.objective && (goal.tokenBudget ?? null) === (input.tokenBudget ?? null)) return { goal }
+    } : undefined)
+  }
+
   return {
     path: '/api/codex/command-action', methods: ['POST'], requestBody: 'buffered',
     async fetch(request) {
@@ -183,6 +218,10 @@ export function createCommandActionRoute(socketPath, ownerSignal, submit, permis
         const fields = await request.json().catch(() => null)
         const { action, mode, unarchive } = fields ?? {}
         const threadId = requiredText(fields?.threadId, '缺少 Codex 线程 ID。')
+        const local = isLocalSessionId(threadId)
+        if (local ? action !== 'goal-create' && action !== 'review' : fields.newSession !== undefined) {
+          return json({ error: '无效的新会话命令。' }, 400)
+        }
         if (action === 'plan') {
           if (!isPlanMode(mode)) return json({ error: '无效的协作模式。' }, 400)
           return json(await submit(threadId, () => selectPlanMode(socketPath, signal, threadId, mode, unarchive === true, permissions.observeDraftSettings)))
@@ -196,6 +235,7 @@ export function createCommandActionRoute(socketPath, ownerSignal, submit, permis
         const isGoal = goalActions.has(action)
         if (!isGoal && action !== 'compact' && action !== 'review') return json({ error: '无效的命令。' }, 400)
         const input = isGoal ? goalUpdate(fields) : action === 'review' ? reviewTarget(fields.target) : undefined
+        if (local) return json(await runFirstCommand({ ...fields, threadId }, input, signal))
         return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
           if (isGoal) return updateGoal(rpc, threadId, fields, input, signal, permissions)
           const thread = await readCommandThread(rpc, threadId, unarchive === true)
@@ -203,7 +243,9 @@ export function createCommandActionRoute(socketPath, ownerSignal, submit, permis
         })))
       } catch (error) {
         if (error instanceof CodexRpcError) {
-          return json({ error: error.message }, error.code === -32602 ? 400 : error.code === -32600 ? 409 : 502)
+          const { reason, newSessionRecovery } = error.data ?? {}
+          return json({ error: error.message, ...(reason && { reason }), ...(newSessionRecovery && { newSessionRecovery }) },
+            error.code === -32602 ? 400 : error.code === -32600 ? 409 : 502)
         }
         return json({ error: '无法连接 Codex App Server。' }, 503)
       }

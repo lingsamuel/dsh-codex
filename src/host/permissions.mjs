@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, openCodexReader, readCodexPages, withCodexReader } from './app-server.mjs'
 import { hasNoMaterializedHistory } from './live-history.mjs'
 import { addressableThread, createThreadSubmissionQueue, isArchived } from './thread-runtime.mjs'
 import { permissionOf } from '../shared/permissions.js'
+
+const creationIdleMs = 60_000
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -112,6 +114,46 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     return drafts.get(threadId)?.permission
   }
 
+  function forgetCreation(draft) {
+    clearTimeout(draft.idleTimer)
+    if (drafts.get(draft.id) === draft) drafts.delete(draft.id)
+  }
+
+  function finishCreation(draft) {
+    draft.finished = true
+    if (!draft.active) {
+      forgetCreation(draft)
+      draft.connection.close()
+    }
+  }
+
+  function startCreationIdleTimer(draft) {
+    draft.idleTimer = setTimeout(() => finishCreation(draft), creationIdleMs).unref()
+  }
+
+  /** 显式操作期间保留创建订阅。返回的结束函数应在操作成功、失败或取消时调用。 */
+  function holdCreation(threadId) {
+    const draft = drafts.get(threadId)
+    if (!draft) return undefined
+    clearTimeout(draft.idleTimer)
+    draft.active++
+    let ended = false
+    return () => {
+      if (ended) return
+      ended = true
+      draft.active--
+      if (draft.active || drafts.get(threadId) !== draft) return
+      if (draft.finished) finishCreation(draft)
+      else startCreationIdleTimer(draft)
+    }
+  }
+
+  /** 首次原生操作结束后释放订阅，仍在使用该连接的设置确认可以先完成。 */
+  function releaseCreation(threadId) {
+    const draft = drafts.get(threadId)
+    if (draft) finishCreation(draft)
+  }
+
   /** 保留网页草稿的创建订阅，空线程尚不能经 resume 接收原生设置确认。 */
   async function withThreadCreation(signal, create) {
     const creation = new AbortController()
@@ -128,22 +170,22 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
         if (method === 'thread/settings/updated') {
           draft.settings = params.threadSettings
           draft.permission = remember(draft.id, draft.settings)
-          draft.confirm?.(draft.settings)
+          for (const observe of draft.observers) observe(draft.settings)
         } else if (['turn/started', 'thread/archived', 'thread/deleted', 'thread/closed'].includes(method)) {
-          // 原生开始首轮后可按普通线程处理。已在等待的设置确认仍使用创建订阅。
-          draft.finished = true
-          if (!draft.confirm) connection.close()
+          // 原生首轮通知可能先于提交回执，等正在使用创建订阅的操作结束。
+          finishCreation(draft)
         }
       })
       const result = await create(connection.request, started => {
         const id = started.thread.id
-        draft = { id, connection, settings: started, permission: remember(id, started) }
+        draft = { id, connection, settings: started, permission: remember(id, started), active: 0, observers: new Set() }
         return draft.permission
       })
       signal.throwIfAborted()
       if (draft && !draft.finished) {
         drafts.set(draft.id, draft)
-        void connection.closed.then(() => drafts.delete(draft.id))
+        startCreationIdleTimer(draft)
+        void connection.closed.then(() => forgetCreation(draft))
         retained = true
       }
       return result
@@ -157,11 +199,12 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
   function observeDraftSettings(threadId, observe) {
     const draft = drafts.get(threadId)
     if (!draft) return undefined
-    draft.confirm = observe
     observe(draft.settings)
+    const end = holdCreation(threadId)
+    draft.observers.add(observe)
     return () => {
-      draft.confirm = undefined
-      if (draft.finished) draft.connection.close()
+      draft.observers.delete(observe)
+      end?.()
     }
   }
 
@@ -212,6 +255,8 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
   return {
     remember,
     withThreadCreation,
+    holdCreation,
+    releaseCreation,
     observeDraftSettings,
     readDraftSettings: threadId => drafts.get(threadId)?.settings,
     readDraftPermission,
@@ -224,10 +269,26 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
       return { permissions: profileId }
     },
     catalogRoute: route('permissions', 'GET', async (request, signal) => {
-      const threadId = new URL(request.url).searchParams.get('threadId')
+      const { searchParams } = new URL(request.url)
+      const threadId = searchParams.get('threadId')
+      const cwd = searchParams.get('cwd')
+      if (!threadId && cwd !== null && !isAbsolute(cwd)) throw invalid('请选择有效的工作目录。')
       return withCodexReader(socketPath, signal, async rpc => {
         const thread = threadId ? (await rpc('thread/read', { threadId })).thread : undefined
-        const [profiles, defaultProfile] = await Promise.all([permissionProfiles(rpc, thread?.cwd), preference.get()])
+        const [profiles, defaultProfile] = await Promise.all([permissionProfiles(rpc, threadId ? thread?.cwd : cwd), preference.get()])
+        if (!threadId && cwd) {
+          const config = defaultProfile === null ? (await rpc('config/read', { cwd, includeLayers: false }).catch(error => {
+            if (error instanceof CodexRpcError && error.code === -32601) return null
+            throw error
+          }))?.config : undefined
+          const profileId = defaultProfile ?? config?.default_permissions
+          const permission = permissionOf({
+            ...config,
+            activePermissionProfile: profileId ? { id: profileId } : undefined,
+            sandbox: config?.sandbox_mode ? { type: config.sandbox_mode } : undefined,
+          }, 'configured')
+          return { profiles, defaultProfile, ...(permission && { permission }) }
+        }
         const cached = known.get(threadId)
         const permission = readDraftPermission(threadId)
           ?? (cached?.source === 'runtime' ? { ...cached, source: 'saved' } : cached)

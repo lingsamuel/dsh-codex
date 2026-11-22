@@ -2,7 +2,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createElement } from 'react'
 import { readPage, writePermissionAction } from '../api.js'
-import { remoteFailure } from './catalog.js'
+import { remoteFailure, sessionReadScope } from './catalog.js'
 import { adaptSlot } from './slot-adapter.js'
 import { permissionOptionValue } from '../../shared/permissions.js'
 
@@ -12,7 +12,7 @@ const labels = {
   zh: {
     follow: '跟随 Codex', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '已提交，首轮确认：{mode}',
     defaultDescription: '仅用于从此网页新建的 Codex 会话。', unavailable: '所选默认权限不再可用。',
-    draft: '发送或继续队列时应用：{mode}',
+    draft: '发送或继续队列时应用：{mode}', configured: '新会话默认：{mode}',
     sandbox: '沙箱：{mode}', approval: '审批：{policy}', readOnly: '仅可查看', workspaceWrite: '工作区内修改',
     dangerFullAccess: '完全权限', externalSandbox: '外部沙箱', 'on-request': '按需', untrusted: '不受信时', never: '从不', granular: '按类别',
     managed: '托管沙箱', reviewer: '审批人：{name}', user: '用户', auto_review: '自动审查', guardian_subagent: '审查子代理',
@@ -25,7 +25,7 @@ const labels = {
   en: {
     follow: 'Follow Codex', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Submitted for first turn: {mode}',
     defaultDescription: 'Applies only to new Codex sessions created from this web interface.', unavailable: 'The saved default is no longer selectable.',
-    draft: 'Apply on send or queue start: {mode}',
+    draft: 'Apply on send or queue start: {mode}', configured: 'Default for new sessions: {mode}',
     sandbox: 'Sandbox: {mode}', approval: 'Approval: {policy}', readOnly: 'Read Only', workspaceWrite: 'Workspace Write',
     dangerFullAccess: 'Full Access', externalSandbox: 'External Sandbox', 'on-request': 'On request', untrusted: 'When untrusted', never: 'Never', granular: 'By category',
     managed: 'Managed sandbox', reviewer: 'Reviewer: {name}', user: 'User', auto_review: 'Auto review', guardian_subagent: 'Review subagent',
@@ -53,7 +53,7 @@ function pickerOption(profile) {
 function nativeCatalog(snapshot, t) {
   const options = snapshot.profiles.map(pickerOption)
   return {
-    options, defaultOptions: [{ value: follow, name: t('follow') }, ...options],
+    options, permission: snapshot.permission, defaultOptions: [{ value: follow, name: t('follow') }, ...options],
     defaultPreset: snapshot.defaultProfile == null ? follow : permissionOptionValue(snapshot.defaultProfile),
   }
 }
@@ -93,7 +93,7 @@ function permissionsDiffer(turn, next) {
 
 function canSelect(state) {
   return state.openState === 'open' && !state.subagent && state.canAcceptDirectInput !== false
-    && ['idle', 'active', 'notLoaded'].includes(state.live?.status?.type)
+    && (state.localDraft === true || ['idle', 'active', 'notLoaded'].includes(state.live?.status?.type))
 }
 
 function PermissionError({ usePermissionError, dismiss }) {
@@ -118,6 +118,7 @@ export function installPermissions(ctx, catalog, signal) {
   }, PermissionError))
 
   let defaultDirectory
+  let refreshDirectory
   function publishDefaults(snapshot) {
     defaultDirectory = nativeCatalog(snapshot, t)
     const { defaultPreset, defaultOptions } = defaultDirectory
@@ -142,6 +143,7 @@ export function installPermissions(ctx, catalog, signal) {
     try {
       await writePermissionAction({ action: 'default', profileId }, signal)
       await load()
+      refreshDirectory?.(true)
     } catch (error) { defaultError(error) }
   }
 
@@ -154,21 +156,26 @@ export function installPermissions(ctx, catalog, signal) {
     }
     Object.defineProperty(remote, 'catalog', { configurable: true, enumerable: true, value: readCatalog })
     let threadId
+    let previousQuery
     let controller
     let initial = true
     function refreshCurrent(force = false) {
-      const id = catalog.getSnapshot().selected?.id
-      if (!initial && threadId === id && !force) return
+      const selected = catalog.getSnapshot().selected
+      const id = selected?.id
+      const query = id && sessionReadScope(scope.sessions, id, selected)
+      if (!initial && threadId === id && previousQuery?.cwd === query?.cwd
+        && previousQuery?.threadId === query?.threadId && !force) return
       initial = false
       threadId = id
+      previousQuery = query
       controller?.abort()
       directory.set({ value: null })
-      if (!id) return
+      if (!query) return
       controller = new AbortController()
       const requestSignal = AbortSignal.any([signal, controller.signal])
-      const session = scope.sessions.binding(id)?.session
+      const session = query.threadId && scope.sessions.binding(id)?.session
       const before = session?.projections.faceOf('permissions').getSnapshot()
-      void readPage('permissions', { threadId: id }, requestSignal).then(snapshot => {
+      void readPage('permissions', query, requestSignal).then(snapshot => {
         if (requestSignal.aborted) return
         directory.set({ value: nativeCatalog(snapshot, t) })
         // HTTP 缓存可能比线程的通知或原生历史更早，仅补齐缺失的权限状态。
@@ -180,10 +187,14 @@ export function installPermissions(ctx, catalog, signal) {
       })
     }
     const stop = catalog.subscribe(() => refreshCurrent())
+    const stopSessions = scope.sessions.list?.subscribe(() => refreshCurrent())
     const stopGeneration = scope.connection.generation.subscribe(() => refreshCurrent(true))
+    refreshDirectory = refreshCurrent
     refreshCurrent()
     return () => {
+      refreshDirectory = undefined
       stop()
+      stopSessions?.()
       stopGeneration()
       controller?.abort()
       if (Object.getOwnPropertyDescriptor(remote, 'catalog')?.value !== readCatalog) return
@@ -201,7 +212,7 @@ export function installPermissions(ctx, catalog, signal) {
         const target = directory.getSnapshot().value?.options.find(option => option.value === value)
         const state = session?.getSnapshot()
         if (!state || !target || !canSelect(state)) return false
-        if (state.archived) {
+        if (state.localDraft === true || state.archived) {
           session.permissionDraft.set(target.id)
           return true
         }
@@ -226,12 +237,13 @@ export function installPermissions(ctx, catalog, signal) {
       const editable = props.useSession(canSelect)
       const turn = props.useSession(state => state.running ? state.live.turnPermission ?? null : undefined)
       const hasText = props.useInput(input => input.phase === 'plain' && Boolean(input.draft.trim()))
-      const current = draft ? { profileId: draft, source: 'draft' } : projection?.permission
-      const available = props.usePermissionCatalog(state => state.value?.options)
+      const local = props.useSession(state => state.localDraft === true)
+      const directory = props.usePermissionCatalog(state => state.value)
+      const current = draft ? { profileId: draft, source: 'draft' } : local ? directory?.permission : projection?.permission
       const value = current?.profileId && permissionOptionValue(current.profileId)
-      const currentValue = current?.source === 'runtime' && available?.some(option => option.value === value)
-        ? value : effectiveLabel(current, t)
-      const summary = details(current, t)
+      const currentValue = current?.source === 'runtime' && directory?.options.some(option => option.value === value)
+        ? value : local && !current ? t('follow') : effectiveLabel(current, t)
+      const summary = local && !current ? t('follow') : details(current, t)
       const title = current?.source === 'runtime' ? t('subsequent', { details: summary || effectiveLabel(current, t) }) : summary
       const running = turn !== undefined
       const showSteerScope = hasText && permissionsDiffer(turn, projection?.permission)

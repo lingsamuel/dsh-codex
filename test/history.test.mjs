@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { EventEmitter, once } from 'node:events'
 import { appendFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -14,6 +15,7 @@ import { createHistoryRoutes } from '../src/host/history.mjs'
 import { createWatchRoute } from '../src/host/live-watch.mjs'
 import { asyncQuestionItemId, encodeQuestionReplies } from '../src/shared/question-replies.js'
 import { fileAttachmentInput } from '../src/shared/file-attachments.js'
+import { createLocalAttachmentStore } from './support/dsh-attachments.mjs'
 import { codexTaskToolsConfig, codexTaskToolsServerName } from '../src/host/codex-task-tools-config.mjs'
 import { encodeThreadReference } from '../src/shared/thread-references.js'
 
@@ -53,11 +55,13 @@ async function fakeCodex(t, methods) {
   })
   const owner = new AbortController()
   t.after(() => owner.abort())
-  const routes = createHistoryRoutes(socketPath, owner.signal)
-  const get = (path, options) => routes.find(route => path.split('?')[0] === route.path)
-    ?.fetch(new Request(`http://localhost${path}`, options)) ?? Response.json({}, { status: 404 })
+  const openRoutes = cacheDirectory => {
+    const routes = createHistoryRoutes(socketPath, owner.signal, cacheDirectory)
+    return (path, options) => routes.find(route => path.split('?')[0] === route.path)
+      ?.fetch(new Request(`http://localhost${path}`, options)) ?? Response.json({}, { status: 404 })
+  }
   return {
-    get, messages, clientClosed, socketPath, directory,
+    get: openRoutes(), openRoutes, messages, clientClosed, socketPath, directory,
     broadcast(message) {
       for (const client of ws.clients) client.send(JSON.stringify(message))
     },
@@ -71,6 +75,12 @@ function postCommand(get, action, fields) {
   })
 }
 
+function postCodex(get, path, fields) {
+  return get(`/api/codex/${path}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields),
+  })
+}
+
 function openHistoryProjection(directory) {
   const db = new DatabaseSync(join(directory, 'thread_history_1.sqlite'))
   db.exec(`PRAGMA journal_mode = WAL;
@@ -78,6 +88,160 @@ function openHistoryProjection(directory) {
       next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL);`)
   return db
 }
+
+test('新会话只在首发时创建，回执丢失可按原生队列确认', async t => {
+  let thread
+  let queued
+  let firstConnection
+  const fixture = await fakeCodex(t, {
+    'thread/start': ({ cwd }, client) => {
+      firstConnection = client
+      thread = { id: 'native-draft', cwd, historyMode: 'paginated', status: { type: 'idle' } }
+      return { result: { thread } }
+    },
+    'thread/read': () => ({ result: { thread } }),
+    'thread/queue/add': ({ input, clientUserMessageId }, client) => {
+      queued = { id: 'queued', input, clientUserMessageId }
+      client.terminate()
+    },
+    'thread/queue/list': () => ({ result: { data: queued ? [queued] : [] } }),
+    'thread/queue/start': () => ({ result: { turn: { id: 'first-turn' } } }),
+  })
+  const get = fixture.openRoutes(join(fixture.directory, 'profile'))
+  const threadId = 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd'
+  const attempt = { action: 'prompt', threadId, newSession: { cwd: fixture.directory }, mode: 'queue',
+    clientUserMessageId: 'send-once', input: [{ type: 'text', text: '这条消息只发送一次' }] }
+  assert.equal((await get('/api/codex/drafts')).status, 404)
+  assert.equal((await postCodex(get, 'conversation-action', { action: 'create', cwd: fixture.directory })).status, 400)
+  assert.equal((await postCodex(get, 'conversation-action', { ...attempt, input: [] })).status, 400)
+  assert.equal(fixture.messages.length, 0)
+
+  const lost = await postCodex(get, 'conversation-action', attempt)
+  assert.equal(lost.status, 409)
+  const failure = await lost.json()
+  assert.equal(failure.reason, 'new-session-delivery-unconfirmed')
+  assert.equal(failure.newSessionRecovery.thread.id, thread.id)
+  if (firstConnection.readyState < 2) await once(firstConnection, 'close', { signal: AbortSignal.timeout(1_000) })
+
+  const changed = await postCodex(get, 'conversation-action', { ...attempt, input: [{ type: 'text', text: '已修改' }] })
+  assert.equal(changed.status, 409)
+  assert.equal((await changed.json()).reason, 'new-session-input-changed')
+  const [recovered, replayed] = await Promise.all([
+    postCodex(get, 'conversation-action', attempt),
+    postCodex(get, 'conversation-action', attempt),
+  ])
+  for (const response of [recovered, replayed]) {
+    assert.equal(response.status, 200)
+    const receipt = await response.json()
+    assert.equal(receipt.thread.id, thread.id)
+    assert.deepEqual(receipt.workspacePaths, {})
+    assert.equal(receipt.queuedSubmission.id, queued.id)
+    assert.equal(receipt.clientUserMessageId, attempt.clientUserMessageId)
+  }
+  assert.deepEqual(fixture.messages.filter(item => ['thread/start', 'thread/queue/add'].includes(item.method))
+    .map(item => item.method), ['thread/start', 'thread/queue/add'])
+})
+
+test('明确拒绝入队后，向变更的目录和项目重新启动原生线程', async t => {
+  let rejected = true
+  const threads = new Map()
+  const fixture = await fakeCodex(t, {
+    'thread/start': ({ cwd, projectId }) => {
+      const thread = { id: `native-${threads.size}`, cwd, projectId, status: { type: 'active' } }
+      threads.set(thread.id, thread)
+      return { result: { thread } }
+    },
+    'thread/read': ({ threadId }) => ({ result: { thread: threads.get(threadId) } }),
+    'thread/queue/add': ({ clientUserMessageId }) => rejected
+      ? { error: { code: -32602, message: '尚未入队' } }
+      : { result: { queuedSubmission: { id: 'queued-new', clientUserMessageId } } },
+  })
+  const get = fixture.openRoutes(join(fixture.directory, 'profile'))
+  const cwd = join(fixture.directory, 'new-project')
+  await mkdir(cwd)
+  const attempt = { action: 'prompt', threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd',
+    newSession: { cwd: fixture.directory, projectId: 'first-project' }, mode: 'queue',
+    clientUserMessageId: 'original-attempt', input: [{ type: 'text', text: '待发' }] }
+  assert.equal((await postCodex(get, 'conversation-action', attempt)).status, 400)
+  rejected = false
+  const retried = await postCodex(get, 'conversation-action', { ...attempt, newSession: { cwd, projectId: 'second-project' } })
+  assert.equal(retried.status, 200)
+  const { thread } = await retried.json()
+  assert.deepEqual([thread.id, thread.cwd, thread.projectId], ['native-1', cwd, 'second-project'])
+  const writes = fixture.messages.filter(({ method }) => method === 'thread/queue/add')
+  assert.deepEqual(writes.map(({ params }) => params.threadId), ['native-0', 'native-1'])
+})
+
+test('首条消息明确被拒后，原生空线程卸载仍可重试', async t => {
+  let thread
+  let starts = 0
+  let rejected = true
+  const { get, directory, messages } = await fakeCodex(t, {
+    'thread/start': ({ cwd }) => {
+      thread = { id: `native-${++starts}`, cwd, status: { type: 'active' } }
+      return { result: { thread } }
+    },
+    'thread/read': ({ threadId }) => thread?.id === threadId ? { result: { thread } }
+      : { error: { code: -32600, message: `thread not found: ${threadId}` } },
+    'thread/queue/add': ({ clientUserMessageId }) => rejected ? { error: { code: -32602, message: '暂未入队' } }
+      : { result: { queuedSubmission: { id: 'queued', clientUserMessageId } } },
+  })
+  const submit = () => postCodex(get, 'conversation-action', {
+    action: 'prompt', threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd',
+    newSession: { cwd: directory }, mode: 'queue', clientUserMessageId: 'first-attempt',
+    input: [{ type: 'text', text: '请核对' }],
+  })
+  assert.equal((await submit()).status, 400)
+  thread = undefined
+  rejected = false
+  const retried = await submit()
+  assert.equal(retried.status, 200)
+  assert.equal((await retried.json()).thread.id, 'native-2')
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/queue/add').map(({ params }) => params.threadId),
+    ['native-1', 'native-2'])
+})
+
+test('明确拒绝入队后复用原 Git 工作树，在改选后使用另一工作树', async t => {
+  const threads = new Map()
+  let attempts = 0
+  const fixture = await fakeCodex(t, {
+    'thread/start': ({ cwd, projectId }) => {
+      const thread = { id: `native-${threads.size}`, cwd, projectId, status: { type: 'active' } }
+      threads.set(thread.id, thread)
+      return { result: { thread } }
+    },
+    'thread/read': ({ threadId }) => ({ result: { thread: threads.get(threadId) } }),
+    'thread/queue/add': ({ clientUserMessageId }) => ++attempts < 3
+      ? { error: { code: -32602, message: '尚未入队' } }
+      : { result: { queuedSubmission: { id: 'queued', clientUserMessageId } } },
+  })
+  const repo = join(fixture.directory, 'project')
+  const existing = join(fixture.directory, 'existing')
+  await mkdir(repo)
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  git('init', '-b', 'main')
+  git('-c', 'user.name=Draft fixture', '-c', 'user.email=draft@example.test', 'commit', '--allow-empty', '-m', 'Base')
+  git('worktree', 'add', '--detach', existing, 'main')
+
+  const get = fixture.openRoutes(join(fixture.directory, 'profile'))
+  const worktreeId = '410aab76-b4db-4d05-8fd9-138ce2d07bbf'
+  const attempt = { action: 'prompt', threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd',
+    newSession: { cwd: repo, projectId: 'unchanged-project' }, mode: 'queue',
+    clientUserMessageId: 'original-attempt', input: [{ type: 'text', text: '待发' }],
+    worktree: { kind: 'new', id: worktreeId, baseRef: 'refs/heads/main' } }
+  assert.equal((await postCodex(get, 'conversation-action', attempt)).status, 400)
+  assert.equal((await postCodex(get, 'conversation-action', attempt)).status, 400)
+  const original = threads.get('native-0').cwd
+  assert.equal(original, join(fixture.directory, `project-worktree-${worktreeId}`))
+  assert.equal(threads.size, 1)
+
+  const sent = await postCodex(get, 'conversation-action', { ...attempt,
+    worktree: { kind: 'existing', id: '7348ef67-fd88-4930-ac79-52648f9225cd', path: existing } })
+  assert.equal(sent.status, 200)
+  assert.equal((await sent.json()).thread.cwd, existing)
+  assert.equal(threads.size, 2)
+  assert.equal(git('worktree', 'list', '--porcelain').split(`worktree ${original}\n`).length, 2)
+})
 
 test('普通文件按内容去重，原生待发和历史引用上传时的快照', async t => {
   const { socketPath, directory, messages } = await fakeCodex(t, {
@@ -112,11 +276,8 @@ test('普通文件按内容去重，原生待发和历史引用上传时的快�
   let queued
   let historyInput
   const fullHistoryItem = () => ({ type: 'userMessage', id: 'message', content: [historyInput] })
-  const dsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
-  const { Context } = await import(dsh.resolve('@deepseek-ai/cordis'))
-  const { LocalAttachmentStore } = await import(dsh.resolve('@deepseek-ai/dsh-attachment-local'))
-  const makeStore = () => new LocalAttachmentStore(new Context(), { dshHome: join(directory, 'dsh') })
-  const store = makeStore()
+  const makeStore = () => createLocalAttachmentStore(join(directory, 'dsh'))
+  const store = await makeStore()
   const owner = new AbortController()
   t.after(() => owner.abort())
   const makeGet = storage => {
@@ -184,7 +345,7 @@ test('普通文件按内容去重，原生待发和历史引用上传时的快�
   historyInput = { type: 'text', text: text + saved.text, text_elements: [
     { byteRange: { start: offset + byteRange.start, end: offset + byteRange.end }, placeholder },
   ] }
-  const reopened = makeGet(makeStore())
+  const reopened = makeGet(await makeStore())
   const history = await reopened('/api/codex/file-download?threadId=main&turnId=turn&itemId=message&' + fileQuery)
   assert.equal(history.status, 200)
   assert.match(history.headers.get('content-disposition'), /^attachment;/)
@@ -402,40 +563,40 @@ test('网页计划模式目录只读，切换保留会话模型并等待原生�
   })
 })
 
-test('网页空白会话从原生创建连接确认计划模式', async t => {
-  const thread = { id: 'main', cwd: '/workspace', status: { type: 'idle' }, model: 'current-model' }
+test('首发计划模式从原生创建连接确认，发送后立即释放订阅', async t => {
+  let thread
   let creation
-  const { get, messages } = await fakeCodex(t, {
-    'thread/start': (params, client) => {
+  let planSelected = false
+  const { directory, get, messages } = await fakeCodex(t, {
+    'thread/start': ({ cwd }, client) => {
       creation = client
+      thread = { id: 'main', cwd, status: { type: 'idle' }, model: 'current-model' }
       return { result: { thread } }
     },
     'thread/read': () => ({ result: { thread } }),
     'thread/turns/list': () => ({ result: { data: [] } }),
     'collaborationMode/list': () => ({ result: { data: [{ mode: 'default' }, { mode: 'plan' }] } }),
     'thread/settings/update': ({ collaborationMode }) => {
+      planSelected = collaborationMode.mode === 'plan'
       creation.send(JSON.stringify({ method: 'thread/settings/updated', params: {
         threadId: 'main', threadSettings: { collaborationMode },
       } }))
       return { result: {} }
     },
+    'thread/queue/add': () => {
+      assert.equal(planSelected, true)
+      thread.status.type = 'active'
+      return { result: { queuedSubmission: { id: 'queued' } } }
+    },
   })
-  const created = await get('/api/codex/conversation-action', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'create', cwd: thread.cwd }),
+  const response = await postCodex(get, 'conversation-action', {
+    action: 'prompt', mode: 'queue', threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd',
+    newSession: { cwd: directory }, clientUserMessageId: 'plan-first', planMode: 'plan',
+    input: [{ type: 'text', text: '制定计划' }],
   })
-  assert.equal(created.status, 200)
-  assert.deepEqual(await (await postCommand(get, 'plan', { mode: 'plan' })).json(), { mode: 'plan', confirmed: true })
-  assert.deepEqual(await (await get('/api/codex/thread-info?threadId=main&view=plan')).json(), {
-    modes: ['default', 'plan'], mode: 'plan',
-  })
-  const watch = await get('/api/codex/watch?threadId=main')
-  const reader = watch.body.getReader()
-  t.after(() => reader.cancel())
-  const { value } = await reader.read()
-  const snapshot = JSON.parse(new TextDecoder().decode(value).slice(6))
-  assert.equal(snapshot.type, 'snapshot')
-  assert.equal(snapshot.planMode, 'plan')
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).planMode, 'plan')
+  if (creation.readyState < 2) await once(creation, 'close', { signal: AbortSignal.timeout(1_000) })
   assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
 })
 
@@ -1038,7 +1199,6 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
   let canResume = false
   const { socketPath, messages } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread } }),
-    'thread/start': () => ({ result: { thread } }),
     'thread/resume': () => {
       if (!canResume) return { error: { code: -32600, message: 'Provider unavailable' } }
       thread.status = { type: 'idle' }
@@ -1056,8 +1216,6 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
   }))
 
   assert.equal((await post('thread/start', { cwd: thread.cwd })).status, 400)
-  assert.deepEqual((await (await post('create', { cwd: thread.cwd, projectId: 'project-id', approvalPolicy: 'never' })).json()).thread,
-    { ...thread, blank: true })
   const blocked = await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })
   assert.match((await blocked.json()).error, /Provider unavailable/)
   assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
@@ -1070,7 +1228,6 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
   assert.equal((await post('cancel', { threadId: thread.id, turnId: 'active-turn' })).status, 200)
   assert.deepEqual(messages.filter(({ method }) => /^(thread|turn)\//.test(method) && method !== 'thread/read')
     .map(({ method, params }) => [method, params]), [
-    ['thread/start', { cwd: thread.cwd, historyMode: 'paginated', projectId: 'project-id', config: codexTaskToolsConfig(socketPath) }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
@@ -1098,19 +1255,15 @@ test('会话引用在原生入队前确认模型工具，并按原生格式发�
     'thread/queue/list': () => ({ result: { data: queued ? [queued] : [] } }),
     'thread/queue/start': () => ({ result: { turn: { id: 'continued-reference' } } }),
   })
-  const post = fields => get('/api/codex/conversation-action', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ threadId: thread.id, ...fields }),
-  })
   const text = '参考 ' + encodeThreadReference('source-thread', '旧会话')
-  const fields = { action: 'prompt', mode: 'queue',
+  const fields = { action: 'prompt', threadId: thread.id, mode: 'queue',
     clientUserMessageId: 'reference-input', input: [{ type: 'text', text }] }
-  const blocked = await post(fields)
+  const blocked = await postCodex(get, 'conversation-action', fields)
   assert.equal(blocked.status, 409)
   assert.equal((await blocked.json()).reason, 'thread-read-tool-unavailable')
   assert(!messages.some(({ method }) => method === 'thread/queue/add'))
   connected = true
-  const sent = await post(fields)
+  const sent = await postCodex(get, 'conversation-action', fields)
   assert.equal(sent.status, 200)
   const { queuedSubmission } = await sent.json()
   assert.match(queuedSubmission.input[0].text, /"threadId":"source-thread"/)
@@ -1119,11 +1272,11 @@ test('会话引用在原生入队前确认模型工具，并按原生格式发�
 
   thread.status.type = 'idle'
   connected = false
-  const resume = { action: 'queue', operation: 'start' }
-  assert.equal((await post(resume)).status, 409)
+  const resume = { action: 'queue', operation: 'start', threadId: thread.id }
+  assert.equal((await postCodex(get, 'conversation-action', resume)).status, 409)
   assert(!messages.some(({ method }) => method === 'thread/queue/start'))
   connected = true
-  assert.equal((await post(resume)).status, 200)
+  assert.equal((await postCodex(get, 'conversation-action', resume)).status, 200)
   assert.equal(messages.find(({ method }) => method === 'thread/queue/start').params.queuedSubmissionId, queued.id)
 })
 
@@ -2297,6 +2450,8 @@ test('模型目录逐页读取各 Codex provider 的原生模型和等级', asyn
   const model = (id, isDefault, effort) => ({ id, model: id, displayName: id, isDefault, defaultReasoningEffort: effort,
     supportedReasoningEfforts: [{ reasoningEffort: effort, description: '原生等级' }] })
   const { get, messages } = await fakeCodex(t, {
+    'config/read': ({ cwd }) => ({ result: { config: cwd === '/workspace'
+      ? { model_provider: 'first', model: 'other', model_reasoning_effort: 'xhigh' } : {} } }),
     'modelProvider/list': () => ({ result: { data: [{ id: 'first', name: '原生 provider' }, { id: 'unavailable', name: '离线' }], defaultProviderId: 'first' } }),
     'model/list': ({ modelProvider, cursor }) => modelProvider === 'unavailable'
       ? { error: { code: -32600, message: 'unavailable' } }
@@ -2309,7 +2464,10 @@ test('模型目录逐页读取各 Codex provider 的原生模型和等级', asyn
   assert.deepEqual(catalog.default, { provider: 'first', model: 'native', reasoningEffort: 'high' })
   assert.deepEqual(catalog.groups[0].models.map(({ id, reasoning }) => [id, reasoning.defaultEffort]), [['native', 'high'], ['other', 'low']])
   assert.deepEqual(catalog.failures.map(group => group.id), ['unavailable'])
-  assert.equal(messages.some(message => message.method === 'thread/resume'), false)
+  const workspace = await get('/api/codex/models?cwd=%2Fworkspace')
+  assert.equal(workspace.status, 200)
+  assert.deepEqual((await workspace.json()).default, { provider: 'first', model: 'other', reasoningEffort: 'xhigh' })
+  assert.equal(messages.some(({ method }) => ['thread/start', 'thread/resume'].includes(method)), false)
 })
 
 test('模型选择只修改同一 provider 的后续轮次设置，并读取接受后的选择', async t => {
@@ -3335,31 +3493,6 @@ test('首个工作目录使用原生项目，重复选择同一路径复用它',
   for (const response of await Promise.all([open(), open()])) assert.deepEqual((await response.json()).project, project)
   assert.deepEqual((await (await open()).json()).project, project)
   assert.equal(messages.filter(({ method }) => method === 'project/create').length, 1)
-})
-
-test('新建恢复同一工作区的未发送线程，待发或已写入历史的线程另开会话', async t => {
-  const cwd = '/fixture/workspace'
-  const draft = { id: 'original', cwd, projectId: 'project', name: null, preview: '', historyMode: 'paginated', status: { type: 'idle' } }
-  let queued = false
-  let materialized = false
-  let starts = 0
-  const { get } = await fakeCodex(t, {
-    'thread/read': () => ({ result: { thread: draft } }),
-    'thread/queue/list': () => ({ result: { data: queued ? [{ id: 'queued' }] : [], nextCursor: null } }),
-    'thread/turns/list': () => materialized ? { result: { data: [{ id: 'first' }] } }
-      : { error: { code: -32600, message: 'thread original is not materialized yet; thread/turns/list is unavailable before first user message' } },
-    'thread/start': () => ({ result: { thread: { ...draft, id: `new-${++starts}` } } }),
-  })
-  const open = async () => (await (await get('/api/codex/conversation-action', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'create', cwd, projectId: draft.projectId, reuseThreadId: draft.id }),
-  })).json()).thread
-  assert.equal((await open()).id, draft.id)
-  queued = true
-  assert.equal((await open()).id, 'new-1')
-  queued = false
-  materialized = true
-  assert.equal((await open()).id, 'new-2')
 })
 
 test('新回执在它对应的历史增量之后才进入会话阅读面', { timeout: 5000 }, async t => {

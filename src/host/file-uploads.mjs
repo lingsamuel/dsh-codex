@@ -7,10 +7,11 @@ import { addressableThread } from './thread-runtime.mjs'
 import { readThreadTurns } from './live-history.mjs'
 import { readVisibleConversationQueue } from './queue-watch.mjs'
 import { fileAttachmentInput, fileAttachmentOf, splitFileAttachmentInput } from '../shared/file-attachments.js'
+import { isLocalSessionId } from '../shared/local-session.js'
 
 const noCache = { 'Cache-Control': 'no-store' }
 
-/** 复用 DSH 的流式上传协议，把原生附件仓库的回执绑定到 Codex 草稿会话。 */
+/** 复用 DSH 的流式上传协议，把原生附件仓库的回执绑定到当前会话 ID。 */
 export function createFileUploads(attachments, socketPath, ownerSignal, steers) {
   const key = randomBytes(32)
   const sign = (threadId, payload) => createHmac('sha256', key).update(JSON.stringify([threadId, payload])).digest('base64url')
@@ -21,14 +22,19 @@ export function createFileUploads(attachments, socketPath, ownerSignal, steers) 
     return fileAttachmentInput(file, sep === '\\' ? path.replaceAll('\\', '/') : path)
   }
 
-  function resolve(threadId, receiptId) {
+  function verifiedFile(threadId, receiptId) {
     if (typeof receiptId !== 'string') return
     const [payload, signature, extra] = receiptId.split('.')
     if (!payload || !signature || extra !== undefined) return
     const received = Buffer.from(signature)
     const expected = Buffer.from(sign(threadId, payload))
     if (received.length !== expected.length || !timingSafeEqual(received, expected)) return
-    return input(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')))
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+  }
+
+  function resolve(threadId, receiptId) {
+    const file = verifiedFile(threadId, receiptId)
+    return file && input(file)
   }
 
   const upload = {
@@ -41,7 +47,7 @@ export function createFileUploads(attachments, socketPath, ownerSignal, steers) 
       if (!threadId || query.has('mediaType')) return new Response(null, { status: 400 })
       const signal = lifetime(request)
       try {
-        await withCodexReader(socketPath, signal, rpc => addressableThread(rpc, threadId, true))
+        if (!isLocalSessionId(threadId)) await withCodexReader(socketPath, signal, rpc => addressableThread(rpc, threadId, true))
         const file = await attachments.saveFileStream({ data: request.body ?? [], name: query.get('name') ?? undefined, signal })
         const payload = Buffer.from(JSON.stringify(file)).toString('base64url')
         return Response.json({ ok: true, value: { file, receiptId: [payload, sign(threadId, payload)].join('.') } }, { headers: noCache })

@@ -6,12 +6,27 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { WebSocketServer } from 'ws'
 
-test('网页默认预设只在新建时生效，重新读取仍可用，并拒绝目标目录不允许的预设', async t => {
-  const { createPermissionActions } = await import('../src/host/permissions.mjs')
+async function permissionServer(t) {
   const directory = await mkdtemp(join(process.cwd(), '.runtime', 'perm-'))
   const socket = join(directory, 'api.sock')
-  const http = createServer()
-  const ws = new WebSocketServer({ server: http })
+  const server = createServer()
+  const ws = new WebSocketServer({ server })
+  server.listen(socket)
+  await once(server, 'listening')
+  t.after(async () => {
+    for (const client of ws.clients) client.terminate()
+    ws.close()
+    const closed = once(server, 'close')
+    server.close()
+    await closed
+    await rm(directory, { recursive: true, force: true })
+  })
+  return { directory, socket, ws }
+}
+
+test('网页默认预设只在新建时生效，重新读取仍可用，并拒绝目标目录不允许的预设', async t => {
+  const { createPermissionActions } = await import('../src/host/permissions.mjs')
+  const { directory, socket, ws } = await permissionServer(t)
   ws.on('connection', client => {
     client.on('message', raw => {
       const { id, method } = JSON.parse(raw)
@@ -19,16 +34,6 @@ test('网页默认预设只在新建时生效，重新读取仍可用，并拒�
       const result = method === 'initialize' ? {} : { data: [{ id: 'custom-team', allowed: true }] }
       client.send(JSON.stringify({ id, result }))
     })
-  })
-  http.listen(socket)
-  await once(http, 'listening')
-  t.after(async () => {
-    for (const client of ws.clients) client.terminate()
-    ws.close()
-    const closed = once(http, 'close')
-    http.close()
-    await closed
-    await rm(directory, { recursive: true, force: true })
   })
   const preference = join(directory, 'default.json')
   const load = () => createPermissionActions(socket, undefined, preference)
@@ -48,6 +53,41 @@ test('网页默认预设只在新建时生效，重新读取仍可用，并拒�
   assert.deepEqual(calls, [
     ['permissionProfile/list', { cwd: '/team' }],
     ['permissionProfile/list', { cwd: '/other' }],
+  ])
+})
+
+test('未创建原生会话时按草稿工作目录读取允许的权限预设', async t => {
+  const { createPermissionActions } = await import('../src/host/permissions.mjs')
+  const { directory, socket, ws } = await permissionServer(t)
+  const calls = []
+  ws.on('connection', client => client.on('message', raw => {
+    const { id, method, params } = JSON.parse(raw)
+    if (id === undefined) return
+    if (method !== 'initialize') calls.push([method, params])
+    const result = method === 'config/read'
+      ? { config: { sandbox_mode: 'workspace-write', approval_policy: 'on-request' } }
+      : { data: [{ id: 'project-permission', allowed: !params?.cwd || params.cwd === directory }] }
+    client.send(JSON.stringify({ id, result: method === 'initialize' ? {} : result }))
+  }))
+  const permissions = createPermissionActions(socket)
+  const { catalogRoute, actionRoute } = permissions
+  const get = cwd => catalogRoute.fetch(new Request(`http://local${catalogRoute.path}?${new URLSearchParams({ cwd })}`))
+  const response = await get(directory)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { profiles: [{ id: 'project-permission' }], defaultProfile: null,
+    permission: { profileId: null, sandbox: 'workspace-write', approvalPolicy: 'on-request', source: 'configured' } })
+  assert.equal((await get('relative/path')).status, 400)
+  const preset = await actionRoute.fetch(new Request(`http://local${actionRoute.path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'default', profileId: 'project-permission' }),
+  }))
+  assert.equal(preset.status, 200)
+  const selected = await get(directory)
+  assert.deepEqual((await selected.json()).permission, { profileId: 'project-permission', source: 'configured' })
+  assert.deepEqual(calls, [
+    ['permissionProfile/list', { cwd: directory }],
+    ['config/read', { cwd: directory, includeLayers: false }],
+    ['permissionProfile/list', {}],
+    ['permissionProfile/list', { cwd: directory }],
   ])
 })
 
@@ -142,104 +182,179 @@ test('首条消息前可设置权限，同时把原生尚未确认的选择单�
   assert.deepEqual(calls.at(-1), ['thread/settings/update', { threadId: 'draft', permissions: ':read-only' }])
 })
 
-test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确认', async t => {
+test('首次发送在工作目录应用默认预设，显式选择优先并等待原生确认', async t => {
   const { createHistoryRoutes } = await import('../src/host/history.mjs')
-  const directory = await mkdtemp(join(process.cwd(), '.runtime', 'perm-draft-'))
-  const socket = join(directory, 'api.sock')
-  const server = createServer()
-  const ws = new WebSocketServer({ server })
+  const { directory, socket, ws } = await permissionServer(t)
   const owner = new AbortController()
-  const thread = { id: 'draft', cwd: directory, status: { type: 'idle' }, historyMode: 'paginated', preview: '' }
-  const initial = { activePermissionProfile: { id: ':read-only' }, approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } }
-  const fullAccess = { activePermissionProfile: { id: ':danger-full-access' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'dangerFullAccess' } }
-  const expected = { profileId: ':danger-full-access', approvalPolicy: 'on-request', sandbox: 'dangerFullAccess', source: 'runtime' }
-  const threads = new Map([[thread.id, thread]])
-  let creator
-  const applied = Promise.withResolvers()
+  t.after(() => owner.abort())
+  const readOnly = { activePermissionProfile: { id: ':read-only' }, approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } }
+  const workspace = { activePermissionProfile: { id: ':workspace' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'workspaceWrite' } }
+  const expected = { profileId: ':workspace', approvalPolicy: 'on-request', sandbox: 'workspaceWrite', source: 'runtime' }
+  const threads = new Map()
+  const starters = []
+  const enqueued = []
+  const profiles = [{ id: ':read-only', allowed: true }, { id: ':workspace', allowed: true }]
   const update = Promise.withResolvers()
+  let confirm
   ws.on('connection', client => client.on('message', raw => {
     const { id, method, params } = JSON.parse(raw)
     if (id === undefined) return
     const reply = result => client.send(JSON.stringify({ id, result }))
-    const notify = (method, params) => creator?.send(JSON.stringify({ method, params }))
     if (method === 'initialize') return reply({})
+    if (method === 'permissionProfile/list') return reply({ data: profiles })
     if (method === 'thread/start') {
-      if (params.permissions === ':danger-full-access') {
-        const draft = { ...thread, id: `draft-${threads.size}` }
-        threads.set(draft.id, draft)
-        return reply({ thread: draft, ...fullAccess })
-      }
-      creator = client
-      return reply({ thread, ...initial })
+      const thread = { id: `thread-${threads.size + 1}`, cwd: params.cwd, status: { type: 'idle' } }
+      threads.set(thread.id, { thread, client })
+      starters.push(params)
+      return reply({ thread, ...readOnly })
     }
-    if (method === 'thread/read') return reply({ thread: threads.get(params.threadId) })
-    if (method === 'thread/queue/list') return reply({ data: [] })
-    if (method === 'permissionProfile/list') return reply({ data: [{ id: ':danger-full-access', allowed: true }] })
+    if (method === 'thread/read') return reply({ thread: threads.get(params.threadId).thread })
     if (method === 'thread/turns/list') {
       return client.send(JSON.stringify({ id, error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }))
     }
     if (method === 'thread/settings/update') {
       reply({})
+      const { client: creator } = threads.get(params.threadId)
+      confirm = () => creator.send(JSON.stringify({ method: 'thread/settings/updated',
+        params: { threadId: params.threadId, threadSettings: workspace } }))
       update.resolve(params)
-      void applied.promise.then(() => notify('thread/settings/updated', { threadId: thread.id, threadSettings: fullAccess }))
+      return
+    }
+    if (method === 'thread/queue/add') {
+      enqueued.push(params.threadId)
+      threads.get(params.threadId).thread.status.type = 'active'
+      return reply({ queuedSubmission: { id: 'queued', clientUserMessageId: params.clientUserMessageId } })
+    }
+    assert.fail(`unexpected ${method}`)
+  }))
+  const routes = createHistoryRoutes(socket, owner.signal)
+  function post(path, fields) {
+    const route = routes.find(route => route.path === `/api/codex/${path}`)
+    return route.fetch(new Request(`http://localhost${route.path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields),
+    }))
+  }
+
+  const saved = await post('permission-action', { action: 'default', profileId: ':read-only' })
+  assert.equal(saved.status, 200)
+  assert.deepEqual(starters, [])
+  const request = { action: 'prompt', threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd',
+    newSession: { cwd: directory }, mode: 'queue', input: [{ type: 'text', text: '请继续' }] }
+  const byDefault = await post('conversation-action', { ...request, clientUserMessageId: 'with-default' })
+  assert.equal(byDefault.status, 200)
+  assert.equal((await byDefault.json()).permission.profileId, ':read-only')
+  assert.equal(starters[0].permissions, ':read-only')
+
+  const explicit = post('conversation-action', { ...request, clientUserMessageId: 'explicit', permissionDraft: ':workspace' })
+  const params = await Promise.race([update.promise, explicit.then(response => assert.fail(`首发尚未确认权限，返回 ${response.status}`))])
+  assert.deepEqual(params, { threadId: 'thread-2', permissions: ':workspace' })
+  assert.equal(starters[1].permissions, ':workspace')
+  assert.deepEqual(enqueued, ['thread-1'])
+  const released = once(threads.get(params.threadId).client, 'close', { signal: AbortSignal.timeout(1_000) })
+  confirm()
+  const response = await explicit
+  assert.equal(response.status, 200)
+  assert.deepEqual((await response.json()).permission, expected)
+  assert.deepEqual(enqueued, ['thread-1', 'thread-2'])
+  await released
+})
+
+async function blankThread(t) {
+  const { createPermissionActions } = await import('../src/host/permissions.mjs')
+  const { directory, socket, ws } = await permissionServer(t)
+  const owner = new AbortController()
+  t.after(() => owner.abort())
+  const threadId = 'draft'
+  const thread = { id: threadId, cwd: directory, status: { type: 'idle' }, historyMode: 'paginated', preview: '' }
+  const initial = { activePermissionProfile: { id: ':read-only' }, sandbox: { type: 'readOnly' } }
+  const updated = Promise.withResolvers()
+  let creator
+  ws.on('connection', client => client.on('message', raw => {
+    const { id, method, params } = JSON.parse(raw)
+    if (id === undefined) return
+    const reply = result => client.send(JSON.stringify({ id, result }))
+    if (method === 'initialize') return reply({})
+    if (method === 'thread/start') {
+      creator = client
+      return reply({ thread, ...initial })
+    }
+    if (method === 'thread/read') return reply({ thread })
+    if (method === 'permissionProfile/list') return reply({ data: [{ id: ':workspace', allowed: true }] })
+    if (method === 'thread/settings/update') {
+      reply({})
+      updated.resolve(params)
       return
     }
     assert.fail(`unexpected ${method}`)
   }))
-  server.listen(socket)
-  await once(server, 'listening')
-  t.after(async () => {
-    owner.abort()
-    for (const client of ws.clients) client.terminate()
-    ws.close()
-    const closed = once(server, 'close')
-    server.close()
-    await closed
-    await rm(directory, { recursive: true, force: true })
+  const permissions = createPermissionActions(socket, owner.signal)
+  await permissions.withThreadCreation(new AbortController().signal, async (rpc, retain) => {
+    retain(await rpc('thread/start', { cwd: directory, historyMode: 'paginated' }))
   })
+  const notify = (method, params) => creator.send(JSON.stringify({ method, params: { threadId, ...params } }))
+  return { permissions, owner, threadId, creator, updated: updated.promise, notify }
+}
 
-  const routes = createHistoryRoutes(socket, owner.signal)
-  function post(path, fields, signal, source = routes) {
-    const route = source.find(route => route.path === `/api/codex/${path}`)
-    return route.fetch(new Request(`http://localhost${route.path}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields), signal,
-    }))
-  }
+test('旧式创建订阅空闲 60 秒后释放，后台目录和设置读取不续期', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { permissions, threadId, creator } = await blankThread(t)
+  t.mock.timers.tick(59_999)
+  const catalog = await permissions.catalogRoute.fetch(new Request(`http://localhost${permissions.catalogRoute.path}?threadId=${threadId}`))
+  assert.equal((await catalog.json()).permission.source, 'runtime')
+  assert.equal(permissions.readDraftSettings(threadId).thread.id, threadId)
+  const closed = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
+  t.mock.timers.tick(1)
+  await closed
+  assert.equal(permissions.readDraftSettings(threadId), undefined)
+})
 
-  const request = new AbortController()
-  const created = await post('conversation-action', { action: 'create', cwd: directory }, request.signal)
-  assert.equal(created.status, 200)
-  assert.equal((await created.json()).permission.profileId, ':read-only')
-  request.abort()
-  const reopened = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: thread.id })
-  const reopenedDraft = await reopened.json()
-  assert.equal(reopenedDraft.thread.id, thread.id)
-  assert.equal(reopenedDraft.permission.profileId, ':read-only')
+test('设置确认跨过创建订阅空闲期限时保持订阅，操作结束后重新计时', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { permissions, threadId, creator, updated, notify } = await blankThread(t)
+  t.mock.timers.tick(59_999)
+  const selection = permissions.switchPermission(threadId, ':workspace', new AbortController().signal)
+  assert.deepEqual(await updated, { threadId, permissions: ':workspace' })
+  t.mock.timers.tick(1)
+  const settings = { activePermissionProfile: { id: ':workspace' }, sandbox: { type: 'workspaceWrite' } }
+  notify('thread/settings/updated', { threadSettings: settings })
+  const { permission } = await selection
+  assert.equal(permission.profileId, ':workspace')
+  assert.equal(permission.source, 'runtime')
+  t.mock.timers.tick(59_999)
+  assert.deepEqual(permissions.readDraftSettings(threadId), settings)
+  const closed = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
+  t.mock.timers.tick(1)
+  await closed
+})
 
-  const otherHost = createHistoryRoutes(socket, owner.signal)
-  for (const source of [routes, otherHost]) {
-    const saved = await post('permission-action', { action: 'default', profileId: ':danger-full-access' }, undefined, source)
-    assert.equal(saved.status, 200)
-    const next = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: thread.id }, undefined, source)
-    assert.equal(next.status, 200)
-    const draft = await next.json()
-    assert.notEqual(draft.thread.id, thread.id)
-    assert.deepEqual(draft.permission, expected)
-    const same = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: draft.thread.id }, undefined, source)
-    const sameDraft = await same.json()
-    assert.equal(sameDraft.thread.id, draft.thread.id)
-    assert.deepEqual(sameDraft.permission, expected)
-  }
-  const selection = post('permission-action', { action: 'select', threadId: thread.id, profileId: ':danger-full-access' })
-  assert.deepEqual(await update.promise, { threadId: thread.id, permissions: ':danger-full-access' })
-  applied.resolve()
-  const response = await selection
-  assert.equal(response.status, 200)
-  assert.deepEqual((await response.json()).permission, expected)
-  const catalog = routes.find(route => route.path === '/api/codex/permissions')
-  const loaded = await catalog.fetch(new Request(`http://localhost${catalog.path}?threadId=${thread.id}`))
-  assert.deepEqual((await loaded.json()).permission, expected)
-  const released = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
-  creator.send(JSON.stringify({ method: 'turn/started', params: { threadId: thread.id, turn: { id: 'first-turn' } } }))
-  await released
+test('创建订阅收到主动释放请求后继续接收设置确认，直到显式操作结束', async t => {
+  const { permissions, threadId, creator, notify } = await blankThread(t)
+  const end = permissions.holdCreation(threadId)
+  const confirmed = Promise.withResolvers()
+  const settings = { activePermissionProfile: { id: ':workspace' }, sandbox: { type: 'workspaceWrite' } }
+  const stop = permissions.observeDraftSettings(threadId, value => {
+    if (value.activePermissionProfile.id === ':workspace') confirmed.resolve(value)
+  })
+  const closed = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
+  permissions.releaseCreation(threadId)
+  notify('thread/settings/updated', { threadSettings: settings })
+  assert.deepEqual(await Promise.race([
+    confirmed.promise,
+    closed.then(() => assert.fail('创建订阅在设置确认前关闭')),
+  ]), settings)
+  stop()
+  assert.deepEqual(permissions.readDraftSettings(threadId), settings)
+  end()
+  await closed
+  assert.equal(permissions.readDraftSettings(threadId), undefined)
+})
+
+test('Host 退出时关闭仍在等待设置确认的创建订阅', async t => {
+  const { permissions, owner, threadId, creator } = await blankThread(t)
+  const stop = permissions.observeDraftSettings(threadId, () => {})
+  const closed = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
+  owner.abort()
+  await closed
+  stop()
+  assert.equal(permissions.readDraftSettings(threadId), undefined)
 })

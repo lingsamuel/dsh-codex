@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path'
 import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { userInputText } from '../shared/user-input.js'
 import { threadReferencesIn } from '../shared/thread-references.js'
@@ -65,19 +66,23 @@ export async function resolveInputSkills(request, input, readCwd, previousText =
   return resolved
 }
 
-/** 读取历史会话工作目录及技能目录，无需恢复线程或取消归档。 */
+/** 使用草稿工作目录或原生会话工作目录读取技能。无需恢复线程或取消归档。 */
 export function createSkillsRoute(socketPath, ownerSignal) {
   const headers = { 'Cache-Control': 'no-store' }
   return {
     path: '/api/codex/skills', methods: ['GET'], requestBody: 'buffered',
     async fetch(request) {
-      const threadId = new URL(request.url).searchParams.get('threadId')
-      if (!threadId?.trim()) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400, headers })
+      const { searchParams } = new URL(request.url)
+      const threadId = searchParams.get('threadId')
+      const cwd = searchParams.get('cwd')
+      if (!threadId?.trim() && !isAbsolute(cwd ?? '')) {
+        return Response.json({ error: '请选择有效的工作目录。' }, { status: 400, headers })
+      }
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       try {
         const skills = await withCodexReader(socketPath, signal, async rpc => {
-          const { thread } = await rpc('thread/read', { threadId })
-          const enabled = await readEnabledSkills(rpc, thread.cwd)
+          const directory = threadId?.trim() ? (await rpc('thread/read', { threadId })).thread.cwd : cwd
+          const enabled = await readEnabledSkills(rpc, directory)
           return Array.from(firstSkillsByName(enabled).values(), skill => ({
             name: skill.name, path: skill.path, label: skill.interface?.displayName ?? undefined,
             description: skill.interface?.shortDescription || skill.shortDescription || skill.description,

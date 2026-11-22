@@ -33,6 +33,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const state = createSnapshotStore({
     sessionId: thread.id,
     historyMode: thread.historyMode,
+    ...(thread.localDraft && { localDraft: true }),
     archived: Boolean(thread.archived),
     canAcceptDirectInput: thread.canAcceptDirectInput,
     pendingSubmissions: [],
@@ -878,7 +879,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       checkpoint: (cursor, connection) => enqueue(() => { itemCursor = cursor }, connection),
     }, lifetime)
   }
-  if (visibleCatalog || retention) {
+  if (thread.localDraft) {
+    opened = true
+    publishState({ mode: 'history', status: thread.status })
+    markReady()
+    void readPage('models', { cwd: thread.cwd }, signal).then(({ default: model }) => {
+      if (!signal.aborted) publishModel(model)
+    }).catch(() => { /* 模型菜单仍可使用 Codex 的通用目录。 */ })
+  } else if (visibleCatalog || retention) {
     ctx.effect(() => {
       const stopCatalog = visibleCatalog?.subscribe(syncWatch)
       const stopRetention = retention?.subscribe(syncWatch)

@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage, readThreadSummary } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
@@ -21,6 +21,7 @@ import { createCodexMcpRoutes } from './codex-mcp.mjs'
 import { createWorktreeRoutes } from './worktree-actions.mjs'
 import { createQueuedSteers } from './queued-steers.mjs'
 import { createFileUploads } from './file-uploads.mjs'
+import { createFirstSubmission } from './first-submission.mjs'
 import { readThreadReferenceCandidates } from './thread-references.mjs'
 
 function optionalParams(query, keys) {
@@ -73,6 +74,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
+  const submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject)
   const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
   const enablePlan = (threadId, signal) => selectPlanMode(socketPath, signal, threadId, 'plan', false, permissions.observeDraftSettings)
   const route = (path, read) => ({
@@ -102,8 +104,8 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     permissions.catalogRoute,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
-    createCommandActionRoute(socketPath, ownerSignal, submit, permissions),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers, files?.resolve),
+    createCommandActionRoute(socketPath, ownerSignal, submit, permissions, submitFirst),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers, files?.resolve, submitFirst),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,
@@ -119,7 +121,11 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       return withCodexReader(socketPath, signal, request => readThreadSummary(request, threadId))
     }),
-    route('models', (_, signal) => withCodexReader(socketPath, signal, readModelCatalog)),
+    route('models', (query, signal) => {
+      const cwd = query.get('cwd')
+      if (cwd !== null && !isAbsolute(cwd)) throw new CodexRpcError({ code: -32602, message: '请选择有效的工作目录。' })
+      return withCodexReader(socketPath, signal, rpc => readModelCatalog(rpc, cwd))
+    }),
     route('thread-info', (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       const view = query.get('view')

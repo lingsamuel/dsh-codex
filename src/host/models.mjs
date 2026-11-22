@@ -3,8 +3,15 @@ import { CodexRpcError, readCodexPages } from './app-server.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
 /** 用 Codex 各 provider 自己的模型列表为 DSH 选择器供应可用等级。 */
-export async function readModelCatalog(request) {
-  const { data: providers, defaultProviderId } = await request('modelProvider/list', {})
+export async function readModelCatalog(request, cwd) {
+  const [{ data: providers, defaultProviderId }, settings] = await Promise.all([
+    request('modelProvider/list', {}),
+    request('config/read', { ...(cwd && { cwd }), includeLayers: false }).catch(error => {
+      if (error instanceof CodexRpcError && error.code === -32601) return null
+      throw error
+    }),
+  ])
+  const config = settings?.config
   const catalogs = await Promise.all(providers.map(async ({ id, name }) => {
     try {
       const rows = await readCodexPages(cursor => request('model/list', {
@@ -31,12 +38,16 @@ export async function readModelCatalog(request) {
   }))
   const groups = catalogs.flatMap(({ group }) => group?.models.length ? [group] : [])
   const failures = catalogs.flatMap(({ failure }) => failure ? [failure] : [])
-  const defaultCatalog = catalogs.find(value => value.group?.id === defaultProviderId && value.defaultModel)
+  const provider = config?.model_provider ?? defaultProviderId
+  const defaultCatalog = catalogs.find(value => value.group?.id === provider && value.defaultModel)
     ?? catalogs.find(value => value.defaultModel)
   if (!defaultCatalog) throw new Error(failures[0]?.message ?? 'Codex 暂未返回可用模型。')
+  const model = config?.model ?? defaultCatalog.defaultModel.model
+  const modelProvider = config?.model ? provider ?? defaultCatalog.group.id : defaultCatalog.group.id
+  const modelInfo = groups.find(group => group.id === modelProvider)?.models.find(option => option.id === model)
   return {
-    default: modelSelectionOf({ modelProvider: defaultCatalog.group.id, model: defaultCatalog.defaultModel.model,
-      reasoningEffort: defaultCatalog.defaultModel.defaultReasoningEffort }),
+    default: modelSelectionOf({ modelProvider, model,
+      reasoningEffort: config?.model_reasoning_effort ?? modelInfo?.reasoning?.defaultEffort }),
     groups, failures, routableProviders: groups.map(group => group.id),
   }
 }
@@ -45,7 +56,7 @@ function unavailable(message) {
   return new CodexRpcError({ code: -32600, message, data: { reason: 'modelSelectionUnavailable' } })
 }
 
-/** 提交前核对草稿仍属于会话的 provider，避免因为过期的选择恢复会话。 */
+/** 校验提交模型。已有线程必须保持原生 provider，新线程使用提交的 provider。 */
 export function validateModelDraft(thread, draft) {
   if (draft === undefined) return
   if (!draft || typeof draft.provider !== 'string' || !draft.provider.trim()
@@ -53,7 +64,7 @@ export function validateModelDraft(thread, draft) {
     || (draft.reasoningEffort !== undefined && typeof draft.reasoningEffort !== 'string')) {
     throw new CodexRpcError({ code: -32602, message: '无效的草稿模型设置。' })
   }
-  if (thread.modelProvider !== draft.provider) throw unavailable('会话的模型提供商已变化。')
+  if (thread && thread.modelProvider !== draft.provider) throw unavailable('会话的模型提供商已变化。')
 }
 
 /** 已加载会话直接应用设置。随消息提交时，等原生确认后再允许发送。 */

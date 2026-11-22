@@ -13,11 +13,19 @@ function failure(error) {
   return { ok: false, error: detail }
 }
 
-/** DSH 决定发送模式和草稿恢复，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft) {
+function worktreeSelection(worktree) {
+  if (!worktree) return
+  const { kind, id, path, baseRef } = worktree
+  return { kind, id, path, baseRef }
+}
+
+/** 使用 DSH 输入栏的提交生命周期，原生历史或队列确认送达后移除本地回显。 */
+export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession,
+  newSessionRequestId = newSession && crypto.randomUUID()) {
   const { session, events, queueStore, updateState, activeTurnId } = history
   const submissions = new Map()
   let goalConfirmation
+  let reviewRequestId
 
   function clearDrafts(model, permission) {
     modelDraft.clear(model)
@@ -35,9 +43,10 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     if (current === before || current?.permission?.source !== 'runtime') session.publishPermission(result.permission)
   }
 
-  function acceptSubmittedSettings(model, profileId, before, result) {
+  function acceptSubmittedSettings(model, profileId, before, result, worktree) {
     confirmPermission(profileId, before, result)
     clearDrafts(model, profileId)
+    if (worktree) worktreeDraft.clear(worktree)
   }
 
   function removeSubmission(requestId) {
@@ -117,10 +126,10 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   function openSubmittedThread(result, requestId) {
     const submission = submissions.get(requestId)
     if (!submission?.echo) {
-      retire(requestId, observedSubmission)
+      retire(requestId, observedSubmission, !newSession)
       return openWorktree(result)
     }
-    acceptObserved(submission)
+    acceptObserved(submission, !newSession)
     openWorktree(result, true, target => {
       if (submissions.get(requestId) !== submission) return
       if (!target) return retire(requestId, observedSubmission)
@@ -154,6 +163,10 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     return writeConversationAction({ threadId, action, ...parameters }, signal)
   }
 
+  function initialPlanMode() {
+    if (newSession && session.getSnapshot().planMode === 'plan') return 'plan'
+  }
+
   function operationFailure(op, error) {
     const result = failure(error)
     updateState(state => { state.promptError = { op, error: result.error } })
@@ -181,7 +194,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
 
   async function submitGoal(content, objective, goalDraftValue, worktree, selection, profileId, before, unarchive, signal, requestId) {
     if (session.getSnapshot().planChanging) throw new Error('正在切换计划模式，请等待 Codex 确认后再提交。')
-    if (content.some(part => part.type !== 'text') || worktree) {
+    if (content.some(part => part.type !== 'text') || (worktree && !newSession)) {
       throw new Error('目标使用输入栏正文。请移除附件和待创建的工作树，或退出 Goal 模式后按普通消息发送。')
     }
     if (!objective) throw new Error('请输入目标内容。')
@@ -190,6 +203,14 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     }
     const tokenBudget = goalDraftValue?.budget ? Number(goalDraftValue.budget) : undefined
     if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new Error('Token 预算必须是正整数。')
+    if (newSession) {
+      const result = await writeCommandAction({ threadId, action: 'goal-create', objective, tokenBudget, newSession,
+        clientUserMessageId: requestId, modelDraft: selection, permissionDraft: profileId, worktree: worktreeSelection(worktree) }, signal)
+      acceptSubmittedSettings(selection, profileId, before, result, worktree)
+      if (goalDraftValue) goalDraft.clear(goalDraftValue)
+      openSubmittedThread(result, requestId)
+      return accepted
+    }
     const command = (action, fields) => writeCommandAction({ threadId, action, ...fields, ...(unarchive && { unarchive: true }) }, signal)
     if (session.getSnapshot().planMode === 'plan') {
       const result = await changePlanMode('default', unarchive, signal)
@@ -214,6 +235,10 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
 
   async function changePlanMode(mode, unarchive, signal) {
     const { planRevision } = session.getSnapshot()
+    if (newSession) {
+      session.publishPlanMode(mode, planRevision)
+      return { mode, confirmed: true }
+    }
     const result = await writeCommandAction({ threadId, action: 'plan', mode, ...(unarchive && { unarchive: true }) }, signal)
     if (result.confirmed) session.publishPlanMode(result.mode, planRevision)
     return result
@@ -256,6 +281,20 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         state.promptAttempted = true
       })
     },
+    ...(newSession && { async runCommand(parameters, signal) {
+      const model = modelDraft.getSnapshot()
+      const profileId = permissionDraft?.getSnapshot()
+      const before = permissionSnapshot(profileId)
+      const worktree = worktreeDraft?.getSnapshot()
+      const clientUserMessageId = reviewRequestId ??= crypto.randomUUID()
+      const result = await writeCommandAction({ ...parameters, threadId, newSession, clientUserMessageId,
+        modelDraft: model, permissionDraft: profileId, worktree: worktreeSelection(worktree), planMode: initialPlanMode() }, signal)
+      if (reviewRequestId === clientUserMessageId) reviewRequestId = undefined
+      acceptSubmittedSettings(model, profileId, before, result, worktree)
+      // 审查表单单独提交，原生输入栏里的未发送内容继续留在原会话。
+      openWorktree(result, true, undefined, parameters.action === 'review')
+      return result
+    } }),
     decideGoalReplacement: accepted => goalConfirmation?.resolve(accepted),
     dismissGoalError(error) {
       if (session.getSnapshot().goalError === error) updateState(state => { state.goalError = null })
@@ -278,7 +317,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const parts = [{ type: 'text', text }]
       const plan = planCommandText(parts)
       const isCommandOnly = plan === '' || (plan === undefined && Boolean(goal || goalCommandObjective(parts)))
-      const requestId = (!isCommandOnly && worktree?.id) || crypto.randomUUID()
+      // 收不到首发回执时，重试仍用原来的身份核对投递结果。
+      const requestId = (plan !== '' && newSessionRequestId) || (!isCommandOnly && worktree?.id) || crypto.randomUUID()
       const expectedTurnId = mode === 'steer' && plan === undefined ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
@@ -287,10 +327,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       return trackSubmission(requestId, { echo, onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
     },
-    async prompt(content, mode, signal, requestId = crypto.randomUUID()) {
+    async prompt(content, mode, signal, requestId = newSessionRequestId ?? crypto.randomUUID()) {
       const submission = submissions.get(requestId)
       const worktree = submission?.worktree
-      const { kind, id, path, baseRef } = worktree ?? {}
       const plan = planCommandText(content)
       const expectedTurnId = plan !== undefined ? undefined : submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
       const selection = submission ? submission.model : modelDraft.getSnapshot()
@@ -320,15 +359,18 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         const { planRevision } = session.getSnapshot()
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
           ...(submission?.echo && submission.echo.placement !== 'queued' && { reportQueuedForLater: true }),
+          newSession,
           expectedTurnId, modelDraft: selection, permissionDraft: profileId,
-          ...(plan !== undefined && { planMode: 'plan' }),
-          ...(worktree && { worktree: { kind, id, path, baseRef } }),
+          planMode: plan !== undefined ? 'plan' : initialPlanMode(), worktree: worktreeSelection(worktree),
           ...(unarchive && { unarchive: true }) }, signal)
         if (result.planMode) {
           if (!worktree) session.publishPlanMode(result.planMode, planRevision)
           goalDraft?.clear(draft)
         }
-        if (worktree && result.thread) {
+        if (newSession && result.thread) {
+          acceptSubmittedSettings(selection, profileId, before, result, worktree)
+          openSubmittedThread(result, requestId)
+        } else if (worktree && result.thread) {
           worktreeDraft.clear(worktree)
           openSubmittedThread(result, requestId)
         } else {

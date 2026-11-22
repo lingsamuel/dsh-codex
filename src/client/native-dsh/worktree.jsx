@@ -181,13 +181,16 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
   </>
 }
 
-function WorktreeButton({ sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory, useWorkspaces, useHost,
+function WorktreeButton({ sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory, useSessions, useWorkspaces, useHost,
   useBackgroundTerminals, setDraft, publishThread, openWorktree, t }) {
   const choice = useWorktreeDraft(value => value)
-  const thread = useCodexHistory(snapshot => snapshot.threads.find(value => value.id === sessionId))
+  const native = useCodexHistory(snapshot => snapshot.threads.find(value => value.id === sessionId))
   const project = useWorkspaces(snapshot => snapshot.items.find(item => item.sessionIds.includes(sessionId))?.path)
   const home = useHost(facts => facts?.home)
   const draft = useSession(state => Boolean(state.blank))
+  const local = useSession(state => Boolean(state.localDraft))
+  const cwd = useSessions(snapshot => snapshot.byId[sessionId]?.cwd)
+  const thread = native ?? (local ? { id: sessionId, cwd } : undefined)
   const canChange = useSession(state => state.openState === 'open' && !state.archived && !state.subagent && state.canAcceptDirectInput !== false)
   const active = useSession(state => state.live?.status?.type === 'active' || Boolean(state.pendingSubmissions?.length))
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))

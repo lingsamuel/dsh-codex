@@ -1,18 +1,5 @@
 import { readPage } from '../api.js'
-
-const source = {
-  trigger: '$',
-  name: 'skill',
-  async candidates({ sessionId }, { query, signal }) {
-    const { skills } = await readPage('skills', { threadId: sessionId }, signal)
-    const search = query.toLowerCase()
-    return skills.filter(({ name, label }) => name.toLowerCase().includes(search) || label?.toLowerCase().includes(search))
-  },
-  onPick({ candidate }) {
-    // 选择和手输使用同一可编辑文本。发送时由 Host 根据当前目录查找原生技能。
-    return { text: `$${candidate.name} ` }
-  },
-}
+import { sessionReadScope } from './catalog.js'
 
 function skillHit(draft, caret, draftRev) {
   const match = /(?<![\p{L}\p{M}\p{N}_$\\])\$([\p{L}\p{M}\p{N}_:-]*)$/u.exec(draft.slice(0, caret))
@@ -27,8 +14,23 @@ function skillHit(draft, caret, draftRev) {
 
 /** 将 Codex 的 $ 输入交给 DSH 原生候选菜单和编辑器选取流程。 */
 export function installCodexSkills(ctx) {
-  return ctx.inject(['inputTriggers'], scope => scope.effect(() => {
+  return ctx.inject(['inputTriggers', 'sessions'], scope => scope.effect(() => {
     const triggers = scope.inputTriggers
+    const source = {
+      trigger: '$',
+      name: 'skill',
+      async candidates({ sessionId }, { query, signal }) {
+        const target = sessionReadScope(scope.sessions, sessionId)
+        if (!target) return []
+        const { skills } = await readPage('skills', target, signal)
+        const search = query.toLowerCase()
+        return skills.filter(({ name, label }) => name.toLowerCase().includes(search) || label?.toLowerCase().includes(search))
+      },
+      onPick({ candidate }) {
+        // 选择和手输使用同一可编辑文本。发送时由 Host 根据当前目录查找原生技能。
+        return { text: `$${candidate.name} ` }
+      },
+    }
     const unregister = triggers.registerSource(source)
     const sessionOf = triggers.sessionOf
     const controllers = new Map()

@@ -1,5 +1,5 @@
 import { readPage } from '../api.js'
-import { remoteFailure } from './catalog.js'
+import { remoteFailure, sessionReadScope } from './catalog.js'
 
 /** 将 DSH 原生 @ 菜单接到 Codex 的文件和会话候选。 */
 export function installFileReferences(ctx) {
@@ -16,14 +16,15 @@ export function installFileReferences(ctx) {
   }))
   const fileKey = 'remote.fileReferences'
   const sessionKey = 'remote.sessionReferenceResolver'
-  ctx.inject([fileKey, sessionKey], scope => scope.effect(() => {
+  ctx.inject([fileKey, sessionKey, 'sessions'], scope => scope.effect(() => {
     const files = scope.get(fileKey)
     const sessions = scope.get(sessionKey)
     const originalList = Object.getOwnPropertyDescriptor(files, 'list')
     const originalCandidates = Object.getOwnPropertyDescriptor(sessions, 'candidates')
     async function list(threadId, query, signal) {
       try {
-        const value = await readPage('file-references', { threadId, query }, signal)
+        const target = sessionReadScope(scope.sessions, threadId)
+        const value = target ? await readPage('file-references', { ...target, query }, signal) : []
         return { ok: true, value }
       } catch (error) {
         return { ok: false, error: remoteFailure(error.message) }
@@ -31,7 +32,8 @@ export function installFileReferences(ctx) {
     }
     async function candidates(threadId, query, signal) {
       try {
-        const value = await readPage('thread-references', { threadId, query }, signal)
+        const target = sessionReadScope(scope.sessions, threadId)
+        const value = target ? await readPage('thread-references', { ...target, query }, signal) : []
         return { ok: true, value }
       } catch (error) {
         return { ok: false, error: remoteFailure(error.message) }

@@ -22,6 +22,14 @@ export async function openCodexThread(catalog, navigation, threadId, signal) {
   navigation?.openSession(threadId)
 }
 
+/** 网页草稿编辑器按当前工作目录查询，原生会话仍由 Host 解析线程 ID。 */
+export function sessionReadScope(sessions, id, selected) {
+  const state = sessions?.binding(id)?.session.getSnapshot?.()
+  if (state?.localDraft !== true && selected?.localDraft !== true) return { threadId: id }
+  const cwd = sessions?.list?.getSnapshot().byId[id]?.cwd || selected?.cwd
+  return cwd ? { cwd } : undefined
+}
+
 function unixMillis(seconds) {
   return Number.isFinite(seconds) ? seconds * 1000 : 0
 }

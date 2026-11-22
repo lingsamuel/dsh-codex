@@ -35,7 +35,7 @@ test('直接发送 /plan 正文只投递任务，裸命令只切换模式', asyn
   assert.equal(state.planMode, 'default')
 })
 
-test('普通文件发送只提交原生草稿的上传回执', async t => {
+test('已有会话的普通文件以原生上传回执发送', async t => {
   const previousDocument = globalThis.document
   globalThis.document = { baseURI: 'http://localhost/' }
   t.after(() => { globalThis.document = previousDocument })
@@ -57,9 +57,10 @@ test('普通文件发送只提交原生草稿的上传回执', async t => {
   assert.deepEqual(requests, [['/api/codex/conversation-action', {
     threadId: 'native', action: 'prompt', mode: 'queue', clientUserMessageId: 'request', input: [file],
   }]])
+  assert.equal(state.promptError, null)
 })
 
-test('直接发送完整 /goal 命令走同一个原生目标提交', async t => {
+test('直接发送完整 /goal 命令在已有会话创建原生目标', async t => {
   const requests = []
   const previousDocument = globalThis.document
   globalThis.document = { baseURI: 'http://localhost/' }
@@ -84,6 +85,162 @@ test('直接发送完整 /goal 命令走同一个原生目标提交', async t =>
   assert.equal((await input.prompt([{ type: 'text', text }], 'queue', undefined, requestId)).ok, true)
   assert.deepEqual(requests, [['/api/codex/command-action', { threadId: 'native', action: 'goal-create', objective: '整理结果' }]])
   assert.equal(state.goal.status, 'active')
+})
+
+function newSessionFixture(t, fetchResult, { planMode = 'default', model, profileId, worktree, goal, openWorktree } = {}) {
+  const threadId = `draft-${crypto.randomUUID()}`
+  const newSession = { cwd: '/repository', projectId: 'project' }
+  const state = { localDraft: true, blank: true, planMode, planRevision: 0, pendingSubmissions: [] }
+  const requests = []
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (url, request) => {
+    requests.push([url.pathname, JSON.parse(request.body)])
+    return fetchResult(request)
+  })
+  const subscribe = () => () => {}
+  const history = {
+    session: {
+      getSnapshot: () => state,
+      publishPlanMode(mode, revision) { if (revision === state.planRevision) state.planMode = mode },
+      projections: { faceOf: () => ({ getSnapshot: () => undefined }) },
+    },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe },
+    queueStore: { getSnapshot: () => [], subscribe }, updateState: edit => edit(state),
+  }
+  function setting(initial) {
+    let current = initial
+    return { subscribe, getSnapshot: () => current, clear(value) { if (current === value) current = undefined } }
+  }
+  const modelDraft = setting(model)
+  const permissionDraft = setting(profileId)
+  const worktreeDraft = setting(worktree)
+  const goalDraft = setting(goal)
+  const bind = () => createSessionInput({ effect: effect => t.after(effect()) }, threadId, history, modelDraft, permissionDraft,
+    worktreeDraft, openWorktree, goalDraft, newSession)
+  return { bind, state, requests, threadId, newSession, modelDraft, permissionDraft, worktreeDraft, goalDraft }
+}
+
+test('空会话的 /plan 本地切换随首次正文和附件发送，原生回执接续回显', async t => {
+  const reply = Promise.withResolvers()
+  const thread = { id: 'native', cwd: '/different-worktree' }
+  const worktree = { kind: 'existing', id: crypto.randomUUID(), path: thread.cwd }
+  const model = { provider: 'openai', model: 'selected', reasoningEffort: 'high' }
+  const profileId = ':read-only'
+  const lifecycle = []
+  const fixture = newSessionFixture(t, () => reply.promise, { model, profileId, worktree,
+    openWorktree(result, confirmed, handoff) {
+      assert.equal(confirmed, true)
+      lifecycle.push(result.thread.id)
+      handoff({ adoptSubmission(echo, retire) {
+        lifecycle.push({ requestId: echo.requestId, text: echo.text, attachments: echo.attachments })
+        retire()
+      } })
+    },
+  })
+  const { state, requests, threadId, newSession } = fixture
+  const input = fixture.bind()
+  assert.equal((await input.prompt([{ type: 'text', text: '/plan' }], 'queue')).ok, true)
+  assert.deepEqual(requests, [])
+  assert.equal(state.planMode, 'plan')
+
+  const text = '开始计划'
+  const attachments = [{ type: 'file', value: { name: 'notes.txt' } }]
+  const { requestId } = input.beginSubmission({ mode: 'queue', text, attachments,
+    onAccept: () => lifecycle.push('accepted'), onRetire: settlement => lifecycle.push(settlement.reason) })
+  const sending = input.prompt([{ type: 'file', receiptId: 'uploaded' }, { type: 'text', text }], 'queue', undefined, requestId)
+  assert.deepEqual(requests, [['/api/codex/conversation-action', { threadId, action: 'prompt', newSession, mode: 'queue',
+    clientUserMessageId: requestId, reportQueuedForLater: true, modelDraft: model, permissionDraft: profileId, planMode: 'plan', worktree,
+    input: [{ type: 'file', receiptId: 'uploaded' }, { type: 'text', text, text_elements: [] }] }]])
+  assert.deepEqual(lifecycle, [])
+  assert.equal(state.pendingSubmissions[0].requestId, requestId)
+
+  reply.resolve(Response.json({ thread, clientUserMessageId: 'original-native-id', planMode: 'plan' }))
+  assert.equal((await sending).ok, true)
+  assert.deepEqual(lifecycle, ['accepted', thread.id, { requestId: 'original-native-id', text, attachments }, 'observed'])
+  assert.deepEqual(state.pendingSubmissions, [])
+  assert.equal(fixture.modelDraft.getSnapshot(), undefined)
+  assert.equal(fixture.permissionDraft.getSnapshot(), undefined)
+  assert.equal(fixture.worktreeDraft.getSnapshot(), undefined)
+})
+
+test('取消或拒绝首发时保留输入设置，重试使用原提交身份', async t => {
+  const model = { provider: 'openai', model: 'selected' }
+  const lifecycle = []
+  const fixture = newSessionFixture(t, ({ signal }) => {
+    if (fixture.requests.length === 2) return Response.json({ error: 'fixture rejected' }, { status: 409 })
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
+  }, { model,
+    openWorktree: () => assert.fail('未接纳的输入不能切换会话'),
+  })
+  const input = fixture.bind()
+  function send(text, signal) {
+    const { requestId } = input.beginSubmission({ mode: 'queue', text, attachments: [],
+      onAccept: () => lifecycle.push('accepted'), onRetire: settlement => lifecycle.push(settlement.reason) })
+    return input.prompt([{ type: 'text', text }], 'queue', signal, requestId)
+  }
+  const controller = new AbortController()
+  const cancelled = send('首次输入', controller.signal)
+  controller.abort()
+  assert.equal((await cancelled).ok, false)
+  assert.equal((await send('编辑后重试')).ok, false)
+  assert.equal(fixture.requests.length, 2)
+  assert.equal(fixture.requests[0][1].clientUserMessageId, fixture.requests[1][1].clientUserMessageId)
+  assert.deepEqual(lifecycle, ['failed', 'failed'])
+  assert.deepEqual(fixture.state.pendingSubmissions, [])
+  assert.deepEqual(fixture.modelDraft.getSnapshot(), model)
+})
+
+test('空会话明确提交 /goal 时以首次原生操作创建目标和会话', async t => {
+  const thread = { id: 'goal-native', cwd: '/repository' }
+  const goal = { objective: '整理结果', status: 'active' }
+  const worktree = { kind: 'new', id: crypto.randomUUID(), baseRef: 'refs/heads/main' }
+  const model = { provider: 'openai', model: 'selected' }
+  const profileId = ':read-only'
+  const opened = []
+  const fixture = newSessionFixture(t, () => Response.json({ thread, goal }), { planMode: 'plan', model, profileId, worktree,
+    openWorktree: result => opened.push(result.thread),
+  })
+  const { threadId, newSession, requests, state } = fixture
+  const input = fixture.bind()
+  const text = '/goal 整理结果'
+  const { requestId } = input.beginSubmission({ mode: 'queue', text, attachments: [] })
+  assert.equal((await input.prompt([{ type: 'text', text }], 'queue', undefined, requestId)).ok, true)
+  assert.deepEqual(requests, [['/api/codex/command-action', { threadId, action: 'goal-create', newSession, clientUserMessageId: requestId,
+    objective: '整理结果', modelDraft: model, permissionDraft: profileId, worktree }]])
+  assert.deepEqual(opened, [thread])
+  assert.deepEqual(state.pendingSubmissions, [])
+})
+
+test('空会话确认审查时提交原生命令，失败保留设置，重试沿用首次提交身份', async t => {
+  const thread = { id: 'review-native', cwd: '/repository' }
+  const model = { provider: 'openai', model: 'selected' }
+  const profileId = ':read-only'
+  const worktree = { kind: 'existing', id: crypto.randomUUID(), path: '/worktree' }
+  const opened = []
+  let fail = true
+  const fixture = newSessionFixture(t, () => fail ? Response.json({ error: 'review rejected' }, { status: 409 })
+    : Response.json({ thread }), { planMode: 'plan', model, profileId, worktree,
+    openWorktree: (result, confirmed, handoff, keepInput) => opened.push([result.thread, confirmed, keepInput]),
+  })
+  const { threadId, newSession, requests } = fixture
+  const command = { action: 'review', target: { type: 'uncommittedChanges' } }
+  const input = fixture.bind()
+  await assert.rejects(input.runCommand(command), /review rejected/)
+  assert.deepEqual(opened, [])
+  assert.deepEqual(fixture.modelDraft.getSnapshot(), model)
+  fail = false
+  await input.runCommand(command)
+  const { clientUserMessageId } = requests[0][1]
+  assert.ok(clientUserMessageId)
+  const sent = ['/api/codex/command-action', { threadId, newSession, clientUserMessageId, ...command,
+    modelDraft: model, permissionDraft: profileId, worktree, planMode: 'plan' }]
+  assert.deepEqual(requests, [sent, sent])
+  assert.deepEqual(opened, [[thread, true, true]])
+  assert.equal(fixture.modelDraft.getSnapshot(), undefined)
+  assert.equal(fixture.permissionDraft.getSnapshot(), undefined)
+  assert.equal(fixture.worktreeDraft.getSnapshot(), undefined)
 })
 
 test('Goal 发送错误归属本次输入模式，退出后图片走普通发送', async t => {
@@ -180,7 +337,7 @@ test('输入栏创建目标需确认替换，取消保留 Goal 模式，成功�
     tokenBudget: 250, expectedGoal: { objective: '旧目标', createdAt: 100 } }]])
 })
 
-test('原生队列曾确认图片送达时，后续 HTTP 失败不会恢复草稿', async t => {
+test('原生队列先确认图片送达，后续 HTTP 失败不打断输入交接', async t => {
   const reply = Promise.withResolvers()
   t.mock.method(globalThis, 'fetch', () => reply.promise)
   globalThis.document = { baseURI: 'http://localhost/' }
@@ -201,6 +358,8 @@ test('原生队列曾确认图片送达时，后续 HTTP 失败不会恢复草�
   const { requestId } = input.beginSubmission({ mode: 'queue', text: '', attachments: [{ type: 'image' }],
     onAccept: () => lifecycle.push('accepted'), onRetire: settlement => lifecycle.push(settlement.reason) })
   const sending = input.prompt([{ type: 'image', mediaType: 'image/png', data: 'AAAA' }], 'queue', undefined, requestId)
+  await new Promise(setImmediate)
+  assert.equal(globalThis.fetch.mock.callCount(), 1)
 
   queue = [{ clientUserMessageId: requestId }]
   queueChanged()

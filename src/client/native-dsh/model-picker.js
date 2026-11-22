@@ -75,7 +75,7 @@ export function installModelPicker(ctx, signal) {
         if (!state || !canChangeModel(state)) {
           return { ok: false, error: remoteFailure('此会话当前无法选择模型。') }
         }
-        if (state.archived || state.live.status.type === 'notLoaded') {
+        if (state.localDraft || state.archived || state.live.status.type === 'notLoaded') {
           const selected = { provider, model, reasoningEffort }
           session.modelDraft.set(selected)
           return { ok: true, value: { selected } }

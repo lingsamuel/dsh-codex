@@ -1,9 +1,10 @@
+import { stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 
 const maximumWorkspaces = 8
 const refreshInterval = 5_000
 
-/** 只向原生补全组件提供路径。工作目录来自请求所属的 Codex 线程。 */
+/** 从编辑器的工作目录或所属的原生线程索引路径，供 DSH 补全使用。 */
 export function createFileReferenceRoute(readScope, createSearch, ownerSignal) {
   const searches = new Map()
   ownerSignal.addEventListener('abort', () => {
@@ -35,15 +36,20 @@ export function createFileReferenceRoute(readScope, createSearch, ownerSignal) {
       const headers = { 'Cache-Control': 'no-store' }
       const params = new URL(request.url).searchParams
       const threadId = params.get('threadId')
-      if (!threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400, headers })
+      const cwd = params.get('cwd')
+      if (!threadId && !isAbsolute(cwd ?? '')) {
+        return Response.json({ error: '请选择有效的工作目录。' }, { status: 400, headers })
+      }
       const signal = AbortSignal.any([request.signal, ownerSignal])
       try {
-        const scope = await readScope(threadId)
+        // 原生会话继续按已有作用域查找。空草稿使用目录选择器提供的 Host 路径。
+        const root = threadId ? (await readScope(threadId))?.workspaceRoot
+          : (await stat(cwd).catch(() => null))?.isDirectory() ? cwd : undefined
         signal.throwIfAborted()
-        if (!scope || !isAbsolute(scope.workspaceRoot)) {
-          return Response.json({ error: '找不到 Codex 会话工作目录。' }, { status: 404, headers })
+        if (!isAbsolute(root ?? '')) {
+          return Response.json({ error: '找不到 Codex 工作目录。' }, { status: 404, headers })
         }
-        return Response.json(await searchFor(scope.workspaceRoot).list(params.get('query') ?? '', signal), { headers })
+        return Response.json(await searchFor(root).list(params.get('query') ?? '', signal), { headers })
       } catch {
         return Response.json({ error: '无法读取 Codex 工作区的路径候选。' }, { status: 503, headers })
       }
