@@ -50,8 +50,21 @@ export function projectQuestionReply(replies) {
   }
 }
 
+function agentWait(item) {
+  const { receiverThreadIds = [], agentsStates, status } = item
+  // Codex 正常结束等待却没有返回任何子智能体状态时，表示已到达等待时限。
+  const timedOut = status === 'completed' && agentsStates != null && Object.keys(agentsStates).length === 0
+  return {
+    name: 'wait_agent',
+    args: { targets: receiverThreadIds },
+    output: JSON.stringify({ ...item, timedOut }, null, 2),
+    isError: status === 'failed',
+  }
+}
+
 /** 将原生命令、文件变更和工具输出交给 DSH 已注册的工具行。 */
 export function projectTool(item) {
+  if (item.type === 'collabAgentToolCall' && item.tool === 'wait') return agentWait(item)
   switch (item.type) {
     case 'commandExecution':
       return command(item)

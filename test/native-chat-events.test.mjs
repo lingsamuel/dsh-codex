@@ -152,6 +152,35 @@ test('projects command output and parsed or raw file changes into DSH tool entri
   assert.equal(rawResult.data.message.content[0].text, 'raw\nunparsed patch')
 })
 
+test('Codex 协作等待进入 DSH 原生等待工具行，保留目标、结果和超时状态', () => {
+  const wait = {
+    type: 'collabAgentToolCall', tool: 'wait', receiverThreadIds: ['child'],
+    agentsStates: { child: { status: 'completed', message: '检查完成' } },
+  }
+  const entries = projectCodexTurns([turn('wait', [
+    { ...wait, id: 'waiting', status: 'inProgress', agentsStates: {} },
+    { ...wait, id: 'returned', status: 'completed' },
+    { ...wait, id: 'timeout', status: 'completed', receiverThreadIds: [], agentsStates: {} },
+    { ...wait, id: 'failed', status: 'failed', agentsStates: { child: { status: 'errored', message: '任务失败' } } },
+    { id: 'mcp', type: 'mcpToolCall', tool: 'wait', status: 'completed', arguments: { seconds: 1 }, result: 'done' },
+  ], { status: 'inProgress' })])
+  const calls = types(entries, 'tool/call').map(({ data }) => [data.callId, data.name, JSON.parse(data.arguments)])
+  assert.deepEqual(calls, [
+    ['waiting', 'wait_agent', { targets: ['child'] }],
+    ['returned', 'wait_agent', { targets: ['child'] }],
+    ['timeout', 'wait_agent', { targets: [] }],
+    ['failed', 'wait_agent', { targets: ['child'] }],
+    ['mcp', 'wait', { seconds: 1 }],
+  ])
+  const [returned, timeout, failure, mcp] = types(entries, 'tool/result').map(({ data }) => data.message)
+  assert.deepEqual(JSON.parse(returned.content[0].text).agentsStates, wait.agentsStates)
+  assert.equal(JSON.parse(returned.content[0].text).timedOut, false)
+  assert.equal(JSON.parse(timeout.content[0].text).timedOut, true)
+  assert.equal(failure.isError, true)
+  assert.equal(JSON.parse(failure.content[0].text).timedOut, false)
+  assert.equal(mcp.content[0].text, 'done')
+})
+
 test('older pages prepend without changing previously published sequence or turn identities', () => {
   const first = turn('older-turn', [{ id: 'older-message', type: 'agentMessage', text: 'Older' }])
   const second = turn('newer-turn', [{ id: 'newer-message', type: 'agentMessage', text: 'Newer' }])

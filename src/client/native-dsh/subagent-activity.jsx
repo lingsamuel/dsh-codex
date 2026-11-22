@@ -8,11 +8,20 @@ const labels = {
   zh: { started: '已启动子智能体', completed: '子智能体已完成', interrupted: '子智能体已中断', unavailable: '无法打开子会话' },
   en: { started: 'Started subagent', completed: 'Subagent completed', interrupted: 'Subagent interrupted', unavailable: 'Unable to open subagent conversation' },
 }
+const iconSize = 'calc(16px + var(--dsh-content-font-delta, 0px))'
 const rowStyle = {
-  display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.35rem',
-  fontSize: '0.875rem', color: 'var(--dsw-alias-label-secondary)',
+  display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: '6px', minWidth: 0,
+  fontSize: 'var(--dsh-content-font-size, 14px)',
+  lineHeight: 'calc(24px + var(--dsh-content-font-delta, 0px))',
+  color: 'var(--dsw-alias-label-tertiary)',
 }
-const pathStyle = { whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start' }
+const iconStyle = { display: 'inline-grid', placeItems: 'center', flex: 'none', width: iconSize, height: iconSize }
+// 路径与状态共用过程行的字体和行高，保留原生按钮的键盘操作。
+const pathStyle = {
+  height: 'auto', maxWidth: '100%', minWidth: 0, padding: 0, background: 'none',
+  font: 'inherit', color: 'inherit', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start',
+  textDecoration: 'underline', textUnderlineOffset: '0.15em',
+}
 
 function SubagentActivity({ node, open, t }) {
   const { kind, agentThreadId, agentPath } = node.data
@@ -38,11 +47,11 @@ function SubagentActivity({ node, open, t }) {
   }
 
   return <div style={rowStyle}>
-    <IconUsersOutlineRegular size={16} aria-hidden />
+    <span style={iconStyle} aria-hidden><IconUsersOutlineRegular size={16} /></span>
     <span>{t(kind)}</span>
     {agentThreadId
-      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}><code>{agentPath}</code></Button>
-      : <code>{agentPath}</code>}
+      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>{agentPath}</Button>
+      : <span style={{ overflowWrap: 'anywhere' }}>{agentPath}</span>}
     {unavailable && <span role="status">{t('unavailable')}</span>}
   </div>
 }
