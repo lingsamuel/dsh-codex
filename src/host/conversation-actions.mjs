@@ -3,7 +3,7 @@ import { basename, isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
-import { replaceUserInputText } from '../shared/user-input.js'
+import { replaceUserInputText, userInputText } from '../shared/user-input.js'
 import { isComposerImageUrl } from '../shared/composer-images.js'
 import { readProjects } from './catalog.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
@@ -11,6 +11,7 @@ import { updateModelSelection, validateModelDraft } from './models.mjs'
 import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread,
   unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 import { createThreadTitleScheduler } from './thread-titles.mjs'
+import { resolveInputSkills } from './skills.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -236,7 +237,9 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
   if (!item) throw missingQueueItem()
 
   if (operation === 'edit') {
-    const input = replaceUserInputText(item.input, text)
+    const edited = replaceUserInputText(item.input, text)
+    const input = edited === item.input ? edited : await resolveInputSkills(request, edited,
+      async () => (await addressableThread(request, threadId)).cwd, userInputText(item.input))
     if (!input.length) throw badRequest('请输入消息内容。')
     try {
       return await request('thread/queue/update', { ...target, input })
@@ -317,6 +320,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
             const thread = await submissionThread(rpc, threadId, fields, permissions)
             const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
+            params.input = await resolveInputSkills(rpc, params.input, () => runtime.cwd ?? thread.cwd)
             if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
                 const result = await steerTurn(rpc, { ...params, expectedTurnId })

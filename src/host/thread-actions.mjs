@@ -3,10 +3,12 @@ import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
 import { updateModelSelection } from './models.mjs'
 import { submissionRuntime, validateSubmissionSettings } from './conversation-actions.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
-import { editedInput, sendAfterRevert } from './thread-edit.mjs'
+import { readEditableInput, sendAfterRevert } from './thread-edit.mjs'
 import { readThreads } from './catalog.mjs'
 import { createThreadSubmissionQueue, resumeThread, unarchiveForSubmission } from './thread-runtime.mjs'
 import { readLatestTurn } from './live-history.mjs'
+import { replaceUserInputText, userInputText } from '../shared/user-input.js'
+import { resolveInputSkills } from './skills.mjs'
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -93,7 +95,9 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             const stale = async () => (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== headTurnId
             const historyChanged = () => json({ error: '会话历史已有变化。请核对记录后重新发起操作。' }, 409)
             if (await stale()) return historyChanged()
-            const replacement = action === 'edit' && await editedInput(request, threadId, beforeTurnId, itemId, text)
+            const original = action === 'edit' && await readEditableInput(request, threadId, beforeTurnId, itemId)
+            const replacement = original && replaceUserInputText(original, text)
+            if (replacement && !replacement.length) return json({ error: '请输入消息内容。' }, 400)
             const draft = { modelDraft, permissionDraft }
             if (replacement) await validateSubmissionSettings(request, initial, draft, permissions)
             if (unarchive && !replacement && beforeTurnId !== headTurnId) {
@@ -113,8 +117,9 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             const queued = () => json({ error: '请先处理待发消息，再修改对话记录。' }, 409)
             // 冷恢复可能自行领取待发项。已取消归档的线程也可能被别的客户端先恢复。
             if ((cold || unarchive) && await hasQueued()) return queued()
+            let runtime = thread
             let permission
-            if (replacement) ({ permission } = await submissionRuntime(request, thread, draft, signal, permissions))
+            if (replacement) ({ runtime, permission } = await submissionRuntime(request, thread, draft, signal, permissions))
             else if (cold) await resumeThread(request, thread)
             if (cold || unarchive || (replacement && (modelDraft || permissionDraft))) {
               const { thread: current } = await request('thread/read', { threadId })
@@ -123,8 +128,12 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
               }
               if (unarchive && await hasQueued()) return queued()
               if (await stale()) return historyChanged()
+              runtime = current
             }
             if (!replacement) return json(await request(method, params))
+            // 恢复可能改变工作目录。在实际目录解析技能，成功后再回退历史。
+            const revised = await resolveInputSkills(request, replacement, () => runtime.cwd ?? thread.cwd, userInputText(original))
+            if (!revised.length) return json({ error: '请输入消息内容。' }, 400)
             try {
               await request(method, params)
             } catch (error) {
@@ -132,7 +141,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
               if (error instanceof CodexRpcError && [-32602, -32601, -32600].includes(error.code)) throw error
               return json({ error: '无法确认回退是否完成。请先核对当前会话。' }, 409)
             }
-            const sent = await sendAfterRevert(request, threadId, replacement, signal)
+            const sent = await sendAfterRevert(request, threadId, revised, signal)
             if (sent.error) return json({ error: sent.error }, 409)
             return json(permission ? { ...sent, permission } : sent)
           })
