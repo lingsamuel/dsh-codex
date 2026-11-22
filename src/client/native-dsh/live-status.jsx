@@ -8,7 +8,6 @@ const dictionaries = {
     'mode.history': 'Codex 历史',
     'mode.disconnected': 'Codex 连接断开',
     'activity.failed': '上一轮失败',
-    'activity.interrupted': '上一轮已中断',
     'activity.systemError': '会话异常',
   },
   en: {
@@ -16,7 +15,6 @@ const dictionaries = {
     'mode.history': 'Codex history',
     'mode.disconnected': 'Codex disconnected',
     'activity.failed': 'Last turn failed',
-    'activity.interrupted': 'Last turn interrupted',
     'activity.systemError': 'Session error',
   },
 }

@@ -1,5 +1,3 @@
-const exceptionalOutcomes = new Set(['failed', 'interrupted'])
-
 /** 在独立 Profile 内沿用 DSH 的状态源，用 Codex 回执取代本地完成推断。 */
 export function installUnreadStatus(status, catalog) {
   // 当前 DSH 把同一对象给侧栏和搜索，根 Hook 不允许同名注册。
@@ -35,7 +33,7 @@ export function installUnreadStatus(status, catalog) {
 
 /** 只在标题栏补充 DSH 侧栏状态点没有表达的连接和异常信息。 */
 export function describeLiveStatus({ mode = 'history', status, lastTurnStatus } = {}) {
-  const turnOutcome = exceptionalOutcomes.has(lastTurnStatus) ? lastTurnStatus : undefined
+  const turnOutcome = lastTurnStatus === 'failed' ? lastTurnStatus : undefined
   if (mode !== 'live') return { mode, activity: turnOutcome }
   if (status?.type === 'systemError') return { activity: 'systemError' }
   return { mode: undefined, activity: status?.type === 'active' ? undefined : turnOutcome }

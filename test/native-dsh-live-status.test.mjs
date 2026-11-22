@@ -75,14 +75,17 @@ test('标题栏保留连接提示与异常结果，常规状态由 DSH 侧栏显
       lastTurnStatus: 'inProgress',
     }), { mode, activity: undefined })
   }
-  for (const result of ['failed', 'interrupted']) {
-    assert.deepEqual(describeLiveStatus({
-      mode: 'history', status: { type: 'notLoaded' }, lastTurnStatus: result,
-    }), { mode: 'history', activity: result })
-  }
   assert.deepEqual(describeLiveStatus({
-    mode: 'live', status: { type: 'idle' }, lastTurnStatus: 'completed',
-  }), { mode: undefined, activity: undefined })
+    mode: 'history', status: { type: 'notLoaded' }, lastTurnStatus: 'failed',
+  }), { mode: 'history', activity: 'failed' })
+  assert.deepEqual(describeLiveStatus({
+    mode: 'history', status: { type: 'notLoaded' }, lastTurnStatus: 'interrupted',
+  }), { mode: 'history', activity: undefined })
+  for (const lastTurnStatus of ['completed', 'interrupted']) {
+    assert.deepEqual(describeLiveStatus({
+      mode: 'live', status: { type: 'idle' }, lastTurnStatus,
+    }), { mode: undefined, activity: undefined })
+  }
   assert.deepEqual(describeLiveStatus({
     mode: 'live', status: { type: 'active', activeFlags: ['waitingOnApproval'] }, lastTurnStatus: 'inProgress',
   }), { mode: undefined, activity: undefined })
