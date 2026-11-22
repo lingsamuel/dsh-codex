@@ -1,5 +1,5 @@
 import { isAbsolute, join } from 'node:path'
-import { readConversationQueue } from './conversation-actions.mjs'
+import { readConversationQueue } from './thread-runtime.mjs'
 import { watchNativeFiles } from './history-watch.mjs'
 
 /** 被动观察本地原生队列。WAL 只作变更提示，队列内容和顺序始终由 App Server 提供。 */

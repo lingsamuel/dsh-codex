@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
+import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText } from '../shared/user-input.js'
 import { isComposerImageUrl } from '../shared/composer-images.js'
 import { readProjects } from './catalog.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
-import { addressableThread, createThreadSubmissionQueue, resumeThread, unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
+import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread,
+  unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
+import { createThreadTitleScheduler } from './thread-titles.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -38,13 +40,6 @@ function promptInput(input) {
   })
   if (!parts.some(part => part.type === 'image' || part.text.trim())) throw badRequest('请输入消息内容。')
   return parts
-}
-
-/** 从原生队列读取当前顺序，供初次投影和队列操作复用。不会加载线程。 */
-export function readConversationQueue(request, threadId) {
-  return readCodexPages(cursor => request('thread/queue/list', {
-    threadId, limit: 100, ...(cursor != null && { cursor }),
-  }))
 }
 
 async function requireActiveThread(request, threadId) {
@@ -118,11 +113,15 @@ async function deleteQueued(request, params) {
   return result
 }
 
-async function startQueued(request, threadId, queuedSubmissionId, signal, unarchive, onResume) {
+async function startQueued(request, threadId, queuedSubmissionId, signal, unarchive, onResume, scheduleTitle) {
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
   const current = await addressableThread(request, threadId, unarchive)
   const thread = unarchive ? await unarchiveForSubmission(request, current) : current
-  if (thread.status?.type !== 'notLoaded') return request('thread/queue/start', { threadId, queuedSubmissionId })
+  function started(result) {
+    if (result.turn?.id) scheduleTitle(thread, undefined, result.turn.id)
+    return result
+  }
+  if (thread.status?.type !== 'notLoaded') return started(await request('thread/queue/start', { threadId, queuedSubmissionId }))
 
   const queue = await readConversationQueue(request, threadId)
   const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
@@ -142,19 +141,19 @@ async function startQueued(request, threadId, queuedSubmissionId, signal, unarch
   // 冷恢复可能已领取队首。始终保留原目标，避免再启动后面的消息。
   if (resumed.status?.type === 'active') {
     const claimed = await claimedTurn()
-    if (claimed) return claimed
+    if (claimed) return started(claimed)
   }
   try {
     const result = await request('thread/queue/start', { threadId, queuedSubmissionId: target.id })
     await waitForThreadActivity(request, threadId, signal)
-    return result
+    return started(result)
   } catch (error) {
     if (!(error instanceof CodexRpcError) || error.code !== -32600
       || !/active or pending turn|queued .*not found/.test(error.message)) throw error
     const deadline = performance.now() + 750
     do {
       const claimed = await claimedTurn()
-      if (claimed) return claimed
+      if (claimed) return started(claimed)
       await delay(50, undefined, { signal })
     } while (performance.now() < deadline)
     if ((await readConversationQueue(request, threadId)).some(item => item.id === target.id)) throw error
@@ -162,9 +161,8 @@ async function startQueued(request, threadId, queuedSubmissionId, signal, unarch
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text, unarchive }, signal, onResume) {
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }) {
   if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
-  if (operation === 'start') return startQueued(request, threadId, queuedSubmissionId, signal, unarchive === true, onResume)
   if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
@@ -211,6 +209,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
 export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions) {
   const creatingProjects = new Map()
+  const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
   return {
     path: '/api/codex/conversation-action',
     methods: ['POST'],
@@ -267,6 +266,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             }
             // turn/start 也能向活动轮次插话。原生队列能处理竞争，并在空闲时自行启动。
             const result = await rpc('thread/queue/add', params)
+            scheduleTitle(thread, clientUserMessageId)
             if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, threadId, signal)
             return result
           })))
@@ -278,8 +278,11 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        const run = () => withCodexReader(socketPath, signal, rpc => queueAction(rpc, threadId, fields, signal, permissions?.remember))
-        return json(await (fields.operation === 'start' || fields.operation === 'steer' ? submit(threadId, run) : run()))
+        const { operation, queuedSubmissionId, unarchive } = fields
+        const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
+          ? startQueued(rpc, threadId, queuedSubmissionId, signal, unarchive === true, permissions?.remember, scheduleTitle)
+          : queueAction(rpc, threadId, fields))
+        return json(await (operation === 'start' || operation === 'steer' ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

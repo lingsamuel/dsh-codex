@@ -1,5 +1,12 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { CodexRpcError } from './app-server.mjs'
+import { CodexRpcError, readCodexPages } from './app-server.mjs'
+
+/** 从原生队列读取当前顺序。读取待发记录无需加载线程。 */
+export function readConversationQueue(request, threadId) {
+  return readCodexPages(cursor => request('thread/queue/list', {
+    threadId, limit: 100, ...(cursor != null && { cursor }),
+  }))
+}
 
 /** 从原生状态检查网页能否提交输入。浏览路径直接使用 thread/read。 */
 export async function addressableThread(request, threadId, allowArchived = false) {

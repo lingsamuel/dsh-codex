@@ -118,7 +118,8 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
           })
           return await (modifiesHistory ? submit(threadId, run) : run())
         }
-        const result = await readCodex(method, params, socketPath, signal)
+        const run = () => readCodex(method, params, socketPath, signal)
+        const result = await (action === 'rename' ? submit(threadId, run) : run())
         if (action === 'fork' || action === 'unarchive') {
           return json({ ...result, workspacePaths: await resolveWorkspacePaths([result.thread.cwd]) })
         }

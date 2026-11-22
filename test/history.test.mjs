@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { WebSocketServer } from 'ws'
 import { readCodex } from '../src/host/app-server.mjs'
 import { createConversationActionRoute } from '../src/host/conversation-actions.mjs'
@@ -27,7 +28,7 @@ async function fakeCodex(t, methods) {
       if (request.id === undefined) return
       const reply = request.method === 'initialize'
         ? { result: { userAgent: 'test Codex', codexHome: directory } }
-        : await methods[request.method]?.(request.params)
+        : await methods[request.method]?.(request.params, client)
       client.send(JSON.stringify({
         id: request.id,
         ...(reply ?? { error: { code: -32601, message: 'method not found' } }),
@@ -44,7 +45,9 @@ async function fakeCodex(t, methods) {
     await closed
     await rm(directory, { recursive: true, force: true })
   })
-  const routes = createHistoryRoutes(socketPath)
+  const owner = new AbortController()
+  t.after(() => owner.abort())
+  const routes = createHistoryRoutes(socketPath, owner.signal)
   const get = (path, options) => routes.find(route => path.split('?')[0] === route.path)
     .fetch(new Request(`http://localhost${path}`, options))
   return {
@@ -88,6 +91,226 @@ test('工作区改名、排序和删除返回 Codex 原生项目列表', async t
     ['project/move', { projectId: 'beta', beforeProjectId: 'alpha' }],
     ['project/delete', { projectId: 'alpha' }],
   ])
+})
+
+async function titleFixture(t, { initialItem, modelResult = 'success', waitForModel, waitForClaim, provider = 'openai',
+  account = 'chatgpt', luna = true, defer = false, emptyRollout = false, unindexedHistory = false } = {}) {
+  const thread = { id: 'main', cwd: '/workspace', historyMode: 'paginated', status: { type: 'idle' },
+    model: 'main-model', modelProvider: provider, preview: initialItem ? '旧消息' : '' }
+  const text = { type: 'text', text: '请检查网页标题逻辑', text_elements: [] }
+  const queue = new Map()
+  const events = new EventEmitter()
+  let turn = initialItem ? { id: 'first-turn', items: [initialItem] } : undefined
+  let started = 0
+  let detached = false
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => {
+      if (turn && emptyRollout) {
+        emptyRollout = false
+        return { error: { code: -32603, message: 'failed to read thread: rollout at /workspace/draft.jsonl is empty' } }
+      }
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => {
+      events.emit(detached ? 'title-revalidation' : 'history-read')
+      if (turn && unindexedHistory) {
+        unindexedHistory = false
+        return { error: { code: -32601, message: 'list_turns is not supported yet' } }
+      }
+      return turn ? { result: { data: [turn], nextCursor: null } }
+        : { error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }
+    },
+    'thread/queue/list': () => {
+      events.emit('queue-read')
+      return { result: { data: [...queue.values()], nextCursor: null } }
+    },
+    'thread/queue/add': ({ clientUserMessageId, input }) => {
+      const queuedSubmission = { id: clientUserMessageId, clientUserMessageId, input }
+      queue.set(queuedSubmission.id, queuedSubmission)
+      if (!defer && !turn) claim(queuedSubmission)
+      return { result: { queuedSubmission } }
+    },
+    'thread/queue/delete': ({ queuedSubmissionId }) => ({ result: { deleted: queue.delete(queuedSubmissionId) } }),
+    'thread/queue/start': ({ queuedSubmissionId }) => {
+      const submission = queue.get(queuedSubmissionId) ?? queue.values().next().value
+      if (waitForClaim) {
+        queue.delete(submission.id)
+        fixture.broadcast({ method: 'thread/queue/changed', params: { threadId: thread.id } })
+        void waitForClaim.then(() => claim(submission))
+      } else claim(submission)
+      return { result: { turn: { id: 'first-turn', items: [] } } }
+    },
+    'account/read': () => ({ result: { account: { type: account } } }),
+    'model/list': () => ({ result: { data: luna ? [{ model: 'gpt-5.6-luna' }] : [] } }),
+    'config/read': () => ({ result: { config: { mcp_servers: { fixture: { enabled: true } } } } }),
+    'thread/start': params => {
+      assert.equal(params.ephemeral, true)
+      return { result: { thread: { id: 'title-thread', ephemeral: true }, sandbox: { type: 'readOnly' },
+        approvalPolicy: 'never' } }
+    },
+    'turn/start': async (params, client) => {
+      started++
+      const startedTurn = { id: 'title-turn', status: 'inProgress', items: [] }
+      events.emit('title-started', params)
+      const finish = () => {
+        const send = (method, params) => client.send(JSON.stringify({ method, params }))
+        if (modelResult === 'success') send('item/completed', { threadId: 'title-thread', turnId: startedTurn.id,
+          item: { type: 'agentMessage', phase: 'final_answer', text: '{"title":"检查网页标题"}' } })
+        send('turn/completed', { threadId: 'title-thread', turn: { ...startedTurn,
+          status: modelResult === 'success' ? 'completed' : 'failed' } })
+      }
+      if (waitForModel) void waitForModel.then(finish)
+      else finish() // 轮次事件可能早于 turn/start 的响应。
+      return { result: { turn: startedTurn } }
+    },
+    'thread/unsubscribe': () => {
+      detached = true
+      return { result: {} }
+    },
+    'thread/name/set': ({ threadId, name }) => {
+      assert.equal(threadId, thread.id)
+      thread.name = name
+      fixture.broadcast({ method: 'thread/name/updated', params: { threadId, threadName: name } })
+      events.emit('title-saved', name)
+      return { result: {} }
+    },
+  })
+  function claim(submission) {
+    queue.delete(submission.id)
+    turn = { id: 'first-turn', items: [{ type: 'userMessage', clientId: submission.clientUserMessageId,
+      id: `item-${submission.id}`, content: submission.input }] }
+    thread.preview = submission.input.find(part => part.type === 'text')?.text ?? ''
+    thread.status = { type: 'active' }
+    fixture.broadcast({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } })
+  }
+  const post = (fields, route = 'conversation-action') => fixture.get(`/api/codex/${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId: thread.id, ...fields }),
+  })
+  return {
+    ...fixture, thread, post, text,
+    send: (clientUserMessageId = 'first', input = [text]) => post({ action: 'prompt', mode: 'queue', clientUserMessageId, input }),
+    wait: event => once(events, event, { signal: AbortSignal.timeout(2_000) }),
+    inferenceCount: () => started,
+    replaceFirstItem: item => { turn.items[0] = item },
+  }
+}
+
+test('网页首条消息进入历史后只用一个临时轮次拟标题，并通过原生事件更新目录', async t => {
+  const adopt = Promise.withResolvers()
+  const title = await titleFixture(t, { defer: true, waitForClaim: adopt.promise })
+  const abort = new AbortController()
+  t.after(() => abort.abort())
+  const response = await title.get('/api/codex/watch?scope=catalog', { signal: abort.signal })
+  const reader = response.body.getReader()
+  try {
+    const decoder = new TextDecoder()
+    let pending = ''
+    async function frameWhere(predicate) {
+      while (true) {
+        const boundary = pending.indexOf('\n\n')
+        if (boundary < 0) {
+          const next = await reader.read()
+          assert.equal(next.done, false)
+          pending += decoder.decode(next.value, { stream: true })
+          continue
+        }
+        const message = pending.slice(0, boundary)
+        pending = pending.slice(boundary + 2)
+        if (!message.startsWith('data: ')) continue
+        const frame = JSON.parse(message.slice(6))
+        if (predicate(frame)) return frame
+      }
+    }
+    await frameWhere(frame => frame.type === 'catalog-ready')
+    const observedQueue = title.wait('queue-read')
+    assert.equal((await title.send()).status, 200)
+    await observedQueue
+    assert.equal(title.inferenceCount(), 0)
+    assert.equal((await title.send()).status, 200)
+    assert.equal((await title.post({ action: 'queue', operation: 'start', queuedSubmissionId: 'first' })).status, 200)
+    await delay(1_200)
+    assert.equal(title.inferenceCount(), 0)
+    const saved = title.wait('title-saved')
+    adopt.resolve()
+    assert.deepEqual(await saved, ['检查网页标题'])
+    assert.equal(title.inferenceCount(), 1)
+    const update = await frameWhere(frame => frame.type === 'thread' && frame.id === title.thread.id)
+    assert.equal(update.thread.name, '检查网页标题')
+    const opening = title.messages.find(({ method }) => method === 'thread/start').params
+    assert.equal(opening.model, 'gpt-5.6-luna')
+    assert.equal(opening.threadSource, 'thread_title')
+    assert.equal(opening.config.mcp_servers.fixture.enabled, false)
+    assert.deepEqual(opening.environments, [])
+    const turn = title.messages.find(({ method }) => method === 'turn/start').params
+    assert.equal(turn.threadId, 'title-thread')
+    assert.equal(turn.effort, 'low')
+    assert.ok(turn.outputSchema.properties.title)
+    assert.match(turn.input[0].text, /网页标题逻辑/)
+    assert.ok(title.messages.some(({ method, params }) => method === 'thread/unsubscribe' && params.threadId === 'title-thread'))
+  } finally {
+    await reader.cancel()
+  }
+})
+
+test('标题推理失败时写回首条文本摘录，并对第三方 provider 沿用原模型', async t => {
+  const title = await titleFixture(t, { modelResult: 'failure', provider: 'custom' })
+  const saved = title.wait('title-saved')
+  assert.equal((await title.send()).status, 200)
+  assert.deepEqual(await saved, [title.text.text])
+  const opening = title.messages.find(({ method }) => method === 'thread/start').params
+  assert.equal(opening.model, title.thread.model)
+  assert.equal(opening.modelProvider, 'custom')
+  assert.equal(title.inferenceCount(), 1)
+})
+
+test('首条消息写入期间原生会话记录短暂为空时继续拟标题', async t => {
+  const title = await titleFixture(t, { emptyRollout: true, unindexedHistory: true })
+  const saved = title.wait('title-saved')
+  assert.equal((await title.send()).status, 200)
+  assert.deepEqual(await saved, ['检查网页标题'])
+})
+
+test('模型返回前手动改名时保留手动标题', async t => {
+  const model = Promise.withResolvers()
+  const title = await titleFixture(t, { waitForModel: model.promise })
+  const started = title.wait('title-started')
+  assert.equal((await title.send()).status, 200)
+  await started
+  assert.equal((await title.post({ action: 'rename', name: '手动标题' }, 'thread-action')).status, 200)
+  const revalidated = title.wait('title-revalidation')
+  model.resolve()
+  await revalidated
+  await delay(20)
+  assert.equal(title.thread.name, '手动标题')
+  assert.equal(title.messages.filter(({ method }) => method === 'thread/name/set').length, 1)
+})
+
+test('首条消息在拟标题期间发生变化时丢弃旧结果', async t => {
+  const model = Promise.withResolvers()
+  const title = await titleFixture(t, { waitForModel: model.promise })
+  const started = title.wait('title-started')
+  assert.equal((await title.send()).status, 200)
+  await started
+  title.replaceFirstItem({ type: 'userMessage', clientId: 'replacement', id: 'replacement-item', content: [title.text] })
+  const revalidated = title.wait('title-revalidation')
+  model.resolve()
+  await revalidated
+  await delay(20)
+  assert.equal(title.thread.name, undefined)
+  assert.equal(title.messages.some(({ method }) => method === 'thread/name/set'), false)
+})
+
+test('纯图片首条消息和续写旧会话沿用原生预览', async t => {
+  const image = { type: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' }
+  const imageTitle = await titleFixture(t)
+  const readImage = imageTitle.wait('history-read')
+  assert.equal((await imageTitle.send('first-image', [image])).status, 200)
+  await readImage
+  assert.equal((await imageTitle.send('followup')).status, 200)
+  const oldTitle = await titleFixture(t, { initialItem: { type: 'userMessage', id: 'existing', content: [imageTitle.text] } })
+  assert.equal((await oldTitle.send()).status, 200)
+  await delay(20)
+  assert.equal(imageTitle.inferenceCount() + oldTitle.inferenceCount(), 0)
 })
 
 test('普通发送按需恢复原生会话，恢复失败时保留消息未入队', async t => {

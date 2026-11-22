@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
-import { readConversationQueue, steerTurn } from './conversation-actions.mjs'
+import { steerTurn } from './conversation-actions.mjs'
 import { readLatestTurn } from './live-history.mjs'
-import { addressableThread, createThreadSubmissionQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
+import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
 import { answeredAsyncQuestions, asyncQuestionItemId, encodeQuestionReplies } from '../shared/question-replies.js'
 
 function json(value, status = 200) {
