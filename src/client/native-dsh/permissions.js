@@ -16,6 +16,8 @@ const labels = {
     dangerFullAccess: '完全权限', externalSandbox: '外部沙箱', 'on-request': '按需', untrusted: '不受信时', never: '从不', granular: '按类别',
     managed: '托管沙箱', reviewer: '审批人：{name}', user: '用户', auto_review: '自动审查', guardian_subagent: '审查子代理',
     subsequent: '后续轮次 · {details}',
+    command: '权限', commandDescription: '查看本轮权限或切换下轮预设',
+    currentTurn: '本轮权限 · {mode}', nextTurn: '下轮权限', unconfirmed: '未确认',
     sessionFullAccess: '完全权限会为此会话的后续轮次解除 Codex 沙箱限制。审批继续由该会话的 Codex 策略决定。',
     defaultFullAccess: '从此网页新建的会话将使用 Codex 完全权限预设并解除沙箱限制。审批方式由 Codex 配置决定。',
   },
@@ -27,6 +29,8 @@ const labels = {
     dangerFullAccess: 'Full Access', externalSandbox: 'External Sandbox', 'on-request': 'On request', untrusted: 'When untrusted', never: 'Never', granular: 'By category',
     managed: 'Managed sandbox', reviewer: 'Reviewer: {name}', user: 'User', auto_review: 'Auto review', guardian_subagent: 'Review subagent',
     subsequent: 'Subsequent turns · {details}',
+    command: 'Permissions', commandDescription: 'View current turn permissions or change the next turn preset',
+    currentTurn: 'Current turn permissions · {mode}', nextTurn: 'Next turn permissions', unconfirmed: 'Unconfirmed',
     sessionFullAccess: 'Full access removes Codex sandbox restrictions for subsequent turns of this session. Codex continues to apply the session’s approval policy.',
     defaultFullAccess: 'New sessions created from this web interface will use Codex Full access without sandbox restrictions. Codex configuration determines approvals.',
   },
@@ -37,6 +41,9 @@ const sandboxNames = {
   managed: 'managed', disabled: 'dangerFullAccess', external: 'externalSandbox',
 }
 const profileNames = { ':read-only': 'readOnly', ':workspace': 'workspaceWrite', ':danger-full-access': 'dangerFullAccess' }
+const pickerStyle = { display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0 }
+const turnLabelStyle = { color: 'var(--dsw-alias-label-secondary)', fontSize: 12, whiteSpace: 'nowrap' }
+const currentTurnLabelStyle = { ...turnLabelStyle, overflow: 'hidden', textOverflow: 'ellipsis' }
 
 function pickerOption(profile) {
   const value = permissionOptionValue(profile.id)
@@ -51,21 +58,25 @@ function nativeCatalog(snapshot, t) {
   }
 }
 
-function effectiveLabel(permission, t) {
-  if (!permission) return t('unknown')
+function permissionLabel(permission, t) {
   const key = permission.profileId
     ? (Object.hasOwn(profileNames, permission.profileId) ? profileNames[permission.profileId] : undefined)
     : sandboxNames[permission.sandbox]
-  const label = (key && t(key)) || permission.profileId || t('custom')
+  return (key && t(key)) || permission.profileId || t('custom')
+}
+
+function effectiveLabel(permission, t) {
+  if (!permission) return t('unknown')
+  const label = permissionLabel(permission, t)
   return permission.source === 'runtime' ? label : t(permission.source, { mode: label })
 }
 
-function details(permission, t) {
+function details(permission, t, heading) {
   if (!permission) return t('unknown')
   const sandbox = permission.sandbox && (sandboxNames[permission.sandbox] ? t(sandboxNames[permission.sandbox]) : permission.sandbox)
   const approval = permission.approvalPolicy
   const reviewer = permission.approvalsReviewer
-  return [permission.source !== 'runtime' && effectiveLabel(permission, t), sandbox && t('sandbox', { mode: sandbox }),
+  return [heading ?? (permission.source !== 'runtime' && effectiveLabel(permission, t)), sandbox && t('sandbox', { mode: sandbox }),
     approval && t('approval', { policy: Object.hasOwn(labels.en, approval) ? t(approval) : approval }),
     reviewer && t('reviewer', { name: Object.hasOwn(labels.en, reviewer) ? t(reviewer) : reviewer })].filter(Boolean).join(' · ')
 }
@@ -114,6 +125,7 @@ export function installPermissions(ctx, catalog, signal) {
   const defaults = createSnapshotStore({ status: 'idle', error: null, writable: false, options: [], currentValue: '', revision: 0 })
   const errorStore = createSnapshotStore(null)
   const emptyDraft = createSnapshotStore(undefined)
+  const pickers = new Map()
   let errorId = 0
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'codex-permission-error', locale,
@@ -197,11 +209,38 @@ export function installPermissions(ctx, catalog, signal) {
     }
   }))
 
+  ctx.inject(['sessions', 'commandUi'], scope => scope.effect(() => scope.commandUi.register({
+    name: 'permissions', label: () => t('command'), description: () => t('commandDescription'),
+    available({ sessionId }) {
+      const state = scope.sessions.binding(sessionId)?.session.getSnapshot()
+      return Boolean(state && canSelect(state) && directory.getSnapshot().value)
+    },
+    ui: {
+      kind: 'action',
+      run({ sessionId }) {
+        const roots = [...pickers].filter(([root, id]) => id === sessionId && root.isConnected).map(([root]) => root)
+        const composer = roots[0]?.ownerDocument.activeElement?.closest('[data-composer-card]')
+        const root = roots.find(candidate => composer?.contains(candidate)) ?? roots[0]
+        // 打开当前输入栏的原生菜单，沿用其选中、键盘导航与风险确认。
+        const button = root?.querySelector('button')
+        if (!button || button.disabled) return
+        button.focus({ preventScroll: true })
+        button.click()
+      },
+    },
+  })))
+
   ctx.inject(['sessions'], scope => adaptSlot(scope, 'conversation.input.permission', entry => entry.locale === 'permission.access', (inject, Native) => ({
     inject: (sessionId, ...args) => {
       const props = inject(sessionId, ...args)
       const permissionDraft = scope.sessions.binding(sessionId)?.session.permissionDraft ?? emptyDraft
-      return { ...props, hooks: { ...props.hooks, permissionCatalog: directory, permissionDraft }, async select(value) {
+      let picker
+      function attachPicker(root) {
+        pickers.delete(picker)
+        picker = root
+        if (root) pickers.set(root, sessionId)
+      }
+      return { ...props, attachPicker, hooks: { ...props.hooks, permissionCatalog: directory, permissionDraft }, async select(value) {
         const session = scope.sessions.binding(sessionId)?.session
         const target = directory.getSnapshot().value?.options.find(option => option.value === value)
         const state = session?.getSnapshot()
@@ -225,10 +264,11 @@ export function installPermissions(ctx, catalog, signal) {
         }
       } }
     },
-    component: function PermissionSelect(props) {
+    component: function PermissionSelect({ attachPicker, ...props }) {
       const projection = props.useProjection('permissions')
       const draft = props.usePermissionDraft(value => value)
       const editable = props.useSession(canSelect)
+      const turn = props.useSession(state => state.running ? state.live.turnPermission ?? null : undefined)
       const current = draft ? { profileId: draft, source: 'draft' } : projection?.permission
       const available = props.usePermissionCatalog(state => state.value?.options)
       const value = current?.profileId && permissionOptionValue(current.profileId)
@@ -236,10 +276,17 @@ export function installPermissions(ctx, catalog, signal) {
         ? value : effectiveLabel(current, t)
       const summary = details(current, t)
       const title = current?.source === 'runtime' ? t('subsequent', { details: summary || effectiveLabel(current, t) }) : summary
-      return createElement('span', { title, style: { display: 'inline-flex' } }, createElement(Native, {
-        ...props, locked: props.locked || !editable, useProjection: () => ({ currentValue }),
-        t: (key, ...args) => key === 'confirm.description' ? t('sessionFullAccess') : props.t(key, ...args),
-      }))
+      const running = turn !== undefined
+      const turnLabel = running && t('currentTurn', { mode: turn ? permissionLabel(turn, t) : t('unconfirmed') })
+      return createElement('span', { ref: attachPicker, style: { ...pickerStyle, flexWrap: 'wrap' } },
+        running && createElement('span', { style: currentTurnLabelStyle, title: turn ? details(turn, t, turnLabel) : turnLabel }, turnLabel),
+        createElement('span', { title, style: pickerStyle },
+          running && createElement('span', { style: turnLabelStyle }, t('nextTurn')),
+          createElement(Native, {
+            ...props, locked: props.locked || !editable, useProjection: () => ({ currentValue }),
+            t: (key, ...args) => key === 'confirm.description' ? t('sessionFullAccess') : props.t(key, ...args),
+          })),
+      )
     },
   })))
 

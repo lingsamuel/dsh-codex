@@ -100,11 +100,13 @@ DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `t
 
 权限选择器由 `permissionProfile/list` 提供目录。当前线程在明确选择后应用预设，并显示 Codex 确认的会话设置或已保存的上一轮设置。网页新建的空白线程保留 `thread/start` 的订阅，直到首轮开始、线程关闭或 Host 停止，以接收 `thread/settings/updated`。Host 重启前创建的草稿或其他客户端创建的空白线程缺少此订阅，只能确认 Codex 接收了更改。通用设置只保存此 Web profile 的新会话默认值，通过 `thread/start` 应用到新线程。
 
+运行中，输入栏按活动轮次 ID 核对 rollout 中的 `turn_context`，显示该轮权限记录。后续轮次的预设仍来自原生会话设置。轮次记录缺失时，界面显示本轮权限未确认。`/permissions` 打开同一个输入栏选择器，沿用原生菜单和确认流程。
+
 ## 会话命令与后台任务
 
 ### 命令执行与状态投影
 
-原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review` 和 `/plan`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
+原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review`、`/plan` 和 `/permissions`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
 
 命令提交复用按线程串行的同源流程。`/compact` 和 `/review` 在原生空闲线程上开启轮次，历史投影复用 DSH 压缩行和 Markdown。冷恢复前读取原生待发队列，发现待发项则交由用户处理。`/plan` 读取 Codex 协作模式目录，显式切换时应用 `thread/settings/update`。当前模式来自原生设置通知和已落盘的检查点。`/goal` 用 `thread/goal/get` 读取，用带用户来源的原生请求创建、暂停、恢复或清除，面板跟随目标通知。写操作回执按线程修订号校验，避免覆盖期间送达的更新。
 

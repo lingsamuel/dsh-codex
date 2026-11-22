@@ -23,6 +23,32 @@ test('计划模式优先使用当前线程的设置检查点，旧轮次和父�
   assert.equal((await facts.read()).planMode, 'default')
 })
 
+test('本轮权限按原生轮次记录提供，和后续轮次设置独立更新', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'turn-permission-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const line = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const start = turn_id => line('event_msg', { type: 'task_started', turn_id })
+  const policy = (id, type) => ({ active_permission_profile: { id }, sandbox_policy: { type }, approval_policy: 'on-request' })
+  const context = (turn_id, settings) => line('turn_context', { turn_id, ...settings })
+  const work = policy(':workspace', 'workspace-write')
+  const readOnly = policy(':read-only', 'read-only')
+  const selected = line('event_msg', { type: 'thread_settings_applied', thread_id: 'thread', thread_settings: readOnly })
+  await writeFile(path, start('first') + context('first', work) + selected)
+  const reader = createRolloutFacts(path, new AbortController().signal, 'thread')
+  const first = await reader.read()
+  assert.equal(first.permission.profileId, ':read-only')
+  assert.deepEqual(first.turnPermission, { turnId: 'first', permission: {
+    profileId: ':workspace', sandbox: 'workspace-write', approvalPolicy: 'on-request', source: 'saved',
+  } })
+
+  await appendFile(path, start('second') + context('first', work))
+  assert.equal((await reader.read()).turnPermission, undefined)
+  await appendFile(path, context('second', readOnly))
+  assert.equal((await reader.read()).turnPermission?.permission.profileId, ':read-only')
+})
+
 test('只投影已确认的结构化计划，跟随追加并回放 Codex 回退', async t => {
   await mkdir('.runtime', { recursive: true })
   const dir = await mkdtemp(join(process.cwd(), '.runtime', 'facts-'))

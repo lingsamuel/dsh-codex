@@ -15,7 +15,7 @@ const hook = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
     if (specifier === '@deepseek-ai/dsh-client-ui-primitives' || specifier === 'react') {
-      const url = 'data:text/javascript,export const Toast = null; export const createElement = () => null'
+      const url = 'data:text/javascript,export const Toast = null; export const createElement = (type, props, ...children) => ({ type, props, children })'
       return { shortCircuit: true, url }
     }
     return next(specifier, context)
@@ -172,6 +172,44 @@ test('命令结果不会覆盖期间收到的较新计划模式与目标通知',
   assert.equal(session.getSnapshot().planMode, 'default')
 })
 
+test('活动轮次显示自己的权限，切换后续权限和重新连接按轮次核对', async t => {
+  const source = mockTransport(t)
+  const { session } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const snapshot = (id, status) => emit({ type: 'snapshot', mode: 'live',
+    status: { type: status === 'inProgress' ? 'active' : 'idle' },
+    page: { data: [turn(id, status, [ask])] },
+  })
+  const facts = (turnId, permission) => emit({ type: 'rollout-facts', turnPermission: { turnId, permission } })
+  const work = { profileId: ':workspace', source: 'saved' }
+  const readOnly = { profileId: ':read-only', source: 'saved' }
+  const current = () => session.getSnapshot().live.turnPermission
+  const selected = () => session.projections.faceOf('permissions').getSnapshot().permission
+  await snapshot('first', 'inProgress')
+  assert.equal(session.getSnapshot().running, true)
+  assert.equal(current(), undefined)
+  await facts('first', work)
+  assert.deepEqual(current(), work)
+  session.publishPermission(readOnly)
+  assert.deepEqual(selected(), readOnly)
+  assert.deepEqual(current(), work)
+
+  await source().onopen()
+  await snapshot('first', 'inProgress')
+  assert.equal(current(), undefined)
+  await facts('first', work)
+  assert.deepEqual(current(), work)
+
+  await snapshot('second', 'inProgress')
+  assert.equal(current(), undefined)
+  await facts('first', work)
+  assert.equal(current(), undefined)
+  await facts('second', readOnly)
+  assert.deepEqual(current(), readOnly)
+  await snapshot('second', 'completed')
+  assert.equal(current(), undefined)
+})
+
 test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原生权限', async t => {
   mockTransport(t)
   const owner = new AbortController()
@@ -202,6 +240,56 @@ test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原�
   generation.set(1)
   await new Promise(setImmediate)
   assert.deepEqual(projection.getSnapshot().permission, cached)
+})
+
+test('/permissions 打开本会话的原生选择器，选择只提交权限更新', async t => {
+  mockTransport(t)
+  const owner = new AbortController()
+  const catalog = createSnapshotStore({ selected: { id: 'thread' } })
+  const generation = createSnapshotStore(0)
+  const draft = { ...createSnapshotStore(undefined), clear() {} }
+  const state = { openState: 'open', live: { status: { type: 'idle' } } }
+  const projection = createSnapshotStore({})
+  const session = { permissionDraft: draft, getSnapshot: () => state, projections: { faceOf: () => projection },
+    publishPermission: permission => projection.set({ permission }) }
+  const calls = []
+  const readOnly = { profileId: ':read-only', source: 'runtime' }
+  globalThis.fetch = async (url, request) => {
+    if (!request.method) return Response.json({ profiles: [{ id: ':read-only' }] })
+    calls.push([url.pathname, JSON.parse(request.body)])
+    return Response.json({ permission: readOnly })
+  }
+  const Native = () => null
+  const slot = { locale: 'permission.access', component: Native, inject: () => ({ hooks: {} }) }
+  const commands = new Map()
+  const cleanups = []
+  const remote = {}
+  const ctx = {
+    locale: { bind: () => key => key, register() {} },
+    slots: { entries: name => name === 'conversation.input.permission' ? [slot] : [], inject() {} },
+    on: () => () => {},
+    effect(callback) { cleanups.push(callback()) },
+    inject(_keys, callback) { callback(this) },
+    connection: { generation }, get: () => remote, sessions: { binding: id => id === 'thread' ? { session } : undefined },
+    commandUi: { register(command) { commands.set(command.name, command) } },
+  }
+  t.after(() => { owner.abort(); for (const stop of cleanups.reverse()) stop?.() })
+  installPermissions(ctx, catalog, owner.signal)
+  await new Promise(setImmediate)
+
+  const provided = slot.inject('thread')
+  const picker = slot.component({ ...provided, useProjection: () => projection.getSnapshot(), useSession: use => use(state),
+    usePermissionDraft: use => use(draft.getSnapshot()), usePermissionCatalog: use => use(provided.hooks.permissionCatalog.getSnapshot()) })
+  const command = commands.get('permissions')
+  assert.equal(command?.available({ sessionId: 'thread' }), true)
+  const button = { focus() {}, click() { calls.push('open') } }
+  picker.props.ref({ isConnected: true, ownerDocument: { activeElement: null }, querySelector: () => button })
+  command.ui.run({ sessionId: 'thread' })
+  assert.deepEqual(calls, ['open'])
+
+  assert.equal(await provided.select('read-only'), true)
+  assert.deepEqual(calls, ['open', ['/api/codex/permission-action', { action: 'select', threadId: 'thread', profileId: ':read-only' }]])
+  assert.deepEqual(projection.getSnapshot().permission, readOnly)
 })
 
 test('网页分叉、CLI 增量和重连补齐共用手动顺序', async t => {
