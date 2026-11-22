@@ -13,13 +13,16 @@ function unixMillis(seconds) {
   return Number.isFinite(seconds) ? seconds * 1000 : 0
 }
 
-function workspaceTimes(group, includeArchived) {
+function workspaceTimes(group, isProject) {
   let createdAt = Infinity
   let updatedAt = 0
   for (const thread of group.threads) {
     const created = unixMillis(thread.createdAt || thread.updatedAt)
     if (created) createdAt = Math.min(createdAt, created)
-    if (includeArchived || !thread.archived) updatedAt = Math.max(updatedAt, unixMillis(thread.updatedAt))
+    // Codex 读取未保存的草稿时会返回当前时间，不能把它当成对话活动。
+    if (isProject || (!thread.archived && !thread.blank)) {
+      updatedAt = Math.max(updatedAt, unixMillis(thread.updatedAt))
+    }
   }
   return {
     createdAt: new Date(unixMillis(group.createdAt) || (Number.isFinite(createdAt) ? createdAt : 0)).toISOString(),

@@ -65,6 +65,19 @@ test('目录工作区按最新未归档对话排序，独立于会话清单的�
   assert.deepEqual(refreshed.workspaces.items.map(item => item.path), expected)
 })
 
+test('目录排序忽略空白草稿，保存首条消息后计入原生更新时间', () => {
+  const old = { id: 'old', cwd: '/alpha', updatedAt: 100 }
+  const newer = { id: 'newer', cwd: '/beta', updatedAt: 200 }
+  const draft = { id: 'draft', cwd: '/alpha', updatedAt: 300, blank: true, status: { type: 'idle' } }
+  const listing = projectCatalog({ projects: [], threads: [draft, newer, old], selected: draft })
+  assert.deepEqual(listing.workspaces.items.map(item => item.path), ['/beta', '/alpha'])
+  assert.deepEqual(listing.workspaces.items[1].sessionIds, [draft.id, old.id])
+
+  const saved = { ...draft, blank: false, preview: '首条消息', updatedAt: 400 }
+  const refreshed = projectCatalog({ projects: [], threads: [saved, newer, old], selected: saved })
+  assert.deepEqual(refreshed.workspaces.items.map(item => item.path), ['/alpha', '/beta'])
+})
+
 test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
   const section = { id: '01984de2-8f74-7c91-a3b2-5c5e937cf318', name: 'Pinned' }
   const { sessions, workspaces } = projectCatalog({ projects: [], workspacePaths: {}, threads: [

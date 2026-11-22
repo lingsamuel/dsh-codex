@@ -56,6 +56,12 @@ export function readChildThreads(parentThreadId, socketPath, signal, archived = 
   })
 }
 
+/** 为尚未发送消息的已加载线程标记草稿，供目录清单和实时事件共用。 */
+export function withBlankDraft(thread) {
+  const blank = thread.historyMode === 'paginated' && thread.status?.type === 'idle' && !thread.name && !thread.preview
+  return blank ? { ...thread, blank: true } : thread
+}
+
 async function readUnlistedLoadedThreads(request, listed) {
   const ids = await readCodexPages(cursor => request('thread/loaded/list', { ...(cursor != null && { cursor }) }))
     .catch(error => {
@@ -68,8 +74,7 @@ async function readUnlistedLoadedThreads(request, listed) {
       const { thread, readState } = await request('thread/read', { threadId })
       // 与普通原生清单保持相同的交互会话范围，无需恢复或订阅这些线程。
       if (thread.ephemeral || thread.archived || (thread.source !== 'cli' && thread.source !== 'vscode')) return null
-      const blank = thread.historyMode === 'paginated' && thread.status?.type === 'idle' && !thread.name && !thread.preview
-      return { ...thread, ...(readState && { readState }), ...(blank && { blank: true }) }
+      return withBlankDraft(readState ? { ...thread, readState } : thread)
     } catch (error) {
       // 会话可能在读取清单后被卸载，也可能正在保存首条记录。
       if (error instanceof CodexRpcError) return null

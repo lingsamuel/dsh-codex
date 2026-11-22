@@ -842,6 +842,9 @@ test('侧栏独立接收会话与项目增量，无需打开任何会话', { tim
   const reader = response.body.getReader()
   const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
   assert.deepEqual(await read(), { type: 'catalog-ready' })
+  const draft = { id: 'draft', historyMode: 'paginated', status: { type: 'idle' }, name: null, preview: '' }
+  fixture.broadcast({ method: 'thread/started', params: { thread: draft } })
+  assert.deepEqual(await read(), { type: 'thread', id: draft.id, thread: { ...draft, blank: true }, workspacePaths: {} })
   fixture.broadcast({ method: 'thread/started', params: { thread: { id: thread.id, name: '最初名字' } } })
   assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread: { id: thread.id, name: '最初名字' }, workspacePaths: {} })
   fixture.broadcast({ method: 'thread/name/updated', params: { threadId: thread.id, threadName: thread.name } })

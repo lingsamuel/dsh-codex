@@ -1,9 +1,9 @@
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
-import { readProjects } from './catalog.mjs'
+import { readProjects, withBlankDraft } from './catalog.mjs'
 import { CodexRpcError } from './app-server.mjs'
 
 async function summarize({ thread, readState }) {
-  return { thread, readState, workspacePaths: await resolveWorkspacePaths([thread.cwd]) }
+  return { thread: withBlankDraft(thread), readState, workspacePaths: await resolveWorkspacePaths([thread.cwd]) }
 }
 
 /** 原生目录事件尽量使用自带对象。只有标识符的事件单独读取受影响的记录。 */
