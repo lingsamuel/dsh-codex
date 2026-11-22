@@ -39,11 +39,10 @@ dsh --profile codex --no-open
 
 ## 从源码启动
 
-在仓库根目录执行以下命令。源码启动使用仓库内的独立运行目录，更新 DSH 或 Profile 配置后需要重启。
+在仓库根目录执行以下命令。`npm start` 每次都会先构建插件，再使用仓库内的独立运行目录启动 DSH。更新源码、DSH 或仓库中的 Profile 配置后，重新运行启动命令即可。
 
 ```sh
 npm ci
-npm run build
 npm start -- --no-open
 ```
 
