@@ -44,7 +44,7 @@ export function apply(ctx) {
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installProjectWorkspaces(ctx, catalog)
-  installFileReferences(ctx)
+  installFileReferences(ctx, catalog.store)
   installThreadReferences(ctx, catalog, controller.signal)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)

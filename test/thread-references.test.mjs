@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { encodeThreadReference, prepareThreadReferences, displayThreadReferenceText, threadReferencesIn } from '../src/shared/thread-references.js'
 import { codexTaskToolsConfig, codexTaskToolsServerName, hasThreadReadTool } from '../src/host/codex-task-tools-config.mjs'
+import { readThreadReferenceCandidates } from '../src/host/thread-references.mjs'
 
 test('会话引用保留 Codex 线程 ID、可见标题和 UTF-8 文本范围', () => {
   const first = encodeThreadReference('thread-a', '修复 [图片] \\预览')
@@ -52,4 +53,33 @@ test('引用匹配不会吞掉相邻文字，标题与转义前缀均可往返',
   assert.deepEqual(match, { threadId: 'task-a', title, start: prefix.length, end: prefix.length + reference.length })
   assert.deepEqual(threadReferencesIn('\\' + reference), [])
   assert.equal(threadReferencesIn('\\\\' + reference)[0].start, 2)
+})
+
+test('会话标题索引命中时直接返回，同工区优先且忽略其他会话的正文预览', async () => {
+  const calls = []
+  const rpc = async (method, params) => {
+    calls.push([method, params])
+    if (method === 'thread/list') return { data: [
+      { id: 'other', name: 'MCP 测试', cwd: '/elsewhere', createdAt: 1 },
+      { id: 'preview-only', name: '工作日志', preview: 'MCP 测试', cwd: '/repo', createdAt: 2 },
+      { id: 'here', name: 'MCP 验证', cwd: '/repo/sub', createdAt: 3 },
+    ] }
+    return { data: [] }
+  }
+  const result = await readThreadReferenceCandidates(rpc, undefined, '/repo', 'MCP')
+  assert.deepEqual(result.map(({ sessionId, sameWorkspace }) => [sessionId, sameWorkspace]), [['here', true], ['other', false]])
+  assert.deepEqual(calls, [['thread/list', {
+    searchTerm: 'MCP', limit: 50, sortKey: 'updated_at', archived: false, modelProviders: [], useStateDbOnly: true,
+  }]])
+})
+
+test('标题未命中时返回空候选，正文仍由侧栏搜索处理', async () => {
+  const calls = []
+  const rpc = async method => {
+    calls.push(method)
+    const thread = { id: 'source', name: '会话标题', cwd: '/repo', createdAt: 1 }
+    return { data: method === 'thread/list' ? [] : [{ thread, snippet: '正文匹配' }] }
+  }
+  assert.deepEqual(await readThreadReferenceCandidates(rpc, undefined, '/repo', '正文匹配'), [])
+  assert.deepEqual(calls, ['thread/list'])
 })

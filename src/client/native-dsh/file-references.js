@@ -1,8 +1,9 @@
 import { readPage } from '../api.js'
 import { remoteFailure, sessionReadScope } from './catalog.js'
+import { threadReferenceCandidates } from '../../shared/thread-reference-candidates.js'
 
 /** 将 DSH 原生 @ 菜单接到 Codex 的文件和会话候选。 */
-export function installFileReferences(ctx) {
+export function installFileReferences(ctx, catalog) {
   ctx.inject(['inputTriggers'], scope => scope.effect(() => {
     const triggers = scope.inputTriggers
     const serialize = triggers.serializeReference
@@ -32,8 +33,13 @@ export function installFileReferences(ctx) {
     }
     async function candidates(threadId, query, signal) {
       try {
+        if (!query.trim()) return { ok: true, value: [] }
         const target = sessionReadScope(scope.sessions, threadId)
-        const value = target ? await readPage('thread-references', { ...target, query }, signal) : []
+        if (!target) return { ok: true, value: [] }
+        const snapshot = catalog?.getSnapshot()
+        const cwd = target.cwd ?? snapshot?.threads.find(thread => thread.id === threadId)?.cwd
+        const matches = snapshot ? threadReferenceCandidates(snapshot.threads, threadId, cwd, query, snapshot.workspacePaths) : []
+        const value = matches.length ? matches : await readPage('thread-references', { ...target, query }, signal)
         return { ok: true, value }
       } catch (error) {
         return { ok: false, error: remoteFailure(error.message) }

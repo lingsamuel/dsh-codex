@@ -109,3 +109,32 @@ test('DSH 草稿 @ 补全随编辑器的工作目录切换，原生会话仍按 
     { cwd: '/one', query: 'notes' }, { cwd: '/two', query: 'notes' }, { threadId: 'native', query: 'notes' },
   ])
 })
+
+test('已有目录里的标题候选无需发出搜索请求，缺少标题才请求 Host', async t => {
+  const { installFileReferences } = await import('../src/client/native-dsh/file-references.js')
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  const sessionReferences = {}
+  const services = { 'remote.fileReferences': {}, 'remote.sessionReferenceResolver': sessionReferences }
+  const catalog = { getSnapshot: () => ({ threads: [
+    { id: 'current', name: 'MCP 当前', cwd: '/repo', createdAt: 1 },
+    { id: 'nearby', name: 'MCP 续接', cwd: '/repo/sub', createdAt: 2 },
+    { id: 'preview-only', name: '另一个标题', preview: 'MCP 正文', cwd: '/repo', createdAt: 3 },
+  ], workspacePaths: {} }) }
+  installFileReferences({ inject(keys, apply) {
+    if (!keys.includes('remote.fileReferences')) return
+    apply({ sessions: { binding: () => undefined }, get: key => services[key], effect: effect => t.after(effect()) })
+  } }, catalog)
+  const calls = []
+  t.mock.method(globalThis, 'fetch', async url => {
+    calls.push([url.pathname, Object.fromEntries(url.searchParams)])
+    return Response.json([])
+  })
+
+  const local = await sessionReferences.candidates('current', 'mcp')
+  assert.deepEqual(local.value.map(({ sessionId, sameWorkspace }) => [sessionId, sameWorkspace]), [['nearby', true]])
+  assert.deepEqual(calls, [])
+  assert.deepEqual((await sessionReferences.candidates('current', '远处标题')).value, [])
+  assert.deepEqual(calls, [['/api/codex/thread-references', { threadId: 'current', query: '远处标题' }]])
+})
