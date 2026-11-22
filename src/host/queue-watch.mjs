@@ -4,6 +4,10 @@ import { CodexRpcError } from './app-server.mjs'
 import { readConversationQueue } from './thread-runtime.mjs'
 import { watchNativeFiles } from './history-watch.mjs'
 
+function queueDatabase(sqliteHome) {
+  return sqliteHome && isAbsolute(sqliteHome) ? join(sqliteHome, 'queue_1.sqlite') : undefined
+}
+
 /** 归档后原生接口拒绝读取，持久化队列仍完整保留。这里只读取观察线程的记录。 */
 function readArchivedQueue(path, threadId) {
   using db = new DatabaseSync(path, { readOnly: true })
@@ -11,6 +15,11 @@ function readArchivedQueue(path, threadId) {
   return rows.map(({ id, payload_json }) => {
     const { client_id: clientUserMessageId, content } = JSON.parse(payload_json).UserInput
     const input = content.map(part => {
+      if (part.type === 'text' && part.text_elements?.length) {
+        // 持久化的 Core 文本范围使用 snake_case，网页接收 App Server 的 v2 表示。
+        return { ...part, text_elements: part.text_elements.map(({ byte_range, ...element }) =>
+          byte_range ? { ...element, byteRange: byte_range } : element) }
+      }
       if (part.type !== 'image' || !('image_url' in part)) return part
       const { image_url: url, ...fields } = part
       return { ...fields, url }
@@ -19,24 +28,30 @@ function readArchivedQueue(path, threadId) {
   })
 }
 
+/** 让归档队列的显示和附件下载使用同一个只读快照。 */
+export async function readVisibleConversationQueue(request, threadId, getSqliteHome, signal) {
+  try {
+    return await readConversationQueue(request, threadId)
+  } catch (error) {
+    if (signal.aborted || !(error instanceof CodexRpcError) || error.code !== -32600
+      || !error.message.startsWith(`session ${threadId} is archived.`)) throw error
+    const path = queueDatabase(await getSqliteHome())
+    signal.throwIfAborted()
+    if (!path) throw error
+    return readArchivedQueue(path, threadId)
+  }
+}
+
 /** 被动观察本地原生队列。App Server 明确拒绝读取归档线程时，使用只读的落盘快照。 */
 export function watchConversationQueue(request, threadId, sqliteHome, publish, signal, steers) {
-  const path = sqliteHome && isAbsolute(sqliteHome) ? join(sqliteHome, 'queue_1.sqlite') : undefined
+  const path = queueDatabase(sqliteHome)
   let last
   let nativeQueue
   let timer
   let reading = false
   let dirty = false
 
-  async function readQueue() {
-    try {
-      return await readConversationQueue(request, threadId)
-    } catch (error) {
-      if (!path || signal.aborted || !(error instanceof CodexRpcError) || error.code !== -32600
-        || !error.message.startsWith(`session ${threadId} is archived.`)) throw error
-      return readArchivedQueue(path, threadId)
-    }
-  }
+  const readQueue = () => readVisibleConversationQueue(request, threadId, () => sqliteHome, signal)
 
   function wake() {
     dirty = true

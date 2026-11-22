@@ -1,3 +1,4 @@
+import { FileUploadRuntime } from '@deepseek-ai/dsh-client-file-upload/src/client/runtime.ts'
 import { createHistoryCatalog } from './catalog.js'
 import { provideCodexControllers } from './native-dsh/controllers.js'
 import { installLiveStatus } from './native-dsh/live-status.jsx'
@@ -8,6 +9,7 @@ import { installTurnFork } from './native-dsh/turn-fork.jsx'
 import { installForkFeedback } from './native-dsh/fork-feedback.jsx'
 import { installTurnRevert } from './native-dsh/turn-revert.jsx'
 import { installMessageEdit } from './native-dsh/message-edit.jsx'
+import { installFileDownloads } from './native-dsh/file-downloads.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
 import { installPlanDocuments } from './native-dsh/plan-document.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
@@ -35,6 +37,8 @@ export function apply(ctx) {
   ctx.effect(() => () => controller.abort())
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
+  // 只加载原生浏览器上传组件。普通文件的服务端入口由 Codex 会话路由持有。
+  ctx.plugin(FileUploadRuntime)
   installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
@@ -56,6 +60,7 @@ export function apply(ctx) {
   installTurnFork(ctx)
   installTurnRevert(ctx)
   installMessageEdit(ctx)
+  installFileDownloads(ctx)
   installModelPicker(ctx, controller.signal)
   installCommands(ctx)
   installPlanDocuments(ctx)

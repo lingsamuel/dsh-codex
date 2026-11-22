@@ -21,6 +21,7 @@ import { createCodexPluginRoutes } from './codex-plugins.mjs'
 import { createCodexMcpRoutes } from './codex-mcp.mjs'
 import { createWorktreeRoutes } from './worktree-actions.mjs'
 import { createQueuedSteers } from './queued-steers.mjs'
+import { createFileUploads } from './file-uploads.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -62,11 +63,12 @@ async function readThreadTerminals(request, threadId, status) {
 }
 
 /** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
-export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory) {
+export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory, attachmentStore) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()
   const steers = createQueuedSteers()
+  const files = attachmentStore && createFileUploads(attachmentStore, socketPath, ownerSignal, steers)
   const openProject = createProjectOpener()
   const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
@@ -91,6 +93,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
+    ...(files ? [files.upload, files.download] : []),
     createSkillsRoute(socketPath, ownerSignal),
     ...createCodexPluginRoutes(socketPath, ownerSignal),
     ...createCodexMcpRoutes(socketPath, ownerSignal),
@@ -100,7 +103,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers, files?.resolve),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,

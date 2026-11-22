@@ -6,7 +6,7 @@ import { createFileReferenceRoute } from './file-references.mjs'
 import { createSessionExportRoute } from './session-export.mjs'
 
 export const name = 'dsh-chatgpt'
-export const inject = ['connection', 'loader']
+export const inject = ['connection', 'loader', 'attachments']
 
 export async function apply(ctx) {
   const owner = new AbortController()
@@ -22,7 +22,7 @@ export async function apply(ctx) {
     },
   })
   ctx.provide('sandboxPolicy', { workspaceRoot: process.cwd() })
-  for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory)) {
+  for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory, ctx.attachments)) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
   const [{ formatCodexMarkdown }, { formatSessionMarkdown }] = await Promise.all([

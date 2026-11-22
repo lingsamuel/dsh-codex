@@ -1,4 +1,4 @@
-import { openCodexReader } from './app-server.mjs'
+import { codexSqliteHome, openCodexReader } from './app-server.mjs'
 import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail, readItemTailCursor, readThreadTurns } from './live-history.mjs'
@@ -205,7 +205,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             try {
               connection = await openCodexReader(socketPath, signal, notify)
               const configRead = connection.request('config/read', { includeLayers: false }).catch(() => null)
-              const sqliteDirectory = config => config?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || connection.initialize.codexHome
+              const sqliteDirectory = config => codexSqliteHome(config, connection.initialize.codexHome)
               if (catalog) {
                 const sqliteHome = sqliteDirectory(await configRead)
                 signal.throwIfAborted()

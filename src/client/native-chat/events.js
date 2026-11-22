@@ -5,6 +5,7 @@ import { projectVisualizeReferences } from './visualize.js'
 import { subagentActivityEvent, subagentActivityKinds } from './subagent-activity.js'
 import { questionReplies } from '../../shared/question-replies.js'
 import { goalCommandObjective } from '../../shared/user-input.js'
+import { fileAttachmentOf, splitFileAttachmentInput } from '../../shared/file-attachments.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
 const newestHistoryBoundary = 2 ** 32
@@ -24,8 +25,17 @@ function userBlock(part, image) {
 }
 
 /** 待发和已发送的原生用户内容共用附件投影。 */
-export function projectUserContent(id, content, attachments) {
-  return content.map((part, index) => userBlock(part, attachments?.get(inlineAttachmentId(id, index))))
+export function projectUserContent(id, content, attachments, fileLocation) {
+  return content.flatMap((original, index) => splitFileAttachmentInput(original).map(part => {
+    const file = fileAttachmentOf(part)
+    if (file) {
+      const downloadUrl = fileLocation && `api/codex/file-download?${new URLSearchParams({
+        ...fileLocation, attachmentId: file.attachmentId, name: file.name,
+      })}`
+      return { type: 'file', attachment: { ...file, ...(downloadUrl && { downloadUrl }) } }
+    }
+    return userBlock(part, attachments?.get(inlineAttachmentId(id, index)))
+  }))
 }
 
 function questionMarkdown(questions) {
@@ -95,7 +105,7 @@ function mergeCancelledToolCalls(items, cancelled) {
   return [...merged, ...recovered.slice(index)]
 }
 
-function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput, goalCompletion) {
+function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput, goalCompletion, fileThreadId) {
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
@@ -147,7 +157,8 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
 
     if (isUser) {
       if (!replies) {
-        const content = projectUserContent(item.id, item.content, attachments)
+        const fileLocation = fileThreadId && { threadId: fileThreadId, turnId: turn.id, itemId: item.id }
+        const content = projectUserContent(item.id, item.content, attachments, fileLocation)
         const message = { id: item.id, role: 'user', content, source: { kind: 'user', ...(item.clientId && { rpcId: item.clientId }),
           ...(goalMessageId && item.id === goalMessageId && { codexGoal: true }) } }
         if (hasUserInput) {
@@ -227,12 +238,13 @@ export function projectCodexTurns(turns, {
   turnWorkingDirectories,
   goalInputs,
   goalCompletions,
+  fileThreadId,
   renderMarkdown = renderChatMarkdown,
 } = {}) {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
   const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments,
-    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id], goalCompletions?.[turn.id]))
+    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id], goalCompletions?.[turn.id], fileThreadId))
   const start = firstSeq ?? beforeSeq - events.length
   return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

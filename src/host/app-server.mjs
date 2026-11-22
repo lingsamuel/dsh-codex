@@ -134,6 +134,11 @@ export function readCodex(method, params, socketPath, signal) {
   return withCodexReader(socketPath, signal, request => request(method, params))
 }
 
+/** App Server 的 SQLite 目录可独立于 Codex 的会话目录配置。 */
+export function codexSqliteHome(configResult, codexHome) {
+  return configResult?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || codexHome
+}
+
 /** 沿 Codex 返回的不透明游标继续读取，保留原生顺序。 */
 export async function readCodexPages(read, cursor) {
   const entries = []

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
@@ -12,6 +12,7 @@ import { readCodex } from '../src/host/app-server.mjs'
 import { createConversationActionRoute } from '../src/host/conversation-actions.mjs'
 import { createHistoryRoutes } from '../src/host/history.mjs'
 import { asyncQuestionItemId, encodeQuestionReplies } from '../src/shared/question-replies.js'
+import { fileAttachmentInput } from '../src/shared/file-attachments.js'
 
 async function fakeCodex(t, methods) {
   await mkdir('.runtime', { recursive: true })
@@ -66,6 +67,171 @@ function postCommand(get, action, fields) {
     body: JSON.stringify({ threadId: 'main', action, ...fields }),
   })
 }
+
+test('普通文件按内容去重，原生待发和历史引用上传时的快照', async t => {
+  const { socketPath, directory, messages } = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => ({ result: { thread: { id: threadId, status: { type: 'active' } } } }),
+    'thread/queue/add': ({ input, clientUserMessageId }) => {
+      queued = { id: 'waiting', input, clientUserMessageId }
+      return { result: { queuedSubmission: queued } }
+    },
+    'thread/queue/list': ({ threadId }) => ['archive', 'other-archive'].includes(threadId)
+      ? { error: { code: -32600, message: `session ${threadId} is archived.` } }
+      : { result: { data: queued ? [queued] : [] } },
+    'thread/queue/delete': () => {
+      queued = undefined
+      return { result: { deleted: true } }
+    },
+    'turn/steer': () => ({ error: { code: -32000, message: '未确认回执' } }),
+    'thread/queue/update': ({ input }) => {
+      queued = { ...queued, input }
+      return { result: { queuedSubmission: queued } }
+    },
+    'thread/items/list': ({ threadId, turnId }) => threadId === 'legacy'
+      ? { error: { code: -32601, message: 'list_items is not supported yet' } }
+      : { result: { data: threadId === 'main' && turnId === 'turn' ? [{ item: fullHistoryItem() }] : [] } },
+    'thread/turns/list': ({ threadId, cursor, itemsView }) => {
+      if (threadId === 'main') return { result: { data: [{ id: 'running', status: 'inProgress' }] } }
+      assert.equal(threadId, 'legacy')
+      assert.equal(itemsView, 'full')
+      return { result: cursor ? { data: [{ id: 'turn', items: [fullHistoryItem()] }] }
+        : { data: [{ id: 'other-turn', items: [] }], nextCursor: 'older' } }
+    },
+  })
+  let queued
+  let historyInput
+  const fullHistoryItem = () => ({ type: 'userMessage', id: 'message', content: [historyInput] })
+  const dsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+  const { Context } = await import(dsh.resolve('@deepseek-ai/cordis'))
+  const { LocalAttachmentStore } = await import(dsh.resolve('@deepseek-ai/dsh-attachment-local'))
+  const makeStore = () => new LocalAttachmentStore(new Context(), { dshHome: join(directory, 'dsh') })
+  const store = makeStore()
+  const owner = new AbortController()
+  t.after(() => owner.abort())
+  const makeGet = storage => {
+    const routes = createHistoryRoutes(socketPath, owner.signal, undefined, storage)
+    return (path, options) => routes.find(route => path.split('?')[0] === route.path)
+      ?.fetch(new Request(`http://localhost${path}`, options)) ?? Response.json({}, { status: 404 })
+  }
+  const get = makeGet(store)
+  const upload = async (thread, name, body) => {
+    const query = new URLSearchParams({ sessionId: thread, name })
+    const response = await get(`/api/session/uploadFileBinary?${query}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body,
+    })
+    assert.equal(response.status, 200)
+    const result = await response.json()
+    assert.equal(result.ok, true, result.error?.message)
+    return result.value
+  }
+  const post = (fields, threadId = 'main') => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId, ...fields }),
+  })
+  const first = await upload('main', '原始 报告.txt', 'version one')
+  const same = await upload('main', 'alias.txt', 'version one')
+  const next = await upload('main', first.file.name, 'version two')
+  assert.equal(first.file.attachmentId, same.file.attachmentId)
+  assert.equal((await stat(store.fileHostPath(first.file))).ino, (await stat(store.fileHostPath(same.file))).ino)
+  assert.notEqual(first.file.attachmentId, next.file.attachmentId)
+
+  const fields = { action: 'prompt', mode: 'queue', clientUserMessageId: 'web', input: [{ type: 'file', receiptId: first.receiptId }] }
+  assert.equal((await post(fields, 'other')).status, 400)
+  assert.equal((await post(fields)).status, 200)
+  assert.equal(messages.filter(({ method }) => method === 'thread/queue/add').length, 1)
+  const saved = queued.input[0]
+  assert.equal(saved.type, 'text')
+  assert.ok(saved.text.includes(store.fileHostPath(first.file)))
+  assert.doesNotMatch(JSON.stringify(saved), /version one/)
+  assert.equal((await post({ ...fields, input: [saved] }, 'other')).status, 400)
+  const fileQuery = new URLSearchParams({ attachmentId: first.file.attachmentId, name: first.file.name })
+  const pendingUrl = '/api/codex/file-download?threadId=main&queuedSubmissionId=waiting&' + fileQuery
+  const pending = await get(pendingUrl)
+  assert.equal(await pending.text(), 'version one')
+  queued.input = [{ type: 'text', text: '来自另一客户端的编辑', text_elements: [] }, saved]
+  const edit = await post({ action: 'queue', operation: 'edit', queuedSubmissionId: 'waiting', text: '补充正文' })
+  assert.equal(edit.status, 200)
+  assert.deepEqual(queued.input, [{ type: 'text', text: '补充正文', text_elements: [] }, saved])
+  assert.equal(await (await get(pendingUrl)).text(), 'version one')
+
+  using db = new DatabaseSync(join(directory, 'queue_1.sqlite'))
+  db.exec('CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT, payload_json TEXT, queue_order INTEGER)')
+  const archivedInput = { ...saved,
+    text_elements: saved.text_elements.map(({ byteRange, placeholder }) => ({ byte_range: byteRange, placeholder })) }
+  const stored = JSON.stringify({ UserInput: { client_id: 'web', content: [archivedInput] } })
+  db.prepare('INSERT INTO queued_items VALUES (?, ?, ?, ?)').run('waiting', 'archive', stored, 0)
+  const archivedUrl = threadId => `/api/codex/file-download?threadId=${threadId}&queuedSubmissionId=waiting&${fileQuery}`
+  const archived = await get(archivedUrl('archive'))
+  assert.equal(archived.status, 200)
+  assert.equal(await archived.text(), 'version one')
+  assert.equal((await get(archivedUrl('other-archive'))).status, 404)
+  assert.equal(messages.some(({ method }) => method === 'thread/unarchive'), false)
+
+  const text = '补充正文'
+  const offset = Buffer.byteLength(text)
+  const { byteRange, placeholder } = saved.text_elements[0]
+  historyInput = { type: 'text', text: text + saved.text, text_elements: [
+    { byteRange: { start: offset + byteRange.start, end: offset + byteRange.end }, placeholder },
+  ] }
+  const reopened = makeGet(makeStore())
+  const history = await reopened('/api/codex/file-download?threadId=main&turnId=turn&itemId=message&' + fileQuery)
+  assert.equal(history.status, 200)
+  assert.match(history.headers.get('content-disposition'), /^attachment;/)
+  assert.equal(await history.text(), 'version one')
+  const legacy = await reopened('/api/codex/file-download?threadId=legacy&turnId=turn&itemId=message&' + fileQuery)
+  assert.equal(legacy.status, 200)
+  assert.equal(await legacy.text(), 'version one')
+  assert.equal((await reopened('/api/codex/file-download?threadId=other&turnId=turn&itemId=message&' + fileQuery)).status, 404)
+
+  const steer = await post({ action: 'queue', operation: 'steer', queuedSubmissionId: 'waiting', expectedTurnId: 'running' })
+  assert.equal(steer.status, 409)
+  assert.equal((await steer.json()).reason, 'queue-steer-unknown')
+  assert.equal(queued, undefined)
+  const uncertain = await get(pendingUrl)
+  assert.equal(uncertain.status, 200)
+  assert.equal(await uncertain.text(), 'version one')
+  assert.equal((await get(archivedUrl('other'))).status, 404)
+})
+
+test('网页待发附件的编辑不会在同一条消息插话时静默成功', async t => {
+  const file = fileAttachmentInput({ attachmentId: 'sha256:' + 'c'.repeat(64), name: 'report.txt', bytes: 4 }, '/archive/report.txt')
+  let queued = { id: 'queued', clientUserMessageId: 'web', input: [file] }
+  const readStarted = Promise.withResolvers()
+  const letSteerContinue = Promise.withResolvers()
+  const editReachedNative = Promise.withResolvers()
+  const { get, messages } = await fakeCodex(t, {
+    'thread/queue/list': () => ({ result: { data: queued ? [queued] : [] } }),
+    'thread/read': async () => {
+      readStarted.resolve()
+      await letSteerContinue.promise
+      return { result: { thread: { id: 'main', status: { type: 'active' } } } }
+    },
+    'thread/turns/list': () => ({ result: { data: [{ id: 'running', status: 'inProgress' }] } }),
+    'thread/queue/update': ({ input }) => {
+      queued = { ...queued, input }
+      editReachedNative.resolve()
+      return { result: { queuedSubmission: queued } }
+    },
+    'thread/queue/delete': () => {
+      queued = undefined
+      return { result: { deleted: true } }
+    },
+    'turn/steer': () => ({ result: { turnId: 'running' } }),
+  })
+  const change = (operation, fields) => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: 'main', action: 'queue', queuedSubmissionId: 'queued', operation, ...fields }),
+  })
+  const steering = change('steer', { expectedTurnId: 'running' })
+  await readStarted.promise
+  const editing = change('edit', { text: '不应确认未发送的正文' })
+  await Promise.race([editReachedNative.promise, delay(50)])
+  letSteerContinue.resolve()
+  const [steered, edited] = await Promise.all([steering, editing])
+  assert.equal(steered.status, 200)
+  assert.equal(edited.status, 409)
+  assert.deepEqual(messages.find(({ method }) => method === 'turn/steer').params.input, [file])
+})
 
 test('Markdown 导出用原生分页读取归档会话的全部已保存内容', async t => {
   let rollout
