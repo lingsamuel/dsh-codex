@@ -1,10 +1,9 @@
 import { CodexRpcError, readCodexPages } from './app-server.mjs'
-import { replaceUserInputText } from '../shared/user-input.js'
 import { questionReplies } from '../shared/question-replies.js'
 import { waitForThreadActivity } from './thread-runtime.mjs'
 
-/** 从原生记录提取该轮首条用户输入。只替换文本，附件与引用继续使用 Codex 原对象。 */
-export async function editedInput(request, threadId, turnId, itemId, text) {
+/** 从原生记录提取该轮首条可编辑的用户输入，保留 Codex 原始内容。 */
+export async function readEditableInput(request, threadId, turnId, itemId) {
   const rows = await readCodexPages(async cursor => {
     const page = await request('thread/items/list', {
       threadId, turnId, limit: 25, sortDirection: 'asc', ...(cursor != null && { cursor }),
@@ -17,9 +16,7 @@ export async function editedInput(request, threadId, turnId, itemId, text) {
 
   const { content } = message
   if (questionReplies(content)) throw new CodexRpcError({ code: -32602, message: '这是一条问答记录，可通过整轮回退重新开始。' })
-  const input = replaceUserInputText(content, text)
-  if (!input.length) throw new CodexRpcError({ code: -32602, message: '请输入消息内容。' })
-  return input
+  return content
 }
 
 /** 回退已提交时单独报告发送结果，避免让界面重新执行破坏性的回退。 */

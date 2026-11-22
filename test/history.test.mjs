@@ -813,6 +813,116 @@ test('继续归档会话的队列先取消归档，再确认目标消息', async
   assert.equal(messages.find(({ method }) => method === 'thread/queue/start').params.queuedSubmissionId, target.id)
 })
 
+test('技能候选读取冷会话和归档会话各自的目录，不改变原生会话状态', async t => {
+  const threads = {
+    cold: { id: 'cold', cwd: '/one', status: { type: 'notLoaded' } },
+    archived: { id: 'archived', cwd: '/two', archived: true, status: { type: 'notLoaded' } },
+  }
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => ({ result: { thread: threads[threadId] } }),
+    'skills/list': ({ cwds }) => {
+      const [cwd] = cwds
+      return { result: { data: [{ cwd, errors: [], skills: [
+        { enabled: false, name: 'disabled', path: `${cwd}/disabled/SKILL.md`, description: 'Disabled entry' },
+        { enabled: true, name: 'shared', path: `${cwd}/first/SKILL.md`, description: 'Native first',
+          interface: { displayName: 'Display name', shortDescription: 'Short description' } },
+        { enabled: true, name: 'shared', path: `${cwd}/second/SKILL.md`, description: 'Native second' },
+        { enabled: true, name: 'pack:检查', path: `${cwd}/check/SKILL.md`, description: 'Native qualified name' },
+      ] }] } }
+    },
+  })
+  const { createSkillsRoute } = await import('../src/host/skills.mjs')
+  const route = createSkillsRoute(socketPath)
+  for (const { id, cwd } of Object.values(threads)) {
+    const response = await route.fetch(new Request(`http://local/api/codex/skills?threadId=${id}&cwd=/untrusted`))
+    assert.equal(response.status, 200)
+    assert.deepEqual((await response.json()).skills, [{
+      name: 'shared', path: `${cwd}/first/SKILL.md`, label: 'Display name', description: 'Short description',
+    }, {
+      name: 'pack:检查', path: `${cwd}/check/SKILL.md`, description: 'Native qualified name',
+    }])
+  }
+  assert.deepEqual(messages.filter(({ method }) => /^(skills|thread)\//.test(method)).map(({ method, params }) => [method, params]), [
+    ['thread/read', { threadId: 'cold' }], ['skills/list', { cwds: ['/one'] }],
+    ['thread/read', { threadId: 'archived' }], ['skills/list', { cwds: ['/two'] }],
+  ])
+})
+
+test('普通发送和直接插话从实际 Codex 目录解析技能，保留可见正文和原生发送位置', async t => {
+  const thread = { id: 'native-skills', cwd: '/old', status: { type: 'notLoaded' } }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/resume': () => {
+      thread.cwd = '/resumed'
+      thread.status = { type: 'active' }
+      return { result: { thread } }
+    },
+    'skills/list': ({ cwds }) => ({ result: { data: [{ cwd: cwds[0], errors: [], skills: [
+      { enabled: false, name: 'review', path: '/disabled/SKILL.md' },
+      { enabled: true, name: 'review', path: `${cwds[0]}/review/SKILL.md` },
+      { enabled: true, name: 'review', path: '/duplicate/SKILL.md' },
+      { enabled: true, name: 'app', path: '/app-skill/SKILL.md' },
+      { enabled: true, name: 'pack', path: '/prefix/SKILL.md' },
+      { enabled: true, name: 'pack:检查', path: '/qualified/SKILL.md' },
+      { enabled: true, name: 'home', path: '/home-skill/SKILL.md' },
+    ] }] } }),
+    'thread/queue/add': () => ({ result: { accepted: true } }),
+    'turn/steer': () => ({ result: { turnId: 'active-turn' } }),
+  })
+  const post = fields => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'prompt', threadId: thread.id, clientUserMessageId: 'browser', ...fields }),
+  })
+  const text = { type: 'text', text: '请用 $review 检查，和 $pack:检查 $home。$unknown 和 $PATH。[$app](app://one) \n```sh\n\\$review\n```',
+    text_elements: [] }
+  const skill = { type: 'skill', name: 'review', path: '/resumed/review/SKILL.md' }
+  const qualified = { type: 'skill', name: 'pack:检查', path: '/qualified/SKILL.md' }
+  const home = { type: 'skill', name: 'home', path: '/home-skill/SKILL.md' }
+  assert.equal((await post({ mode: 'queue', input: [text] })).status, 200)
+  assert.equal((await post({ mode: 'steer', expectedTurnId: 'active-turn', input: [text] })).status, 200)
+  assert.equal((await post({ mode: 'queue', input: [text, { ...skill, path: '/arbitrary/SKILL.md' }] })).status, 400)
+  assert.deepEqual(messages.filter(({ method }) => ['skills/list', 'thread/queue/add', 'turn/steer'].includes(method))
+    .map(({ method, params }) => [method, params.cwds ?? params.input]), [
+    ['skills/list', ['/resumed']], ['thread/queue/add', [text, skill, qualified, home]],
+    ['skills/list', ['/resumed']], ['turn/steer', [text, skill, qualified, home]],
+  ])
+})
+
+test('队列编辑保留附件与继续引用的原生技能，去掉已删除的技能并识别新技能', async t => {
+  const thread = { id: 'queued-skills', cwd: '/actual', status: { type: 'active' } }
+  const image = { type: 'localImage', path: '/actual/reference.png' }
+  const part = text => ({ type: 'text', text, text_elements: [] })
+  const old = { type: 'skill', name: 'old', path: '/old/SKILL.md' }
+  const retained = { type: 'skill', name: 'retained', path: '/cli-choice/SKILL.md' }
+  const next = { type: 'skill', name: 'next', path: '/actual/next/SKILL.md' }
+  const item = { id: 'queued', clientUserMessageId: 'request', input: [part('$old $retained'), image, old, retained] }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'skills/list': () => ({ result: { data: [{ cwd: thread.cwd, errors: [], skills: [
+      { ...retained, path: '/default-choice/SKILL.md', enabled: true }, { ...retained, enabled: true }, { ...next, enabled: true },
+    ] }] } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'active', status: 'inProgress' }] } }),
+    'thread/queue/list': () => ({ result: { data: [item] } }),
+    'thread/queue/update': ({ input }) => {
+      item.input = input
+      return { result: { queuedSubmission: item } }
+    },
+    'thread/queue/delete': () => ({ result: { deleted: true } }),
+    'turn/steer': () => ({ result: { turnId: 'active' } }),
+  })
+  const post = fields => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'queue', threadId: thread.id, queuedSubmissionId: item.id, ...fields,
+    }),
+  })
+  const edited = part('$retained 和 $next')
+  const result = await post({ operation: 'edit', text: edited.text })
+  assert.equal(result.status, 200)
+  assert.deepEqual((await result.json()).queuedSubmission.input, [edited, image, retained, next])
+  assert.equal((await post({ operation: 'steer', expectedTurnId: 'active' })).status, 200)
+  assert.deepEqual(messages.find(({ method }) => method === 'turn/steer').params.input, [edited, image, retained, next])
+})
+
 test('网页图片可单独入队、随文本插话并在队列编辑时保留', async t => {
   const threadId = 'image-thread'
   const image = { type: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' }
@@ -1238,6 +1348,43 @@ test('编辑原生用户消息保留附件，回退后才发送，且只接受�
     '<send_user_message_question_reply>{"questionItemId":"one","question":"Which environment?","answer":"Staging"}</send_user_message_question_reply>' }]
   assert.equal((await edit('opening')).status, 400)
   assert.equal(messages.filter(({ method }) => method === 'thread/revert').length, 2)
+})
+
+test('历史编辑按恢复后的工作目录确认技能，再沿用回退与重发', async t => {
+  const thread = { id: 'skill-edit', cwd: '/saved', status: { type: 'notLoaded' }, historyMode: 'paginated' }
+  const text = { type: 'text', text: '请用 $review', text_elements: [] }
+  const old = { type: 'skill', name: 'review', path: '/previous/review/SKILL.md' }
+  const current = { ...old, path: '/current/review/SKILL.md' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/queue/list': () => ({ result: { data: [] } }),
+    'thread/resume': () => {
+      thread.cwd = '/current'
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => ({ result: { data: [{ id: 'turn' }] } }),
+    'thread/items/list': () => ({ result: { data: [{ item: { id: 'opening', type: 'userMessage',
+      content: [{ ...text, text: '早先用 $review' }, old] } }] } }),
+    'skills/list': ({ cwds }) => ({ result: { data: [{ cwd: cwds[0], skills: [{ ...current,
+      path: `${cwds[0]}/review/SKILL.md`, enabled: true }], errors: [] }] } }),
+    'thread/revert': () => ({ result: { thread } }),
+    'turn/start': () => {
+      thread.status = { type: 'active' }
+      return { result: { turn: { id: 'replacement' } } }
+    },
+  })
+  const result = await get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'edit', threadId: thread.id, beforeTurnId: 'turn', headTurnId: 'turn', itemId: 'opening', text: text.text,
+    }),
+  })
+  assert.equal(result.status, 200)
+  assert.deepEqual(messages.filter(({ method }) => ['skills/list', 'thread/revert', 'turn/start'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['skills/list', { cwds: [thread.cwd] }], ['thread/revert', { threadId: thread.id, beforeTurnId: 'turn' }],
+    ['turn/start', { threadId: thread.id, input: [text, current] }],
+  ])
 })
 
 test('模型目录逐页读取各 Codex provider 的原生模型和等级', async t => {
