@@ -242,13 +242,14 @@ test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原�
   assert.deepEqual(projection.getSnapshot().permission, cached)
 })
 
-test('/permissions 打开本会话的原生选择器，选择只提交权限更新', async t => {
+test('运行中权限选择器说明插话范围，切换预设只提交权限更新', async t => {
   mockTransport(t)
   const owner = new AbortController()
   const catalog = createSnapshotStore({ selected: { id: 'thread' } })
   const generation = createSnapshotStore(0)
   const draft = { ...createSnapshotStore(undefined), clear() {} }
-  const state = { openState: 'open', live: { status: { type: 'idle' } } }
+  const work = { profileId: ':workspace', sandbox: 'workspace-write', approvalPolicy: 'on-request', source: 'saved' }
+  const state = { openState: 'open', running: true, live: { status: { type: 'active' }, turnPermission: work } }
   const projection = createSnapshotStore({})
   const session = { permissionDraft: draft, getSnapshot: () => state, projections: { faceOf: () => projection },
     publishPermission: permission => projection.set({ permission }) }
@@ -261,35 +262,38 @@ test('/permissions 打开本会话的原生选择器，选择只提交权限更�
   }
   const Native = () => null
   const slot = { locale: 'permission.access', component: Native, inject: () => ({ hooks: {} }) }
-  const commands = new Map()
   const cleanups = []
   const remote = {}
+  let labels
   const ctx = {
-    locale: { bind: () => key => key, register() {} },
+    locale: {
+      bind: () => (key, args = {}) => (labels?.[key] ?? key).replace(/\{(\w+)\}/g, (_, name) => args[name]),
+      register(_, copy) { labels = copy.zh },
+    },
     slots: { entries: name => name === 'conversation.input.permission' ? [slot] : [], inject() {} },
     on: () => () => {},
     effect(callback) { cleanups.push(callback()) },
     inject(_keys, callback) { callback(this) },
     connection: { generation }, get: () => remote, sessions: { binding: id => id === 'thread' ? { session } : undefined },
-    commandUi: { register(command) { commands.set(command.name, command) } },
   }
   t.after(() => { owner.abort(); for (const stop of cleanups.reverse()) stop?.() })
   installPermissions(ctx, catalog, owner.signal)
   await new Promise(setImmediate)
 
   const provided = slot.inject('thread')
-  const picker = slot.component({ ...provided, useProjection: () => projection.getSnapshot(), useSession: use => use(state),
-    usePermissionDraft: use => use(draft.getSnapshot()), usePermissionCatalog: use => use(provided.hooks.permissionCatalog.getSnapshot()) })
-  const command = commands.get('permissions')
-  assert.equal(command?.available({ sessionId: 'thread' }), true)
-  const button = { focus() {}, click() { calls.push('open') } }
-  picker.props.ref({ isConnected: true, ownerDocument: { activeElement: null }, querySelector: () => button })
-  command.ui.run({ sessionId: 'thread' })
-  assert.deepEqual(calls, ['open'])
+  const render = () => slot.component({ ...provided, useProjection: () => projection.getSnapshot(), useSession: use => use(state),
+    usePermissionDraft: use => use(draft.getSnapshot()), usePermissionCatalog: use => use(provided.hooks.permissionCatalog.getSnapshot()), t: key => key })
+  const hint = () => render().children.find(child => child?.children?.includes('新权限从下一轮生效，插话沿用本轮权限'))
+  assert.equal(hint()?.props.title, '本轮权限 · 工作区内修改 · 沙箱：工作区内修改 · 审批：按需')
+  const native = render().children.find(child => child?.type === Native)
+  assert.equal(native?.props.t('mode', { name: '仅可查看' }), '下轮权限 · 仅可查看')
 
   assert.equal(await provided.select('read-only'), true)
-  assert.deepEqual(calls, ['open', ['/api/codex/permission-action', { action: 'select', threadId: 'thread', profileId: ':read-only' }]])
+  assert.deepEqual(calls, [['/api/codex/permission-action', { action: 'select', threadId: 'thread', profileId: ':read-only' }]])
   assert.deepEqual(projection.getSnapshot().permission, readOnly)
+  assert.equal(hint()?.props.title, '本轮权限 · 工作区内修改 · 沙箱：工作区内修改 · 审批：按需')
+  state.running = false
+  assert.equal(hint(), undefined)
 })
 
 test('网页分叉、CLI 增量和重连补齐共用手动顺序', async t => {
