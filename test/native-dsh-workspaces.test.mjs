@@ -38,6 +38,33 @@ test('projects native workspace membership and timestamps into DSH sidebar rows'
   assert.equal(inferred.updatedAt, new Date(second.updatedAt * 1000).toISOString())
 })
 
+test('目录工作区按最新未归档对话排序，独立于会话清单的顺序', () => {
+  const projects = [
+    { id: 'first', roots: [{ path: '/first-project' }], updatedAt: 100 },
+    { id: 'second', roots: [{ path: '/second-project' }], updatedAt: 300 },
+  ]
+  const opened = { id: 'opened', cwd: '/alpha', updatedAt: 100 }
+  const threads = [
+    { id: 'zeta', cwd: '/zeta', updatedAt: 200 },
+    opened,
+    { id: 'beta-old', cwd: '/beta', updatedAt: 50 },
+    { id: 'beta-new', cwd: '/beta', updatedAt: 200 },
+    { id: 'alpha-archive', cwd: '/alpha', updatedAt: 400, archived: true },
+    { id: 'only-archive', cwd: '/archive', updatedAt: 500, archived: true },
+  ]
+  const expected = ['/first-project', '/second-project', '/beta', '/zeta', '/alpha', '/archive']
+  const startup = projectCatalog({ projects, threads })
+  assert.deepEqual(startup.workspaces.items.map(item => item.path), expected)
+
+  // 打开现有会话时，读回摘要会触发目录清单按原生会话时间重排。
+  const refreshed = projectCatalog({
+    projects,
+    threads: threads.toSorted((a, b) => b.updatedAt - a.updatedAt),
+    selected: opened,
+  })
+  assert.deepEqual(refreshed.workspaces.items.map(item => item.path), expected)
+})
+
 test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
   const section = { id: '01984de2-8f74-7c91-a3b2-5c5e937cf318', name: 'Pinned' }
   const { sessions, workspaces } = projectCatalog({ projects: [], workspacePaths: {}, threads: [

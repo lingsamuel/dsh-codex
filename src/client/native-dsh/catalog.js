@@ -13,18 +13,30 @@ function unixMillis(seconds) {
   return Number.isFinite(seconds) ? seconds * 1000 : 0
 }
 
-function workspaceTimes(group) {
+function workspaceTimes(group, includeArchived) {
   let createdAt = Infinity
   let updatedAt = 0
   for (const thread of group.threads) {
     const created = unixMillis(thread.createdAt || thread.updatedAt)
     if (created) createdAt = Math.min(createdAt, created)
-    updatedAt = Math.max(updatedAt, unixMillis(thread.updatedAt))
+    if (includeArchived || !thread.archived) updatedAt = Math.max(updatedAt, unixMillis(thread.updatedAt))
   }
   return {
     createdAt: new Date(unixMillis(group.createdAt) || (Number.isFinite(createdAt) ? createdAt : 0)).toISOString(),
     updatedAt: new Date(unixMillis(group.updatedAt) || updatedAt).toISOString(),
   }
+}
+
+function compareWorkspaces(a, b) {
+  const aIsProject = a.workspaceId.startsWith('project:')
+  const bIsProject = b.workspaceId.startsWith('project:')
+  // 稳定排序保留 Codex 项目顺序，目录 ID 让同一时间的目录排序独立于会话清单。
+  if (aIsProject !== bIsProject) return aIsProject ? -1 : 1
+  if (aIsProject) return 0
+  const recency = Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+  if (recency) return recency
+  if (a.workspaceId === b.workspaceId) return 0
+  return a.workspaceId < b.workspaceId ? -1 : 1
 }
 
 /** 把 Codex 目录和会话投影成 DSH 客户端列表的内存快照。 */
@@ -62,9 +74,9 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
       path,
       title: group.name,
       sessionIds: group.threads.map(thread => thread.id),
-      ...workspaceTimes(group),
+      ...workspaceTimes(group, key.startsWith('project:')),
     }]
-  })
+  }).sort(compareWorkspaces)
   return {
     sessions: { ids, byId, phase, projectionsBySession },
     workspaces: {
