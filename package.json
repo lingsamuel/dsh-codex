@@ -46,6 +46,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/dsh": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-client-file-upload": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-file-reference-local": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.2.3-alpha.2",
     "diff": "^9.0.0",

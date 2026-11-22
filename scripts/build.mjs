@@ -17,6 +17,7 @@ await build({
     'react',
     'react-dom',
     'react/jsx-runtime',
+    '@deepseek-ai/cordis',
     '@deepseek-ai/dsh-client-store',
     '@deepseek-ai/dsh-client-ui-primitives',
   ],

@@ -1,7 +1,7 @@
 import { EventEmitter, once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { userInputText } from '../shared/user-input.js'
-import { CodexRpcError, openCodexReader, readCodexPages, withCodexReader } from './app-server.mjs'
+import { codexSqliteHome, CodexRpcError, openCodexReader, readCodexPages, withCodexReader } from './app-server.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
@@ -61,8 +61,8 @@ async function waitForFirstMessage(socketPath, thread, job, ownerSignal) {
   const request = connection.request
   void connection.closed.then(() => changed.resolve())
   try {
-    const { config } = await request('config/read', { cwd: thread.cwd, includeLayers: false }).catch(() => ({}))
-    const sqliteHome = config?.sqlite_home || process.env.CODEX_SQLITE_HOME || connection.initialize.codexHome
+    const configResult = await request('config/read', { cwd: thread.cwd, includeLayers: false }).catch(() => null)
+    const sqliteHome = codexSqliteHome(configResult, connection.initialize.codexHome)
     wakeQueue = watchConversationQueue(request, thread.id, sqliteHome, ({ submissions }) => {
       queued = submissions
       job.wake()

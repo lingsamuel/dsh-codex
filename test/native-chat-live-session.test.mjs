@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 import { projectCodexTurns } from '../src/client/native-chat/events.js'
+import { fileAttachmentInput } from '../src/shared/file-attachments.js'
 
 const storeModule = `data:text/javascript,${encodeURIComponent(`
   export function createSnapshotStore(initial) {
@@ -492,7 +493,10 @@ test('待发插话副本保留在队列区域，不参与再次插话或编辑�
     return reply.promise
   }
   const emitter = frame => source().onmessage({ data: JSON.stringify(frame) })
-  const item = { id: 'queued', clientUserMessageId: 'client-id', input: [{ type: 'text', text: 'A' }, { type: 'image', url: image }] }
+  const file = { attachmentId: 'sha256:' + 'a'.repeat(64), name: '报告.txt', bytes: 4 }
+  const item = { id: 'queued', clientUserMessageId: 'client-id', input: [
+    { type: 'text', text: 'A' }, { type: 'image', url: image }, fileAttachmentInput(file, '/stored/报告.txt'),
+  ] }
   const other = { id: 'other', clientUserMessageId: 'other-id', input: [{ type: 'text', text: '其他待发项' }] }
   const active = { type: 'active', activeFlags: [] }
   await emitter({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'history', status: active })
@@ -506,6 +510,11 @@ test('待发插话副本保留在队列区域，不参与再次插话或编辑�
   assert.equal(pending.placement, 'queued')
   assert.equal(pending.text, 'A')
   assert.equal(pending.attachments[0].value.previewUrl, image)
+  assert.deepEqual(pending.attachments[1], {
+    type: 'file', value: { ...file, downloadUrl: 'api/codex/file-download?' + new URLSearchParams({
+      threadId: 'thread', queuedSubmissionId: item.id, attachmentId: file.attachmentId, name: file.name,
+    }) },
+  })
   assert.deepEqual(inbox.getSnapshot()['next-turn'].map(row => row.id), [other.id])
   assert.deepEqual(history.session.getSnapshot().pendingSubmissions, [])
   reply.resolve(Response.json({ error: '断线', reason: 'queue-steer-unknown' }, { status: 409 }))
@@ -514,6 +523,15 @@ test('待发插话副本保留在队列区域，不参与再次插话或编辑�
   assert.equal(inbox.getSnapshot().queuedSteers[0].status, 'unconfirmed')
   await emitter({ type: 'queue', submissions: [other] })
   assert.equal(inbox.getSnapshot().queuedSteers, undefined)
+  const delivered = { type: 'userMessage', id: 'delivered', clientId: item.clientUserMessageId, content: item.input }
+  await emitter({ type: 'change', turn: { id: 'current', status: 'inProgress' }, items: [delivered] })
+  const message = history.events.getSnapshot().entries.find(({ event }) =>
+    event.type === 'user/message' && event.data.id === delivered.id)
+  assert.deepEqual(message.event.data.content.find(part => part.type === 'file')?.attachment, {
+    ...file, downloadUrl: 'api/codex/file-download?' + new URLSearchParams({
+      threadId: 'thread', turnId: 'current', itemId: delivered.id, attachmentId: file.attachmentId, name: file.name,
+    }),
+  })
 })
 
 test('取消的原始调用能补入已载入的历史轮次，并随原生回退移除', async t => {

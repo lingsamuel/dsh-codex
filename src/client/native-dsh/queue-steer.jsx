@@ -1,5 +1,6 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useMemo, useState } from 'react'
+import { FileDownloads } from './file-downloads.jsx'
 
 const empty = []
 const states = ['steering', 'unconfirmed', 'recoverable']
@@ -39,6 +40,8 @@ export function QueueSteerDock({ Dock, dockProps, t }) {
       <Dock {...dockProps} useProjection={() => undefined}
         useSession={select => useSession(state => select({ ...state, pendingSubmissions: rows }))}
         t={(key, ...args) => key === 'queue.sending' ? t(status) : dockProps.t(key, ...args)} />
+      <FileDownloads files={rows.flatMap(row => row.attachments.flatMap(part => part.type === 'file' ? [part.value] : []))}
+        label={name => t('downloadFile', { name })} />
       {status === 'unconfirmed' && <Button size="sm" variant="ghost" disabled={busy}
         onClick={() => apply('check-steer', rows[0].item.id)}>{t('check')}</Button>}
       {status !== 'steering' && rows.map(({ item, text }, index) => {

@@ -224,7 +224,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
 
   function projectionOptions(bounds) {
     return { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls,
-      turnWorkingDirectories, goalInputs, goalCompletions, liveTurns, ...bounds }
+      turnWorkingDirectories, goalInputs, goalCompletions, liveTurns, fileThreadId: thread.id, ...bounds }
   }
 
   function addOlderPage(page, images) {
@@ -502,14 +502,19 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     lifetime.throwIfAborted()
     // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
     queueImages = new Map(images.flat().filter(Boolean))
+    const projectQueuedContent = ({ id, input }) =>
+      projectUserContent(`queue:${id}`, input, queueImages, { threadId: thread.id, queuedSubmissionId: id })
     const queuedSteers = steers.map(({ item, status }) => {
-      const content = projectUserContent(`queue:${item.id}`, item.input, queueImages)
-      const attachments = content.flatMap(part => part.type === 'image'
-        ? [{ type: 'image', value: { previewUrl: queueImages.get(part.attachment.attachmentId).url } }] : [])
+      const content = projectQueuedContent(item)
+      const attachments = content.flatMap(part => {
+        if (part.type === 'image') return [{ type: 'image', value: { previewUrl: queueImages.get(part.attachment.attachmentId).url } }]
+        if (part.type === 'file') return [{ type: 'file', value: part.attachment }]
+        return []
+      })
       return { item, status, requestId: item.id, placement: 'queued', text: userInputText(content), attachments }
     })
-    inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
-      source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
+    inbox.set({ 'next-turn': submissions.map(item => ({ id: item.id, role: 'user',
+      source: { kind: 'user', rpcId: item.clientUserMessageId }, content: projectQueuedContent(item),
     })), 'next-step': [], ...(queuedSteers.length && { queuedSteers }) })
     queueStore.set(submissions)
     publishQuestions()
@@ -763,7 +768,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     // 问答可在轮首投影为问答卡，后续第一个可见的普通气泡仍然属于插话。
     if (!message || input?.seq !== sequence || input?.data.id !== message.id) return
     return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: latestTurnId(),
-      hasAttachments: message.content.some(part => part.type !== 'text') }
+      hasAttachments: input.data.content.some(part => part.type !== 'text') }
   }
 
   const visibleCatalog = catalog?.store
