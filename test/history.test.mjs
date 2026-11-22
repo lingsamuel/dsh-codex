@@ -366,11 +366,12 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
 
 test('侧栏独立接收会话与项目增量，无需打开任何会话', { timeout: 5000 }, async t => {
   const project = { id: 'project', name: '新项目', roots: [] }
+  const previousProject = { id: 'previous', name: '旧项目', roots: [] }
   const thread = { id: 'thread', name: '新名字', projectId: project.id }
   const fixture = await fakeCodex(t, {
     'config/read': () => ({ result: { config: {} } }),
     'thread/read': ({ threadId }) => ({ result: { thread: { ...thread, id: threadId } } }),
-    'project/read': ({ projectId }) => ({ result: { project: { ...project, id: projectId } } }),
+    'project/list': () => ({ result: { data: [project, previousProject], nextCursor: null } }),
   })
   const response = await fixture.get('/api/codex/watch?scope=catalog')
   assert.equal(response.headers.get('content-type'), 'text/event-stream')
@@ -382,7 +383,7 @@ test('侧栏独立接收会话与项目增量，无需打开任何会话', { tim
   fixture.broadcast({ method: 'thread/name/updated', params: { threadId: thread.id, threadName: thread.name } })
   fixture.broadcast({ method: 'project/changed', params: { projectId: project.id, changeType: 'updated' } })
   assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread, workspacePaths: {} })
-  assert.deepEqual(await read(), { type: 'project', id: project.id, project, workspacePaths: {} })
+  assert.deepEqual(await read(), { type: 'projects', projects: [project, previousProject], workspacePaths: {} })
   fixture.broadcast({ method: 'thread/deleted', params: { threadId: thread.id } })
   assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread: null })
   assert.equal(fixture.messages.some(message => ['thread/list', 'thread/turns/list', 'thread/resume'].includes(message.method)), false)

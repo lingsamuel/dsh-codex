@@ -29,12 +29,13 @@ export function createHistoryCatalog(signal) {
   let refreshing = false
   let pendingRefresh = false
   let connected = false
+  let verified = false
+  let liveProjects
   let archivedThreads = []
   const observedStatuses = new Map()
   const observedReadStates = new Map()
   const searchThreads = new Map()
   const threadChanges = new Map()
-  const projectChanges = new Map()
   const childReads = new Map()
   const childChanges = new Map()
   const changedPaths = {}
@@ -42,7 +43,7 @@ export function createHistoryCatalog(signal) {
 
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
-      state.projects = applyChanges(projects, projectChanges).sort((a, b) => a.position - b.position)
+      state.projects = liveProjects ?? projects
       state.threads = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges).map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
@@ -78,7 +79,9 @@ export function createHistoryCatalog(signal) {
     store.update(state => {
       state.childCatalogs[parentId] = { state: 'loading', ids: state.childCatalogs[parentId]?.ids ?? [] }
     })
-    const read = readPage('children', { threadId: parentId }, signal).then(entries => {
+    const snapshot = store.getSnapshot()
+    const parent = snapshot.childThreads[parentId] ?? snapshot.threads.find(thread => thread.id === parentId)
+    const read = readPage('children', { threadId: parentId, ...(parent?.archived && { archived: 1 }) }, signal).then(entries => {
       signal.throwIfAborted()
       store.update(state => {
         const matching = [...childChanges].filter(([id, thread]) =>
@@ -111,18 +114,26 @@ export function createHistoryCatalog(signal) {
     try {
       if (fresh) {
         // 重连只补一次断线间隔，期间到达的增量仍覆盖读取中的快照。
-        for (const changes of [threadChanges, projectChanges, observedStatuses, observedReadStates]) changes.clear()
+        for (const changes of [threadChanges, childChanges, observedStatuses, observedReadStates]) changes.clear()
+        liveProjects = undefined
         searchThreads.clear()
         publish(await readPage('catalog', { complete: 1, fresh: 1 }, signal))
+        verified = true
         await loadArchived()
-        const selected = store.getSnapshot().selected
-        if (selected) void loadChildren(selected.id, true)
+        for (const parentId of Object.keys(store.getSnapshot().childCatalogs)) {
+          await childReads.get(parentId)
+          await loadChildren(parentId, true)
+        }
         return
       }
       // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
       const index = await readPage('catalog', {}, signal)
       publish(index)
-      if (!index.complete) publish(await readPage('catalog', { complete: 1 }, signal))
+      // 缓存可先绘制一屏，新页面随后对照原生清单校验一次。
+      if (!index.complete || !verified) {
+        publish(await readPage('catalog', { complete: 1, ...(!verified && { fresh: 1 }) }, signal))
+        verified = true
+      }
     } catch (error) {
       if (!signal.aborted) store.update(state => { state.error = error.message })
     } finally {
@@ -226,12 +237,12 @@ export function createHistoryCatalog(signal) {
         if (current && state.selected?.id === id) state.selected = current
       })
       if (readState !== undefined) catalog.setReadState(id, readState)
-    } else if (frame.type === 'project') {
-      const { id, project, workspacePaths } = frame
-      projectChanges.set(id, project)
+    } else if (frame.type === 'projects') {
+      const { projects, workspacePaths } = frame
+      liveProjects = projects
       Object.assign(changedPaths, workspacePaths)
       store.update(state => {
-        state.projects = applyChanges(state.projects, [[id, project]]).sort((a, b) => a.position - b.position)
+        state.projects = projects
         Object.assign(state.workspacePaths, workspacePaths)
       })
     }

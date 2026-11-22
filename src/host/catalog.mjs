@@ -19,6 +19,11 @@ async function collectPages(read) {
   return mergePages([], entries)
 }
 
+/** 项目排序由 Codex 返回顺序决定，协议版本可以省略位置字段。 */
+export function readProjects(request) {
+  return collectPages(params => readProjectPage(request, params))
+}
+
 async function readThreads(request, filters) {
   return collectPages(async params => {
     const page = await request('thread/list', {
@@ -42,15 +47,18 @@ export async function readArchivedCatalog(socketPath, signal) {
 }
 
 /** 只查原生父线程的直接子代理，嵌套分支由调用方按需展开。 */
-export function readChildThreads(parentThreadId, socketPath, signal) {
-  return withCodexReader(socketPath, signal, request => readThreads(request, {
-    parentThreadId, sourceKinds: ['subAgent'], useStateDbOnly: true,
-  }))
+export function readChildThreads(parentThreadId, socketPath, signal, archived = false) {
+  return withCodexReader(socketPath, signal, async request => {
+    const threads = await readThreads(request, {
+      parentThreadId, sourceKinds: ['subAgent'], useStateDbOnly: true, ...(archived && { archived: true }),
+    })
+    return archived ? threads.map(thread => ({ ...thread, archived: true })) : threads
+  })
 }
 
 async function loadCatalog(socketPath, signal, complete) {
   const { projects, threads } = await withCodexReader(socketPath, signal, async request => {
-    const projects = await collectPages(params => readProjectPage(request, params))
+    const projects = await readProjects(request)
     const threads = await readThreads(request, { useStateDbOnly: !complete })
     return { projects, threads }
   }, complete ? 90_000 : 15_000)

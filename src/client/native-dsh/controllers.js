@@ -69,7 +69,7 @@ export function provideCodexControllers(ctx, catalog) {
         const fiber = ctx.plugin(() => {})
         record = { binding: readonlyBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog), fiber }
         bindings.set(id, record)
-        if (!thread.archived) void catalog.loadChildren(id)
+        void catalog.loadChildren(id)
       }
       const { binding } = record
       const observer = retainInfo(id)

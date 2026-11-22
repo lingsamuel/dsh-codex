@@ -46,7 +46,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     createWatchRoute(socketPath, ownerSignal),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
-    route('children', (query, signal) => readChildThreads(requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'), socketPath, signal)),
+    route('children', (query, signal) => readChildThreads(requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'), socketPath, signal, query.get('archived') === '1')),
     route('thread-info', (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       return withCodexReader(socketPath, signal, async request => {

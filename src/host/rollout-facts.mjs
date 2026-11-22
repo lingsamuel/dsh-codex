@@ -42,10 +42,10 @@ export function createRolloutFacts(path, signal) {
         const plan = normalizePlan(value)
         if (plan) currentTurn().todos = plan
       } else if (value?.type === 'token_count') {
-        const pressureTokens = value.info?.last_token_usage?.input_tokens
+        const pressureTokens = value.info?.last_token_usage?.total_tokens
         const contextWindow = value.info?.model_context_window
         if (Number.isSafeInteger(pressureTokens) && pressureTokens >= 0 && Number.isSafeInteger(contextWindow) && contextWindow > 0) {
-          // DSH 的原生表按最近一次输入统计，累计用量不是上下文大小。
+          // Codex 使用上一轮的 total_tokens 作为活跃上下文大小，整个会话的累计用量另有字段。
           currentTurn().contextPressure = { pressureTokens, contextWindow }
         }
       }

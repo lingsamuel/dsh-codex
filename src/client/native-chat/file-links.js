@@ -1,9 +1,11 @@
 import { parse, postprocess, preprocess } from 'micromark'
 
 const destinationTypes = new Set(['resourceDestinationString', 'definitionDestinationString'])
-const lineSuffix = /^(.+?):([1-9]\d*)(?::[1-9]\d*)?$/
+const lineSuffix = /^(.+?):([1-9]\d*)(?::[1-9]\d*)?(?:[-–]([1-9]\d*)(?::[1-9]\d*)?)?$/
+const lineFragment = /^L?([1-9]\d*)(?:C[1-9]\d*)?(?:-L([1-9]\d*)(?:C[1-9]\d*)?)?$/i
 const windowsDrive = /^[a-z]:[/\\]/i
 const scheme = /^[a-z][a-z\d+.-]*:/i
+const opaqueLink = /^(?:about|blob|data|javascript|mailto|sms|tel|xmpp):/i
 
 function fileDestination(destination) {
   let path = destination
@@ -25,15 +27,19 @@ function fileDestination(destination) {
     const localPath = path.slice(0, hash)
     if (scheme.test(localPath) && !windowsDrive.test(localPath)) return destination
     const fragment = path.slice(hash + 1)
-    const line = /^(?:L)?([1-9]\d*)(?:C[1-9]\d*(?:-L[1-9]\d*(?:C[1-9]\d*)?)?)?$/i.exec(fragment)
-    return line ? `${localPath}#L${line[1]}` : path
+    const line = lineFragment.exec(fragment)
+    return line ? `${localPath}${lineAnchor(line[1], line[2])}` : path
   }
 
   const line = lineSuffix.exec(path)
   if (!line) return path
   const localPath = line[1]
-  if ((scheme.test(localPath) && !windowsDrive.test(localPath)) || !/[/\\.]/.test(localPath)) return path
-  return `${localPath}#L${line[2]}`
+  if (opaqueLink.test(path) || (scheme.test(localPath) && !windowsDrive.test(localPath))) return path
+  return `${localPath}${lineAnchor(line[2], line[3])}`
+}
+
+function lineAnchor(start, end) {
+  return `#L${start}${end && Number(end) >= Number(start) ? `-L${end}` : ''}`
 }
 
 /** 只改 Markdown 解析器识别出的目标位置，让 DSH 自己渲染、打开文件和定位行号。 */

@@ -1,4 +1,5 @@
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
+import { readProjects } from './catalog.mjs'
 
 /** 原生目录事件尽量使用自带对象。只有标识符的事件单独读取受影响的记录。 */
 export async function readCatalogEvent(notification, request) {
@@ -22,12 +23,11 @@ export async function readCatalogEvent(notification, request) {
       }
     }
     case 'project/changed': {
-      const id = params.projectId
-      if (params.changeType === 'deleted') return { type: 'project', id, project: null }
-      const { project } = await request('project/read', { projectId: id })
+      // 移动项目与更新项目发相同事件。只读项目排序，保留线程列表和当前聊天。
+      const projects = await readProjects(request)
       return {
-        type: 'project', id, project,
-        workspacePaths: await resolveWorkspacePaths(project.roots.map(root => root.path)),
+        type: 'projects', projects,
+        workspacePaths: await resolveWorkspacePaths(projects.flatMap(project => project.roots.map(root => root.path))),
       }
     }
   }
