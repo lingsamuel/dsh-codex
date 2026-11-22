@@ -1,6 +1,7 @@
 import { inlineAttachmentId } from './attachments.js'
-import { projectTool } from './tools.js'
+import { projectQuestionReply, projectTool } from './tools.js'
 import { projectFileLinks } from './file-links.js'
+import { questionReplies } from '../../shared/question-replies.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
 const newestHistoryBoundary = 2 ** 32
@@ -19,12 +20,24 @@ function userBlock(part, image) {
   return textBlock(part.path || part.name || (part.type === 'image' ? '图片附件' : part.type))
 }
 
+function questionMarkdown(questions) {
+  const literal = text => text.replace(/[\\`*_{}\[\]()#+\-.!|><]/g, '\\$&')
+  return questions.map(({ title, options }) => {
+    const line = `**${literal(title)}**`
+    if (!options?.length) return line
+    return `${line}\n\n${options.map(option => `- ${literal(option)}`).join('\n')}`
+  }).join('\n\n')
+}
+
 function assistantBlock(item) {
-  const text = item.type === 'reasoning'
-    ? item.summary?.join('\n\n')
-    : item.text
-  if (!text?.trim()) return undefined
-  return item.type === 'reasoning' ? { type: 'reasoning', text } : textBlock(projectFileLinks(text))
+  if (item.type === 'reasoning') {
+    const text = item.summary?.join('\n\n')
+    return text?.trim() ? { type: 'reasoning', text } : undefined
+  }
+  const text = item.text?.trim() ? projectFileLinks(item.text) : undefined
+  const questions = item.type === 'agentMessage' && item.questions?.length ? questionMarkdown(item.questions) : undefined
+  if (!questions) return text && textBlock(text)
+  return textBlock(text ? `${text}\n\n${questions}` : questions)
 }
 
 function turnEndReason({ status, error }) {
@@ -54,6 +67,7 @@ function turnEvents(turn, number, source, createdAt, attachments) {
   const coordinates = () => ({ turn: number, step })
   for (const item of items) {
     const isUser = item.type === 'userMessage'
+    const replies = isUser ? questionReplies(item.content) : undefined
     const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
     const block = isAssistant ? assistantBlock(item) : undefined
     if (isAssistant && !block) continue
@@ -69,7 +83,7 @@ function turnEvents(turn, number, source, createdAt, attachments) {
     }
     lastTime = end
 
-    if (isUser) {
+    if (isUser && !replies) {
       const content = item.content.map((part, index) => userBlock(part, attachments?.get(inlineAttachmentId(item.id, index))))
       emit('user/message', start, { id: item.id, role: 'user', content, source: { kind: 'user' } }, 'append')
       continue
@@ -85,7 +99,7 @@ function turnEvents(turn, number, source, createdAt, attachments) {
       continue
     }
 
-    const { name, args, output, meta, isError } = projectTool(item)
+    const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies) : projectTool(item)
     emit('tool/call', start, { ...coordinates(), callId: item.id, name, arguments: JSON.stringify(args) })
     if (item.status === 'inProgress') continue
     emit('tool/result', end, {

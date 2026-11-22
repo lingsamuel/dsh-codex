@@ -226,3 +226,19 @@ test('an authoritative reconnect tail drops rolled-back turns and keeps earlier 
   assert.deepEqual(history.events.getSnapshot().entries, [])
   assert.equal(history.session.getSnapshot().live.lastTurnStatus, undefined)
 })
+
+test('以问答开头的轮次保留答复定位，后续插话不会成为轮首编辑目标', async t => {
+  const currentSource = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const reply = { id: 'qa', type: 'userMessage', content: [{ type: 'text', text:
+    '<send_user_message_question_reply>{"questionItemId":"one","question":"Which environment?","answer":"Staging"}</send_user_message_question_reply>' }] }
+  const steer = { ...ask, id: 'steer' }
+  const page = { data: [turn('reply-turn', 'completed', [reply, steer, answer])], nextCursor: null }
+  await currentSource().onmessage({ data: JSON.stringify({ type: 'snapshot', page, mode: 'live' }) })
+  const entries = history.events.getSnapshot().entries.map(({ event }) => event)
+  const start = entries.find(event => event.type === 'turn/start')
+  const inserted = entries.find(event => event.type === 'user/message' && event.data.id === steer.id)
+  assert.equal(history.session.editableInput(start.data.turn, inserted.seq), undefined)
+  assert.equal(history.session.finishedTurnOfReply(answer.id), 'reply-turn')
+  assert.deepEqual(await history.session.findMessage({ turnId: 'reply-turn', itemId: reply.id }), { kind: 'tool-call', id: 'qa' })
+})

@@ -156,12 +156,12 @@ test('编辑原生用户消息保留附件，回退后才发送，且只接受�
   const mention = { type: 'mention', name: 'example', path: '/workspace/example.txt' }
   const thread = { id: 'source', status: { type: 'idle' }, historyMode: 'paginated' }
   let rejectSend = false
+  let content = [image, { type: 'text', text: 'original', text_elements: [] }, mention]
   const { get, messages } = await fakeCodex(t, {
     'thread/items/list': ({ turnId }) => {
       assert.equal(turnId, 'selected')
-      return { result: { data: [{ item: { type: 'userMessage', id: 'opening', content: [
-        image, { type: 'text', text: 'original', text_elements: [] }, mention,
-      ] } }, { item: { type: 'userMessage', id: 'later', content: [] } }] } }
+      return { result: { data: [{ item: { type: 'userMessage', id: 'opening', content } },
+        { item: { type: 'userMessage', id: 'later', content: [] } }] } }
     },
     'thread/turns/list': () => ({ result: { data: [{ id: 'latest' }] } }),
     'thread/read': () => ({ result: { thread } }),
@@ -183,6 +183,10 @@ test('编辑原生用户消息保留附件，回退后才发送，且只接受�
   const failed = await edit('opening')
   assert.equal(failed.status, 409)
   assert.match((await failed.json()).error, /历史已回退.*Native provider offline/)
+  content = [{ type: 'text', text:
+    '<send_user_message_question_reply>{"questionItemId":"one","question":"Which environment?","answer":"Staging"}</send_user_message_question_reply>' }]
+  assert.equal((await edit('opening')).status, 400)
+  assert.equal(messages.filter(({ method }) => method === 'thread/revert').length, 2)
 })
 
 test('模型目录逐页读取各 Codex provider 的原生模型和等级', async t => {

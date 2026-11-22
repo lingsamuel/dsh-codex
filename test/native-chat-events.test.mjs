@@ -68,6 +68,56 @@ test('projects native user, commentary, visible reasoning and final text in thei
   assert.ok(entries.every((entry, i) => entry.type === 'event' && entry.event.seq === 100 - entries.length + i))
 })
 
+function replyEnvelope(value) {
+  return `<send_user_message_question_reply>\n${JSON.stringify(value)}\n</send_user_message_question_reply>`
+}
+
+test('将 Codex 原生提问与后续问答交给 DSH 渲染，保留普通输入以及问答 ID', () => {
+  const reply = { questionItemId: '["request_user_input_async","question-source",0]', question: '环境？', answer: '测试环境' }
+  const second = { questionItemId: 'desktop-legacy-source', question: '补充信息？', answer: '需要数据备份' }
+  const nativeReply = replyEnvelope([reply, second])
+  const entries = projectCodexTurns([
+    turn('ask', [{ id: 'question-source', type: 'agentMessage', delivery: 'async', text: '请确认。', questions: [
+      { title: reply.question, options: ['测试环境', '正式环境'] }, { title: second.question, options: null },
+    ] }]),
+    turn('reply', [
+      { id: 'standalone-reply', type: 'userMessage', startedAtMs: 100_040, completedAtMs: 100_060,
+        content: [{ type: 'text', text: `# Context from my IDE setup:\n\n## My request for Codex:\n${nativeReply}` },
+          { type: 'mention', name: 'backup', path: '/work/backup.md' }] },
+      { id: 'ordinary-user', type: 'userMessage', content: [{ type: 'text', text: `这是示例：${nativeReply}` }] },
+      { id: 'ordinary-model', type: 'agentMessage', text: '完成。' },
+    ]),
+  ])
+  const [question, final] = types(entries, 'assistant/message')
+  assert.match(question.data.message.content[0].text, /^请确认。\n\n\*\*环境？\*\*\n\n- 测试环境\n- 正式环境\n\n\*\*补充信息？\*\*$/)
+  assert.equal(final.data.message.content[0].text, '完成。')
+  const [call] = types(entries, 'tool/call')
+  const [result] = types(entries, 'tool/result')
+  assert.equal(call.data.name, 'ask_user_question')
+  assert.equal(call.data.callId, 'standalone-reply')
+  assert.equal(call.time, 100_040)
+  assert.equal(result.time, 100_060)
+  assert.equal(result.data.meta.codexQuestionReply, true)
+  const { questions } = JSON.parse(call.data.arguments)
+  assert.deepEqual(questions.map(question => question.question), [reply.question, second.question])
+  assert.deepEqual(JSON.parse(result.data.message.content[0].text), { answers: [
+    { id: questions[0].id, selected: [], custom: reply.answer },
+    { id: questions[1].id, selected: [], custom: second.answer },
+  ] })
+  assert.deepEqual(types(entries, 'user/message').map(({ data }) => data.id), ['ordinary-user'])
+})
+
+test('单条旧版问答可独立显示，问题没有附带自然语言正文时仍会显示', () => {
+  const entries = projectCodexTurns([turn('question-only', [
+    { id: 'question-source', type: 'agentMessage', text: '', questions: [{ title: 'Choose *literally*', options: null }] },
+    { id: 'answer', type: 'userMessage', content: [{ type: 'text', text: replyEnvelope({
+      questionItemId: 'question-source', question: 'Choose *literally*', answer: 'Choice',
+    }) }] },
+  ])])
+  assert.equal(types(entries, 'assistant/message')[0].data.message.content[0].text, '**Choose \\*literally\\***')
+  assert.equal(types(entries, 'tool/result')[0].data.message.id, 'answer')
+})
+
 test('projects command output and parsed or raw file changes into DSH tool entries', () => {
   const entries = projectCodexTurns([turn('turn-id', [
     { id: 'command-id', type: 'commandExecution', command: 'example --flag', cwd: '/work',

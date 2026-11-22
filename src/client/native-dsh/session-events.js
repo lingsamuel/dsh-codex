@@ -373,8 +373,9 @@ export function createCodexHistory(ctx, thread, catalog) {
   async function findMessage({ turnId, itemId }, requestSignal) {
     const row = await loadTurn(turnId, requestSignal)
     for (const { event } of row?.entries ?? []) {
-      if (event.type === 'user/message' && event.data.id === itemId) return messageAnchor(event)
-      if (event.type === 'assistant/message' && event.data.message.id === itemId) return messageAnchor(event)
+      if ((event.data.message?.id ?? event.data.id) !== itemId) continue
+      const anchor = messageAnchor(event)
+      if (anchor) return anchor
     }
   }
 
@@ -389,14 +390,19 @@ export function createCodexHistory(ctx, thread, catalog) {
     return rows.find(({ entries }) => entries[0].event.data.turn === turn)
   }
 
+  function finishedTurnOfReply(messageId) {
+    return rows.find(({ entries }) => entries.at(-1).event.type === 'turn/end' && entries.some(({ event }) =>
+      event.type === 'assistant/message' && event.data.message.id === messageId))?.id
+  }
+
   function editableInput(turn, sequence) {
     const row = rowAtTurn(turn)
     const source = transcript.getTurn(row?.id)
     if (!source || source.status === 'inProgress') return
     const input = row.entries.find(({ event }) => event.type === 'user/message')?.event
-    if (input?.seq !== sequence) return
     const message = source.items.find(item => item.type === 'userMessage')
-    if (!message) return
+    // 问答可在轮首投影为问答卡，后续第一个可见的普通气泡仍然属于插话。
+    if (!message || input?.seq !== sequence || input?.data.id !== message.id) return
     return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: rows.at(-1).id,
       hasAttachments: message.content.some(part => part.type !== 'text') }
   }
@@ -412,7 +418,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       loadThrough,
       findMessage,
       turnAtEnd,
-      turnIdAt: turn => rowAtTurn(turn)?.id,
+      finishedTurnOfReply,
       editableInput,
       publishModel,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },

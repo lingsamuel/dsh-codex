@@ -8,6 +8,10 @@ const locale = 'codex.message.edit'
 const chatNode = 'conversation.chat.node'
 const historyContent = 'conversation.chat.user.content'
 const overlay = 'shell.overlay'
+const editLayout = { display: 'grid', gap: '8px', width: 'min(100%, 38rem)' }
+const editFooter = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }
+const editControls = { display: 'flex', alignItems: 'center', gap: '6px', marginInlineStart: 'auto' }
+const editWarning = { color: 'var(--dsw-alias-label-secondary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }
 const labels = {
   zh: { edit: '编辑消息', cancel: '取消', send: '发送', sending: '正在发送…',
     warning: '发送会替换这一轮及之后的对话记录。',
@@ -28,15 +32,22 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   const [chrome, setChrome] = useState(null)
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
+  const editing = draft !== null
   const t = tEdit
 
   useLayoutEffect(() => {
-    // RC2 的用户消息没有动作 Slot。使用原生复制按钮所在的行，并沿用原气泡类型的样式。
+    // RC2 的用户消息没有动作 Slot。编辑入口加入原生复制按钮所在的行。
     const row = anchor.current?.closest('[data-chat-flow-kind="user"]')
-    const actions = row?.querySelector('[data-clock="start"]')
-    const bubble = row?.querySelector('[data-message-bubble], [class$="_bubble"]')
-    setChrome(actions ? { actions, bubbleClass: bubble?.className } : null)
+    setChrome(row?.querySelector('[data-clock="start"]') ?? null)
   }, [Boolean(source)])
+
+  useLayoutEffect(() => {
+    if (!chrome || !editing) return
+    // 编辑区已提供自己的操作栏。保留原生复制行并在退出编辑时恢复。
+    const display = chrome.style.display
+    chrome.style.display = 'none'
+    return () => { chrome.style.display = display }
+  }, [chrome, editing])
 
   function cancel() {
     if (!saving) setDraft(null)
@@ -59,16 +70,20 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   }
 
   function renderContent(name, input, ...args) {
-    if (name !== historyContent || draft === null || !source) return renderFactorySlot(name, input, ...args)
+    if (name !== historyContent || !editing || !source) return renderFactorySlot(name, input, ...args)
     const originalWithAttachments = { ...input, content: { ...input.content, text: '', extraBlocks: [] } }
     return <>
       {renderFactorySlot(name, originalWithAttachments, ...args)}
-      <div className={chrome?.bubbleClass}>
+      <div style={editLayout}>
         <InlineEditor label={t('edit')} value={draft} onChange={value => { if (!saving) setDraft(value) }}
           onSave={send} onCancel={cancel} />
-        <p>{t('warning')}</p>
-        <Button size="sm" variant="outline" disabled={saving} onClick={cancel}>{t('cancel')}</Button>
-        <Button size="sm" disabled={!canSend} onClick={send}>{t(saving ? 'sending' : 'send')}</Button>
+        <div style={editFooter}>
+          <small style={editWarning}>{t('warning')}</small>
+          <div style={editControls}>
+            <Button size="sm" variant="ghost" disabled={saving} onClick={cancel}>{t('cancel')}</Button>
+            <Button size="sm" variant="primary" disabled={!canSend} onClick={send}>{t(saving ? 'sending' : 'send')}</Button>
+          </div>
+        </div>
       </div>
     </>
   }
@@ -76,11 +91,11 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   return <>
     {source && <span ref={anchor} hidden />}
     <Native {...props} renderFactorySlot={renderContent} />
-    {chrome && source && draft === null && createPortal(
+    {chrome && source && !editing && createPortal(
       <Tooltip label={t('edit')} side="bottom">
-        <button type="button" className={chrome.actions.querySelector('button')?.className} aria-label={t('edit')} disabled={!idle}
+        <button type="button" className={chrome.querySelector('button')?.className} aria-label={t('edit')} disabled={!idle}
           onClick={() => { headAtEdit.current = source.headTurnId; setDraft(source.text) }}><IconEditOutlineRegular /></button>
-      </Tooltip>, chrome.actions)}
+      </Tooltip>, chrome)}
   </>
 }
 

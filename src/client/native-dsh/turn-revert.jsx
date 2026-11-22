@@ -1,10 +1,10 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { Button, IconClockOutlineRegular, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconClockOutlineRegular, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import { writeThreadAction } from '../api.js'
 
 const locale = 'codex.turn.revert'
-const tail = 'conversation.chat.turnTail'
+const actions = 'conversation.chat.assistant-actions'
 const overlay = 'shell.overlay'
 const labels = {
   zh: {
@@ -19,13 +19,21 @@ const labels = {
   },
 }
 
-function TurnRevert({ turn, useSession, requestRevert, t }) {
+function matchNativeActionStyle(button) {
+  const copy = button?.closest('[data-clock="end"]')?.querySelector('button')
+  if (copy && copy !== button) button.className = copy.className
+}
+
+function TurnRevert({ messageId, useSession, requestRevert, t }) {
   const paginated = useSession(state => state.historyMode === 'paginated' && !state.archived && !state.subagent)
   const idle = useSession(state => state.live.status?.type === 'idle' && state.canAcceptDirectInput !== false)
   if (!paginated) return null
-  return <Button size="sm" variant="toolbar" disabled={!idle} aria-label={t('revert')}
-    title={t(idle ? 'revert' : 'unavailable')} icon={<IconClockOutlineRegular size={14} />}
-    onClick={() => requestRevert(turn.turn)} />
+  return <Tooltip label={t(idle ? 'revert' : 'unavailable')} side="bottom" openOnClick={!idle}>
+    <button type="button" ref={matchNativeActionStyle} aria-label={t('revert')} aria-disabled={!idle || undefined}
+      data-unavailable={!idle || undefined} onClick={idle ? () => requestRevert(messageId) : undefined}>
+      <IconClockOutlineRegular />
+    </button>
+  </Tooltip>
 }
 
 function RevertDialog({ request, close, t }) {
@@ -63,16 +71,16 @@ function RevertOverlay({ useRevertRequest, close, t }) {
   return request && <RevertDialog key={request.beforeTurnId} request={request} close={close} t={t} />
 }
 
-/** 在原生轮次尾部提供回退入口。确认框留在页面层，历史刷新移除目标轮次时也能显示操作结果。 */
+/** 回退沿用 DSH 回复操作栏的显隐规则，页面层的确认框独立于历史刷新。 */
 export function installTurnRevert(ctx) {
   const request = createSnapshotStore(null)
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.inject(['sessions'], scope => {
-    scope.slots.inject(tail, () => scope.slots.register({
-      name: tail, id: 'codex-turn-revert', order: 60, locale,
+    scope.slots.inject(actions, () => scope.slots.register({
+      name: actions, id: 'codex-turn-revert', locale,
       inject: threadId => ({
-        requestRevert(turn) {
-          const beforeTurnId = scope.sessions.binding(threadId)?.session.turnIdAt(turn)
+        requestRevert(messageId) {
+          const beforeTurnId = scope.sessions.binding(threadId)?.session.finishedTurnOfReply(messageId)
           if (beforeTurnId) request.set({ threadId, beforeTurnId })
         },
       }),

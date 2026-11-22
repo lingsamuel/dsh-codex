@@ -1,5 +1,6 @@
 import { CodexRpcError, readCodexPages } from './app-server.mjs'
 import { userInputText } from '../shared/user-input.js'
+import { questionReplies } from '../shared/question-replies.js'
 
 /** 从原生记录提取该轮首条用户输入。只替换文本，附件与引用继续使用 Codex 原对象。 */
 export async function editedInput(request, threadId, turnId, itemId, text) {
@@ -14,6 +15,7 @@ export async function editedInput(request, threadId, turnId, itemId, text) {
   if (message?.id !== itemId) throw new CodexRpcError({ code: -32602, message: '只支持编辑每轮开头的用户消息。' })
 
   const { content } = message
+  if (questionReplies(content)) throw new CodexRpcError({ code: -32602, message: '这是一条问答记录，可通过整轮回退重新开始。' })
   if (text === userInputText(content)) return content
   const edited = { type: 'text', text, text_elements: [] }
   const firstText = content.findIndex(part => part.type === 'text')

@@ -37,6 +37,19 @@ function fileChange(item) {
   return { name: item.type, args: { paths: item.changes.map(change => change.path) }, output, meta, isError }
 }
 
+/** 原生问答事件本身已经记载问题和回答，使用 DSH 已安装的只读问答工具卡。 */
+export function projectQuestionReply(replies) {
+  const questions = replies.map(({ questionItemId, question }, index) => ({ id: String(index), question, questionItemId }))
+  const answers = replies.map(({ answer }, index) => ({ id: questions[index].id, selected: [], custom: answer }))
+  return {
+    name: 'ask_user_question',
+    args: { questions },
+    output: JSON.stringify({ answers }),
+    meta: { codexQuestionReply: true },
+    isError: false,
+  }
+}
+
 /** 将原生命令、文件变更和工具输出交给 DSH 已注册的工具行。 */
 export function projectTool(item) {
   switch (item.type) {
