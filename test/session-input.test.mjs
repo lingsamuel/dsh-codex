@@ -2,6 +2,39 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionInput } from '../src/client/native-dsh/session-input.js'
 
+test('直接发送 /plan 正文只投递任务，裸命令只切换模式', async t => {
+  const requests = []
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    const body = JSON.parse(options.body)
+    requests.push([url.pathname, body])
+    return Response.json(body.action === 'plan' ? { mode: body.mode, confirmed: true } : { planMode: 'plan' })
+  })
+  const state = { pendingSubmissions: [], planMode: 'default', planRevision: 0, running: true }
+  const subscribe = () => () => {}
+  const history = {
+    session: { getSnapshot: () => state, publishPlanMode(mode) { state.planMode = mode } },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe },
+    queueStore: { getSnapshot: () => [], subscribe }, updateState: edit => edit(state),
+    activeTurnId: () => 'current',
+  }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history,
+    { getSnapshot: () => undefined, clear() {} })
+  const text = '/plan 整理结果\n说明验证步骤'
+  const { requestId } = input.beginSubmission({ mode: 'steer', text, attachments: [] })
+  assert.equal(state.pendingSubmissions[0].text, '整理结果\n说明验证步骤')
+  assert.equal(state.pendingSubmissions[0].placement, 'queued')
+  assert.equal((await input.prompt([{ type: 'text', text }], 'steer', undefined, requestId)).ok, true)
+  assert.deepEqual(requests[0], ['/api/codex/conversation-action', { threadId: 'native', action: 'prompt', mode: 'queue',
+    planMode: 'plan', clientUserMessageId: requestId, input: [{ type: 'text', text: '整理结果\n说明验证步骤', text_elements: [] }] }])
+  assert.equal(state.planMode, 'plan')
+  assert.equal((await input.prompt([{ type: 'text', text: '/plan' }], 'queue')).ok, true)
+  assert.deepEqual(requests[1], ['/api/codex/command-action', { threadId: 'native', action: 'plan', mode: 'default' }])
+  assert.equal(state.planMode, 'default')
+})
+
 test('直接发送完整 /goal 命令走同一个原生目标提交', async t => {
   const requests = []
   const previousDocument = globalThis.document

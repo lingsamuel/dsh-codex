@@ -1,6 +1,6 @@
 import { readPage, writeCommandAction, writeConversationAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
-import { goalCommandObjective, userInputText } from '../../shared/user-input.js'
+import { goalCommandObjective, planCommandText, replaceUserInputText, userInputText } from '../../shared/user-input.js'
 
 const accepted = { ok: true, value: { accepted: true } }
 const failedSubmission = { reason: 'failed' }
@@ -39,14 +39,14 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     clearDrafts(model, profileId)
   }
 
-  function retire(requestId, settlement) {
+  function retire(requestId, settlement, consumeSettings = true) {
     const submission = submissions.get(requestId)
     if (!submission) return
     submissions.delete(requestId)
     if (settlement.reason === 'observed') {
       // 待发项可能先于 HTTP 回执被领取。保留已送达状态，再交接原生草稿图片。
       submission.observed = true
-      clearDrafts(submission.model, submission.permission)
+      if (consumeSettings) clearDrafts(submission.model, submission.permission)
       submission.onAccept?.()
     }
     updateState(state => {
@@ -124,10 +124,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new Error('Token 预算必须是正整数。')
     const command = (action, fields) => writeCommandAction({ threadId, action, ...fields, ...(unarchive && { unarchive: true }) }, signal)
     if (session.getSnapshot().planMode === 'plan') {
-      const { planRevision } = session.getSnapshot()
-      const result = await command('plan', { mode: 'default' })
+      const result = await changePlanMode('default', unarchive, signal)
       if (!result.confirmed) throw new Error('Codex 尚未确认退出计划模式。请确认后再提交目标。')
-      session.publishPlanMode(result.mode, planRevision)
     }
     const info = await readPage('thread-info', { threadId, view: 'goal' }, signal)
     if (info.goalAvailable === false) throw new Error('当前 Codex 会话无法创建目标。')
@@ -146,6 +144,24 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     return accepted
   }
 
+  async function changePlanMode(mode, unarchive, signal) {
+    const { planRevision } = session.getSnapshot()
+    const result = await writeCommandAction({ threadId, action: 'plan', mode, ...(unarchive && { unarchive: true }) }, signal)
+    if (result.confirmed) session.publishPlanMode(result.mode, planRevision)
+    return result
+  }
+
+  async function togglePlan(content, unarchive, signal, requestId) {
+    if (content.some(part => part.type !== 'text')) throw new Error('请填写计划任务后连同附件一起发送。')
+    const mode = session.getSnapshot().planMode === 'plan' ? 'default' : 'plan'
+    const draft = goalDraft?.getSnapshot()
+    const result = await changePlanMode(mode, unarchive, signal)
+    if (!result.confirmed) throw new Error('Codex 尚未确认计划模式。')
+    if (mode === 'plan') goalDraft?.clear(draft)
+    retire(requestId, observedSubmission, false)
+    return accepted
+  }
+
   async function control(action, parameters, op, onAccepted) {
     updateState(state => { state.promptError = null })
     try {
@@ -159,6 +175,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
 
   return {
     acceptSubmittedSettings,
+    changePlanMode,
     decideGoalReplacement: accepted => goalConfirmation?.resolve(accepted),
     dismissGoalError(error) {
       if (session.getSnapshot().goalError === error) updateState(state => { state.goalError = null })
@@ -167,16 +184,18 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const { running, archived, blank } = session.getSnapshot()
       const worktree = blank && !archived ? worktreeDraft?.getSnapshot() : undefined
       const goal = goalDraft?.getSnapshot()
-      const submitsGoal = Boolean(goal || goalCommandObjective([{ type: 'text', text }]))
-      const requestId = (!submitsGoal && worktree?.id) || crypto.randomUUID()
-      const expectedTurnId = mode === 'steer' ? activeTurnId() : undefined
+      const parts = [{ type: 'text', text }]
+      const plan = planCommandText(parts)
+      const isCommandOnly = plan === '' || (plan === undefined && Boolean(goal || goalCommandObjective(parts)))
+      const requestId = (!isCommandOnly && worktree?.id) || crypto.randomUUID()
+      const expectedTurnId = mode === 'steer' && plan === undefined ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
       submissions.set(requestId, { onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
       updateState(state => {
-        if (!submitsGoal) state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
+        if (!isCommandOnly) state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text: plan ?? text, attachments })
         state.promptAttempted = true
       })
       return { requestId, abandon: () => retire(requestId, failedSubmission) }
@@ -185,13 +204,15 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const submission = submissions.get(requestId)
       const worktree = submission?.worktree
       const { kind, id, path, baseRef } = worktree ?? {}
-      const expectedTurnId = submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
+      const plan = planCommandText(content)
+      const expectedTurnId = plan !== undefined ? undefined : submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
       const selection = submission ? submission.model : modelDraft.getSnapshot()
       const profileId = submission ? submission.permission : permissionDraft?.getSnapshot()
       const before = permissionSnapshot(profileId)
       const unarchive = submission ? submission.unarchive : session.getSnapshot().archived
-      const goal = submission ? submission.goal : goalDraft?.getSnapshot()
-      const objective = goal ? userInputText(content).trim() : goalCommandObjective(content)
+      const draft = submission ? submission.goal : goalDraft?.getSnapshot()
+      const goal = plan === undefined ? draft : undefined
+      const objective = plan !== undefined ? undefined : goal ? userInputText(content).trim() : goalCommandObjective(content)
       updateState(state => {
         state.promptError = null
         state.goalError = null
@@ -199,18 +220,25 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         state.promptAttempted = true
       })
       try {
+        if (plan === '') return await togglePlan(content, unarchive, signal, requestId)
         if (goal || objective) {
           return await submitGoal(content, objective, goal, worktree, selection, profileId, before, unarchive, signal, requestId)
         }
-        const input = content.map(part => {
+        const input = (plan === undefined ? content : replaceUserInputText(content, plan)).map(part => {
           if (part.type === 'text') return { type: 'text', text: part.text, text_elements: [] }
           if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }
           throw new Error('当前仅支持发送文本和图片。')
         })
+        const { planRevision } = session.getSnapshot()
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
           expectedTurnId, modelDraft: selection, permissionDraft: profileId,
+          ...(plan !== undefined && { planMode: 'plan' }),
           ...(worktree && { worktree: { kind, id, path, baseRef } }),
           ...(unarchive && { unarchive: true }) }, signal)
+        if (result.planMode) {
+          if (!worktree) session.publishPlanMode(result.planMode, planRevision)
+          goalDraft?.clear(draft)
+        }
         if (worktree && result.thread) {
           // 原生目标是新会话。先让 DSH 清除已送达的原草稿，再切换显示会话。
           worktreeDraft.clear(worktree)

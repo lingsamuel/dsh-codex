@@ -3,9 +3,21 @@ export function userInputText(content) {
   return content.filter(part => part.type === 'text').map(part => part.text).join('')
 }
 
+function commandArguments(content, command) {
+  const text = userInputText(content).trim()
+  const separator = text.search(/\s/u)
+  const token = separator < 0 ? text : text.slice(0, separator)
+  if (token === command) return separator < 0 ? '' : text.slice(separator).trimStart()
+}
+
 /** 识别桌面端随目标保存的用户消息。 */
 export function goalCommandObjective(content) {
-  return userInputText(content).trim().match(/^\/goal\s+([\s\S]+)$/u)?.[1]
+  return commandArguments(content, '/goal') || undefined
+}
+
+/** 裸命令返回空文本，附任务时返回待提交的正文。 */
+export function planCommandText(content) {
+  return commandArguments(content, '/plan')
 }
 
 /** 替换原生输入中的文本，保留独立记录的附件与引用。 */

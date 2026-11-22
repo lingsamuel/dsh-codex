@@ -1,7 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, IconCloseOutlineRegular, IconPlanOutlineRegular, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useSyncExternalStore } from 'react'
-import { writeCommandAction } from '../api.js'
 import { commandUnavailable } from './command-action.jsx'
 import { ComposerModeLabel } from './composer-mode-label.jsx'
 
@@ -28,9 +27,8 @@ export function createPlanAction(ctx, session) {
     session.setPlanChanging(true)
     store.set({ pending: true })
     try {
-      const result = await writeCommandAction({ threadId: session.sessionId, action: 'plan', mode, ...(archived && { unarchive: true }) })
+      const result = await session.changePlanMode(mode, archived)
       if (result.confirmed) {
-        session.publishPlanMode(result.mode, revision)
         if (session.getSnapshot().planMode === mode) confirm(mode, goal)
         else store.set(null)
       } else if (session.getSnapshot().planMode === mode) confirm(mode, goal)

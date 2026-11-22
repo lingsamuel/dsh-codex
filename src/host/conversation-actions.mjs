@@ -262,7 +262,8 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 }
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
-export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions, openProject = createProjectOpener()) {
+export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions,
+  openProject = createProjectOpener(), enablePlan) {
   const worktreeStarts = new Map()
   const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
 
@@ -358,6 +359,8 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
         required(threadId, '缺少 Codex 线程 ID。')
         if (action === 'prompt') {
           if (mode !== 'queue' && mode !== 'steer') throw badRequest('无效的发送方式。')
+          const planMode = fields.planMode
+          if (planMode !== undefined && (planMode !== 'plan' || mode !== 'queue' || !enablePlan)) throw badRequest('无效的计划提交。')
           const parts = promptInput(input)
           required(clientUserMessageId, '缺少消息 ID。')
           const worktree = fields.worktree === undefined ? undefined : validateWorktreeSelection(fields.worktree)
@@ -369,7 +372,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             const start = worktree && await worktreeStart(threadId, worktree, signal)
             if (start) {
               worktreeRecovery = start.accepted ? { ...start.native, thread: start.accepted.thread } : start.native
-              const digest = createHash('sha256').update(JSON.stringify(parts)).digest('hex')
+              const digest = createHash('sha256').update(JSON.stringify({ parts, planMode })).digest('hex')
               // 提交 ID 绑定上一次可能已送达的正文与附件。原生明确拒绝时仍可编辑后重试。
               if ((start.accepted || start.uncertain) && start.inputDigest !== digest) {
                 throw worktreeConflict('worktree-input-changed', '草稿已编辑。请打开目标会话检查原消息，再在其中发送修改后的内容。')
@@ -380,8 +383,15 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             const destination = start?.native.thread.id ?? threadId
             const params = { threadId: destination, input: parts, clientUserMessageId }
             const run = () => withCodexReader(socketPath, signal, async rpc => {
-              if (start?.uncertain) return recoverWorktreePrompt(rpc, start.native.thread, clientUserMessageId, signal)
+              if (start?.uncertain) {
+                const recovered = await recoverWorktreePrompt(rpc, start.native.thread, clientUserMessageId, signal)
+                return planMode ? { ...recovered, planMode } : recovered
+              }
               const thread = await submissionThread(rpc, destination, fields, permissions)
+              // 计划任务从下一轮开始。目标线程确认模式后才入队，工作树首发同样在目标线程设置。
+              if (planMode && !(await enablePlan(destination, signal)).confirmed) {
+                throw conflict('plan-mode-unconfirmed', 'Codex 尚未确认计划模式，请重试。')
+              }
               const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
               params.input = await resolveInputSkills(rpc, params.input, () => runtime.cwd ?? thread.cwd)
               if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
@@ -401,7 +411,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
               const started = queuedId ? await startOnlyQueuedMessage(rpc, destination, queuedId) : undefined
               scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
               if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, destination, signal)
-              return permission ? { ...result, permission } : result
+              return { ...result, ...(permission && { permission }), ...(planMode && { planMode }) }
             })
             const result = await (start ? submit(destination, run) : run())
             if (!start) return result

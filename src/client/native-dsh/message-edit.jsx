@@ -12,7 +12,8 @@ const editLayout = { display: 'grid', gap: '8px', width: 'min(100%, 38rem)' }
 const editFooter = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }
 const editControls = { display: 'flex', alignItems: 'center', gap: '6px', marginInlineStart: 'auto' }
 const editWarning = { color: 'var(--dsw-alias-label-secondary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }
-const goalMarkerStyle = { display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary)' }
+const goalMarkerStyle = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  width: 'calc(28px + var(--dsh-content-font-delta, 0px))', height: '100%', color: 'var(--dsw-alias-label-tertiary)' }
 const labels = {
   zh: { edit: '编辑消息', cancel: '取消', send: '发送', sending: '正在发送…',
     warning: '发送会替换这一轮及之后的对话记录。', unarchiveWarning: '发送会取消归档，并替换这一轮及之后的对话记录。',
@@ -38,12 +39,14 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   const [saving, setSaving] = useState(false)
   const editing = draft !== null
   const t = tEdit
+  const goalMessage = node.data.source?.codexGoal === true
+  const hasActions = Boolean(source || goalMessage)
 
   useLayoutEffect(() => {
-    // RC2 的用户消息没有动作 Slot。编辑入口加入原生复制按钮所在的行。
-    const row = anchor.current?.closest('[data-chat-flow-kind="user"]')
+    // 用户消息没有动作 Slot。目标标记和编辑入口进入原生复制按钮所在的行。
+    const row = anchor.current?.closest('[data-chat-flow-kind="user"], [data-chat-flow-kind="steering"]')
     setChrome(row?.querySelector('[data-clock="start"]') ?? null)
-  }, [Boolean(source)])
+  }, [hasActions])
 
   useLayoutEffect(() => {
     if (!chrome || !editing) return
@@ -81,16 +84,11 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   function renderContent(name, input, ...args) {
     if (name !== historyContent) return renderFactorySlot(name, input, ...args)
     if (!editing || !source) {
-      if (!node.data.source?.codexGoal) return renderFactorySlot(name, input, ...args)
+      if (!goalMessage) return renderFactorySlot(name, input, ...args)
       // 原生 ui-goal 只高亮已确认执行的范围。目标正文里的其他 /goal 保持原样。
       const start = input.content.text.search(/\S/u)
       const facts = { ...input.facts, commands: [{ start, end: start + 5, name: 'goal' }] }
-      return <>
-        {renderFactorySlot(name, { ...input, facts }, ...args)}
-        <Tooltip label={t('sentAsGoal')} side="bottom">
-          <span role="img" aria-label={t('sentAsGoal')} style={goalMarkerStyle}><IconGoalOutlineRegular size={14} aria-hidden /></span>
-        </Tooltip>
-      </>
+      return renderFactorySlot(name, { ...input, facts }, ...args)
     }
     const originalWithAttachments = { ...input, content: { ...input.content, text: '', extraBlocks: [] } }
     return <>
@@ -110,13 +108,17 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   }
 
   return <>
-    {source && <span ref={anchor} hidden />}
+    {hasActions && <span ref={anchor} hidden />}
     <Native {...props} renderFactorySlot={renderContent} />
-    {chrome && source && !editing && createPortal(
-      <Tooltip label={t('edit')} side="bottom">
+    {chrome && !editing && createPortal(<>
+      {goalMessage && <Tooltip label={t('sentAsGoal')} side="bottom">
+        <span role="img" aria-label={t('sentAsGoal')} style={goalMarkerStyle}><IconGoalOutlineRegular size={15} aria-hidden /></span>
+      </Tooltip>}
+      {source && <Tooltip label={t('edit')} side="bottom">
         <button type="button" className={chrome.querySelector('button')?.className} aria-label={t('edit')} disabled={!editable}
           onClick={() => { headAtEdit.current = source.headTurnId; setDraft(source.text) }}><IconEditOutlineRegular /></button>
-      </Tooltip>, chrome)}
+      </Tooltip>}
+    </>, chrome)}
   </>
 }
 

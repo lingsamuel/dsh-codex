@@ -273,6 +273,37 @@ test('其他客户端的空白会话用原生设置回执确认计划模式', as
   assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
 })
 
+test('带正文的计划提交先确认原生模式，再进入原生队列', async t => {
+  const thread = { id: 'main', name: '已有会话', status: { type: 'idle' }, model: 'native-model' }
+  let supported = false
+  let selected
+  const queuedInModes = []
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'collaborationMode/list': () => ({ result: { data: supported ? [{ mode: 'plan' }] : [] } }),
+    'thread/settings/update': ({ collaborationMode }) => {
+      selected = collaborationMode.mode
+      return { result: {} }
+    },
+    'thread/queue/add': () => {
+      queuedInModes.push(selected)
+      return { result: { queuedSubmission: { id: 'plan-queue' } } }
+    },
+    'thread/queue/list': () => ({ result: { data: [] } }),
+  })
+  const send = () => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: 'main', action: 'prompt', mode: 'queue', planMode: 'plan',
+      clientUserMessageId: 'plan-input', input: [{ type: 'text', text: '列出验证步骤' }] }),
+  })
+  assert.ok(!(await send()).ok)
+  assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
+  supported = true
+  assert.deepEqual(await (await send()).json(), { queuedSubmission: { id: 'plan-queue' }, planMode: 'plan' })
+  assert.deepEqual(queuedInModes, ['plan'])
+})
+
 test('网页目标的创建、暂停、恢复与清除使用原生用户身份', async t => {
   let goal = null
   const { get, messages } = await fakeCodex(t, {

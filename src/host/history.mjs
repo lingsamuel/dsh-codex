@@ -14,7 +14,7 @@ import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { createThreadSubmissionQueue, isArchived } from './thread-runtime.mjs'
 import { createBackgroundTerminalMonitor, readBackgroundTerminals } from './background-terminals.mjs'
-import { createCommandActionRoute, readPlanModes } from './command-actions.mjs'
+import { createCommandActionRoute, readPlanModes, selectPlanMode } from './command-actions.mjs'
 import { planModeOf } from '../shared/plan-mode.js'
 import { createSkillsRoute } from './skills.mjs'
 import { createCodexPluginRoutes } from './codex-plugins.mjs'
@@ -70,6 +70,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
+  const enablePlan = (threadId, signal) => selectPlanMode(socketPath, signal, threadId, 'plan', false, permissions.observeDraftSettings)
   const route = (path, read) => ({
     path: `/api/codex/${path}`,
     methods: ['GET'],
@@ -97,7 +98,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,

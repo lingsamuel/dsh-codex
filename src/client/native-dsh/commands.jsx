@@ -106,7 +106,7 @@ function CommandDialog({ commandRequest, session, ...props }) {
 export function installCommands(ctx) {
   ctx.effect(() => ctx.locale.register(locale, copy))
   const t = ctx.locale.bind(locale)
-  installGoalBar(ctx, t, locale)
+  installGoalBar(ctx, t)
   installComposerModeLabel(ctx)
 
   ctx.inject(['commandUi', 'sessions', 'conversation', 'contextMenus', 'remoteAccess'], scope => {

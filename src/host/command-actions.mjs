@@ -125,7 +125,7 @@ async function updateGoal(request, threadId, fields, update, signal, permissions
   return { goal: result.goal, ...(permission && { permission }) }
 }
 
-async function selectPlanMode(socketPath, signal, threadId, mode, unarchive, observeDraftSettings) {
+export async function selectPlanMode(socketPath, signal, threadId, mode, unarchive, observeDraftSettings) {
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
   const confirmed = Promise.withResolvers()
   function confirm(settings) {
