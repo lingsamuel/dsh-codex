@@ -21,4 +21,9 @@ Codex 持有项目、会话历史、模型、权限和执行状态。网页通�
 
 运行时需要既有的 Codex 登录与共享服务，网页默认只监听本机回环地址。
 
+## 已验证版本
+
+- **Codex App Server** `0.171.0`
+- **DeepSeek Harness（DSH）** `0.2.3-alpha.2`
+
 [安装与使用](manual/guide.md) · [给 AI 助手的安装指南](manual/ai-install.md) · [架构](https://github.com/lingsamuel/dsh-codex/blob/master/docs/architecture.md)
