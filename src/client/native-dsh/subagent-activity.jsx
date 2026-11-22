@@ -16,7 +16,6 @@ const rowStyle = {
   color: 'var(--dsw-alias-label-tertiary)',
 }
 const iconStyle = { display: 'inline-grid', placeItems: 'center', flex: 'none', width: iconSize, height: iconSize }
-// 代码标签使用自己的字体设置，由过程行把两个文字框沿垂直中线对齐。
 const pathStyle = {
   height: 'auto', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: '0 5px',
   backgroundColor: 'var(--dsw-alias-markdown-inline-code)',
@@ -25,7 +24,8 @@ const pathStyle = {
   fontFamily: 'var(--dsh-font-family-code, "Cascadia Mono", "Source Code Pro"), var(--ds-font-family-code, ui-monospace, monospace)',
   color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start',
 }
-const pathTextStyle = { font: 'inherit', minWidth: 0 }
+// 等宽字体的字形在行框里略偏上，只校正文字的位置，标签外框仍与过程行居中。
+const pathTextStyle = { display: 'block', font: 'inherit', minWidth: 0, transform: 'translateY(0.04em)' }
 
 function SubagentActivity({ node, open, t }) {
   const { kind, agentThreadId, agentPath } = node.data
@@ -50,14 +50,13 @@ function SubagentActivity({ node, open, t }) {
     }
   }
 
+  const path = <code style={pathTextStyle}>{agentPath}</code>
   return <div style={rowStyle}>
     <span style={iconStyle} aria-hidden><IconUsersOutlineRegular size={16} /></span>
     <span>{t(kind)}</span>
     {agentThreadId
-      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>
-          <code style={pathTextStyle}>{agentPath}</code>
-        </Button>
-      : <code style={pathStyle}>{agentPath}</code>}
+      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>{path}</Button>
+      : <span style={pathStyle}>{path}</span>}
     {unavailable && <span role="status">{t('unavailable')}</span>}
   </div>
 }
