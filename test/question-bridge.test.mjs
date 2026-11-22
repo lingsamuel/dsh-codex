@@ -192,10 +192,12 @@ test('MCP 表单、外部授权与不支持的请求保留原生身份并随 CLI
     params: { threadId, turnId: null, serverName: 'fixture', message: 'Enter values', mode, ...body },
   })
   const requestedSchema = {
-    type: 'object', required: ['count', 'channel', 'labels', 'checked'], properties: {
+    type: 'object', required: ['count', 'channel', 'labels', 'checked', 'note'], properties: {
       count: { type: 'integer', minimum: 1 }, channel: { type: 'string', oneOf: [{ const: 'web', title: 'Web' }] },
       labels: { type: 'array', items: { enum: ['one', 'two'], type: 'string' }, minItems: 1 },
       checked: { type: 'boolean', default: false }, email: { type: 'string', format: 'email' },
+      note: { type: 'string' }, legacy: { type: 'string', enum: ['dsh'], enumNames: ['DSH'], default: 'dsh' },
+      groups: { type: 'array', items: { anyOf: [{ const: 'ui', title: 'UI' }] } }, ratio: { type: 'number', maximum: 1 },
     },
   }
   const native = await nativeQuestions(t, { status, approvals: [elicitation(17, 'form', { requestedSchema }),
@@ -223,9 +225,12 @@ test('MCP 表单、外部授权与不支持的请求保留原生身份并随 CLI
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ threadId, requestId, action, content, key }),
     }))
+  assert.equal(pending[0].mode, 'form', '普通文本字段必须保留表单提交能力')
+  assert.deepEqual(pending[0].fields.find(({ name }) => name === 'legacy').options, [{ value: 'dsh', label: 'DSH' }])
   assert.equal(pending[1].url, 'https://example.invalid/request')
   assert.match(pending[2].error, /不支持/)
-  const content = { count: 3, channel: 'web', labels: ['one'], checked: false }
+  const content = { count: 3, channel: 'web', labels: ['one'], checked: false, note: '保留普通文本',
+    legacy: 'dsh', groups: ['ui'], ratio: 0.2 }
   assert.equal((await post(17, 'accept', { ...content, count: '3' })).status, 400)
   assert.equal((await post(17, 'accept', { ...content, email: 'invalid' })).status, 400)
   assert.equal((await post(17, 'accept', { ...content, extra: 0 })).status, 400)
