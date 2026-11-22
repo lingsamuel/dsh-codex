@@ -72,6 +72,34 @@ test('实时问题使用原生请求身份，原生确认完成后清理当前�
   assert.deepEqual(pending.getSnapshot(), [])
 })
 
+test('异步问答随当前轮次的原生条目弹出，即使没有等待状态或后面还有回复', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const status = { type: 'active', activeFlags: [] }
+  const asyncItem = { id: 'ask-options', type: 'agentMessage', phase: 'final_answer', text: '',
+    questions: [{ title: 'Choose an environment', options: ['Staging', 'Production'] }, { title: 'Any notes?', options: null }],
+  }
+  const displayed = () => history.session.projections.faceOf('codexQuestions').getSnapshot()
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'live', status })
+  assert.deepEqual(displayed(), [])
+  await emit({ type: 'change', turn: { id: 'current', status: 'inProgress' }, items: [asyncItem] })
+  const [request] = displayed()
+  assert.equal(request?.kind, 'async')
+  assert.equal(request.turnId, 'current')
+  assert.equal(request.itemId, 'ask-options')
+  assert.deepEqual(request.questions.map(question => question.id), [
+    '["request_user_input_async","ask-options",0]', '["request_user_input_async","ask-options",1]',
+  ])
+  await emit({ type: 'change', turn: { id: 'current', status: 'completed' }, items: [answer] })
+  assert.deepEqual(displayed().map(question => question.itemId), ['ask-options'])
+  const text = '<send_user_message_question_reply>{"questionItemId":"[\\"request_user_input_async\\",\\"ask-options\\",0]","question":"Choose an environment","answer":"Staging"}</send_user_message_question_reply>'
+  await emit({ type: 'queue', submissions: [{ id: 'pending-answer', input: [{ type: 'text', text }] }] })
+  assert.deepEqual(displayed()[0].questions.map(question => question.index), [1])
+  await emit({ type: 'change', turn: { id: 'next', status: 'inProgress' }, items: [] })
+  assert.deepEqual(displayed(), [])
+})
+
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {
   const currentSource = mockTransport(t)
   const received = []

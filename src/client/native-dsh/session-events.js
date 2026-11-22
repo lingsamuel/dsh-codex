@@ -10,7 +10,7 @@ import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
 import { userInputText } from '../../shared/user-input.js'
-import { projectNativeQuestions } from './native-questions.js'
+import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
@@ -72,6 +72,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   let opened = false
   let triedFallback = false
   let outlineRevision = 0
+  let liveQuestions = []
   let markReady
   const ready = new Promise(resolve => { markReady = resolve })
   ctx.effect(() => () => {
@@ -111,6 +112,7 @@ export function createCodexHistory(ctx, thread, catalog) {
         current.openError = null
       }
     })
+    publishQuestions()
   }
 
   function applyThread(native) {
@@ -291,7 +293,12 @@ export function createCodexHistory(ctx, thread, catalog) {
     return queue
   }
 
-  function publishQuestions(requests) {
+  function publishQuestions() {
+    const { archived, canAcceptDirectInput } = state.getSnapshot()
+    const latest = transcript.getTurn(rows.at(-1)?.id)
+    const asynchronous = archived || canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, queueStore.getSnapshot())
+    const requests = [...liveQuestions, ...asynchronous]
+    if (JSON.stringify(requests) === JSON.stringify(codexQuestions.getSnapshot())) return
     codexQuestions.set(requests)
     userQuestions.set(projectNativeQuestions(requests))
   }
@@ -305,7 +312,10 @@ export function createCodexHistory(ctx, thread, catalog) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
-      if (frame.type === 'questions') return publishQuestions(frame.requests)
+      if (frame.type === 'questions') {
+        liveQuestions = frame.requests
+        return publishQuestions()
+      }
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'queue') {
         const { submissions } = frame
@@ -313,7 +323,7 @@ export function createCodexHistory(ctx, thread, catalog) {
         inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
           source: { kind: 'user', rpcId: clientUserMessageId }, content: input.map(part => userBlock(part)),
         })), 'next-step': [] })
-        return
+        return publishQuestions()
       }
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
@@ -342,7 +352,7 @@ export function createCodexHistory(ctx, thread, catalog) {
           const { effort, ...settings } = params.threadSettings
           publishModel(modelSelectionOf({ ...settings, reasoningEffort: effort }))
         } else if (method === 'thread/archived' || method === 'thread/unarchived') {
-          state.update(current => { current.archived = method === 'thread/archived' })
+          publishState({ archived: method === 'thread/archived' })
         } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
           state.update(current => {
             current.goal = params.goal ?? null
@@ -355,8 +365,8 @@ export function createCodexHistory(ctx, thread, catalog) {
 
   function changeMode(mode) {
     return enqueue(async () => {
+      if (mode === 'disconnected') liveQuestions = []
       publishState({ mode })
-      if (mode === 'disconnected') publishQuestions([])
       if (mode !== 'disconnected' || opened || triedFallback) return
       triedFallback = true
       await receiveSnapshot({ page: await loadPage(), mode: 'history' })

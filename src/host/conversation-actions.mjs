@@ -36,7 +36,8 @@ export function readConversationQueue(request, threadId) {
   }))
 }
 
-async function addressableThread(request, threadId) {
+/** 检查线程是否允许网页输入并返回原生状态，保留调用方的加载决策。 */
+export async function addressableThread(request, threadId) {
   const { thread } = await request('thread/read', { threadId })
   if (thread.archived || thread.ephemeral || thread.canAcceptDirectInput === false) {
     throw conflict('thread-unavailable', '此会话无法从网页直接操作。')

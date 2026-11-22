@@ -1,3 +1,5 @@
+import { answeredAsyncQuestions, asyncQuestionItemId } from '../../shared/question-replies.js'
+
 const empty = { active: [], settled: [] }
 const otherLabel = 'None of the above'
 
@@ -16,6 +18,36 @@ export function projectNativeQuestions(requests) {
     })),
   }))
   return active.length ? { active, settled: [] } : empty
+}
+
+/** 异步问题随原生消息落盘。即使后面还有工具或正文，仍属于同一轮的待回答问题。 */
+export function projectAsyncQuestions(turn, queued) {
+  const items = turn?.items
+  if (!items?.some(item => item.type === 'agentMessage' && item.questions?.length)) return []
+  const inputs = [...items.filter(item => item.type === 'userMessage').map(item => item.content),
+    ...queued.map(submission => submission.input)]
+  const answered = answeredAsyncQuestions(inputs)
+  const requests = []
+  for (const item of items) {
+    if (item.type !== 'agentMessage' || !item.questions?.length || answered.has(item.id)) continue
+    // 较旧的桌面客户端使用条目 ID。较新的答复分别包含每道题目的 ID。
+    const questions = item.questions.flatMap(({ title, options }, index) => {
+      const id = asyncQuestionItemId(item.id, index)
+      return answered.has(id) ? [] : [{ id, index, question: title, options: options?.map(label => ({ label })) }]
+    })
+    if (questions.length) requests.push({ kind: 'async', itemId: item.id, turnId: turn.id, questions })
+  }
+  return requests
+}
+
+/** 异步答复沿用 Codex 的单段文本。它不是实时请求里的多选和 user_note 载荷。 */
+export function asyncQuestionAnswers(questions, submitted) {
+  const inputs = new Map(submitted.answers.map(answer => [answer.id, answer]))
+  return questions.flatMap(({ id, index }) => {
+    const input = inputs.get(id)
+    const answer = input?.custom?.trim() || input?.selected?.[0]?.trim()
+    return answer ? [{ index, answer }] : []
+  })
 }
 
 /** 将 DSH 的选项和自由输入转成 Codex CLI 使用的原生答案载荷。 */

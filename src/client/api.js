@@ -29,6 +29,11 @@ export function writeQuestionAnswer(parameters, signal) {
   return writeAction('question-answer', parameters, signal)
 }
 
+/** 异步问题通过 Codex 原生用户输入入队。 */
+export function writeAsyncQuestionAnswer(parameters, signal) {
+  return writeAction('async-question-answer', parameters, signal)
+}
+
 function writeAction(route, parameters, signal) {
   const url = new URL(`api/codex/${route}`, document.baseURI)
   return fetchResult(url, {

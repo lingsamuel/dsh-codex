@@ -6,6 +6,7 @@ import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
 import { createConversationActionRoute } from './conversation-actions.mjs'
 import { createQuestionBridge } from './question-bridge.mjs'
+import { createAsyncQuestionActionRoute } from './async-question-actions.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
@@ -52,6 +53,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     createThreadActionRoute(socketPath, ownerSignal),
     createConversationActionRoute(socketPath, ownerSignal),
     questions.route,
+    createAsyncQuestionActionRoute(socketPath, ownerSignal),
     createWatchRoute(socketPath, ownerSignal, questions),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),

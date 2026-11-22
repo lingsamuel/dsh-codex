@@ -3,6 +3,21 @@ const end = '</send_user_message_question_reply>'
 const ideContext = '# Context from my IDE setup:\n'
 const ideRequest = '\n## My request for Codex:\n'
 
+/** Codex 用提问条目和题目序号识别异步答复。 */
+export function asyncQuestionItemId(itemId, index) {
+  return JSON.stringify(['request_user_input_async', itemId, index])
+}
+
+/** 沿用 Codex CLI 提交异步问答时使用的上下文标记。 */
+export function encodeQuestionReplies(replies) {
+  return `${start}\n${JSON.stringify(replies)}\n${end}`
+}
+
+/** 历史和原生待发队列中的答复使用相同的问题标识。 */
+export function answeredAsyncQuestions(inputs) {
+  return new Set(inputs.flatMap(input => questionReplies(input)?.map(reply => reply.questionItemId) ?? []))
+}
+
 /** 识别 Codex CLI 和桌面端保存的独立问答消息。嵌在普通提示词里的示例保持原样。 */
 export function questionReplies(content) {
   const parts = content.filter(part => part.type !== 'skill' && part.type !== 'mention')

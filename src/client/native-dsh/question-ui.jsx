@@ -1,6 +1,6 @@
 import { Button, IconQuestionOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { writeQuestionAnswer } from '../api.js'
-import { isBrowserQuestion, nativeQuestionAnswers } from './native-questions.js'
+import { writeAsyncQuestionAnswer, writeQuestionAnswer } from '../api.js'
+import { asyncQuestionAnswers, isBrowserQuestion, nativeQuestionAnswers } from './native-questions.js'
 
 const composer = 'conversation.composer'
 const utilities = 'conversation.session.header.utilities'
@@ -22,7 +22,7 @@ function QuestionReopen({ sessionId, useProjection, reveal, t }) {
     icon={<IconQuestionOutlineRegular size={16} />} onClick={() => reveal(sessionId, callId)} />
 }
 
-/** 挂载 DSH 问答面板使用的应答能力。答复原请求，不经过普通发送、插话或待发队列。 */
+/** 挂载 DSH 问答面板使用的应答能力。实时答复使用原请求，异步答复沿用 Codex 用户输入。 */
 export function installCodexQuestions(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   const translate = ctx.locale.bind(locale)
@@ -33,7 +33,13 @@ export function installCodexQuestions(ctx) {
       async function answer(threadId, callId, submitted) {
         const request = questionRequests(scope, threadId).find(row => row.itemId === callId)
         if (!request || !isBrowserQuestion(request)) return { ok: true, value: false }
-        await writeQuestionAnswer({ threadId, requestId: request.requestId, answers: nativeQuestionAnswers(request.questions, submitted) })
+        if (request.kind === 'async') {
+          const answers = asyncQuestionAnswers(request.questions, submitted)
+          if (!answers.length) return { ok: true, value: false }
+          await writeAsyncQuestionAnswer({ threadId, turnId: request.turnId, itemId: request.itemId, answers })
+        } else {
+          await writeQuestionAnswer({ threadId, requestId: request.requestId, answers: nativeQuestionAnswers(request.questions, submitted) })
+        }
         return { ok: true, value: true }
       }
       // api-remotes 已挂载同名命名空间，保留它的注册和其它方法。
