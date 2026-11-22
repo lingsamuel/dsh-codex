@@ -172,6 +172,27 @@ test('命令结果不会覆盖期间收到的较新计划模式与目标通知',
   assert.equal(session.getSnapshot().planMode, 'default')
 })
 
+test('实时快照恢复 GoalBar 和 Plan 模式，目标气泡随历史补齐', async t => {
+  const source = mockTransport(t)
+  const { session, events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const goal = { objective: '构建报告', status: 'active', createdAt: 100 }
+  const snapshot = { type: 'snapshot', mode: 'live', status: { type: 'active' },
+    page: { data: [turn('goal-turn', 'inProgress', [answer])] }, goal, planMode: 'plan' }
+  await source().onopen()
+  await emit(snapshot)
+  assert.equal(session.projections.faceOf('goal').getSnapshot()?.goal.phase, 'active')
+  assert.deepEqual(session.projections.faceOf('plan').getSnapshot(), { active: true, pending: false })
+
+  await emit({ type: 'rollout-facts', goalInputs: { 'goal-turn': { objective: goal.objective, time: 99_999 } } })
+  assert.equal(events.getSnapshot().entries.find(({ event }) => event.type === 'user/message')?.event.data.content[0].text,
+    '/goal 构建报告')
+  await source().onopen()
+  session.publishGoal(null)
+  await emit(snapshot)
+  assert.equal(session.projections.faceOf('goal').getSnapshot(), null)
+})
+
 test('活动轮次显示自己的权限，切换后续权限和重新连接按轮次核对', async t => {
   const source = mockTransport(t)
   const { session } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })

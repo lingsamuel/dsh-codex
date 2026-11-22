@@ -3,6 +3,11 @@ export function userInputText(content) {
   return content.filter(part => part.type === 'text').map(part => part.text).join('')
 }
 
+/** 识别桌面端随目标保存的用户消息。 */
+export function goalCommandObjective(content) {
+  return userInputText(content).trim().match(/^\/goal\s+([\s\S]+)$/u)?.[1]
+}
+
 /** 替换原生输入中的文本，保留独立记录的附件与引用。 */
 export function replaceUserInputText(content, text) {
   if (text === userInputText(content)) return content

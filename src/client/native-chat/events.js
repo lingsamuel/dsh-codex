@@ -4,6 +4,7 @@ import { projectFileLinks } from './file-links.js'
 import { projectVisualizeReferences } from './visualize.js'
 import { subagentActivityEvent, subagentActivityKinds } from './subagent-activity.js'
 import { questionReplies } from '../../shared/question-replies.js'
+import { goalCommandObjective } from '../../shared/user-input.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
 const newestHistoryBoundary = 2 ** 32
@@ -94,19 +95,25 @@ function mergeCancelledToolCalls(items, cancelled) {
   return [...merged, ...recovered.slice(index)]
 }
 
-function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown) {
+function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput) {
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
   }
 
-  const items = mergeCancelledToolCalls(turn.items, cancelled)
+  let items = mergeCancelledToolCalls(turn.items, cancelled)
   const firstTimedItem = items.find(item => item.startedAtMs != null || item.completedAtMs != null)
   const startedAt = milliseconds(turn.startedAt) ?? firstTimedItem?.startedAtMs
     ?? firstTimedItem?.completedAtMs ?? milliseconds(createdAt) ?? 0
   const turnIdentity = { turn: number, codexTurnId: turn.id }
   emit('turn/start', startedAt, turnIdentity)
 
+  if (goalInput && !items.some(item => item.type === 'userMessage' && goalCommandObjective(item.content) === goalInput.objective)) {
+    items = [{
+      type: 'userMessage', id: `codex:goal:${turn.id}`, startedAtMs: goalInput.time ?? startedAt,
+      content: [textBlock(`/goal ${goalInput.objective}`)],
+    }, ...items]
+  }
   let step = 0
   let activity = false
   let hasUserInput = false
@@ -211,12 +218,13 @@ export function projectCodexTurns(turns, {
   attachments,
   cancelledToolCalls,
   turnWorkingDirectories,
+  goalInputs,
   renderMarkdown = renderChatMarkdown,
 } = {}) {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
   const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments,
-    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown))
+    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id]))
   const start = firstSeq ?? beforeSeq - events.length
   return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

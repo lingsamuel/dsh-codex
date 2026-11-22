@@ -34,6 +34,17 @@ function types(entries, type) {
   return entries.map(({ event }) => event).filter(event => event.type === type)
 }
 
+test('目标轮次用原生 DSH 用户气泡显示手动设定的目标', () => {
+  const goalInput = { objective: '核对发布项', time: 99_990 }
+  const entries = projectCodexTurns([
+    turn('auto', [{ id: 'answer', type: 'agentMessage', text: '处理目标。' }]),
+    turn('native', [{ id: 'saved', type: 'userMessage', content: [{ type: 'text', text: '/goal 核对发布项\n' }] }]),
+  ], { goalInputs: { auto: goalInput, native: goalInput } })
+  assert.deepEqual(types(entries, 'user/message').map(({ data, time }) => [data.id, data.content[0].text, time]), [
+    ['codex:goal:auto', '/goal 核对发布项', 99_990], ['saved', '/goal 核对发布项\n', 100_000],
+  ])
+})
+
 test('压缩进行中使用原生生命周期，重开会话可看到完成状态', () => {
   const item = { id: 'compact', type: 'contextCompaction' }
   const running = projectCodexTurns([turn('turn', [item], { status: 'inProgress' })])

@@ -2,8 +2,9 @@ import { Button, IconCloseCircleFillRegular, Tooltip } from '@deepseek-ai/dsh-cl
 
 const stylesheet = `
   button[data-codex-mode-label] { color: var(--dsw-alias-label-secondary); }
-  [data-codex-mode-glyph] { display: inline-grid; place-items: center; }
+  [data-codex-mode-glyph] { display: inline-grid; place-items: center; width: 14px; height: 14px; }
   [data-codex-mode-glyph] > * { grid-area: 1 / 1; }
+  [data-codex-mode-glyph] svg { display: block; }
   [data-codex-mode-exit] { visibility: hidden; }
   button[data-codex-mode-label]:focus-visible:not(:disabled) [data-codex-mode-icon] { visibility: hidden; }
   button[data-codex-mode-label]:focus-visible:not(:disabled) [data-codex-mode-exit] { visibility: visible; }

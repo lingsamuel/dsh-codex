@@ -62,6 +62,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let queueImages = new Map()
   let cancelledToolCalls = new Map()
   let turnWorkingDirectories = {}
+  let goalInputs = {}
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
@@ -71,15 +72,17 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const codexApprovals = createSnapshotStore([])
   const codexMcpRequests = createSnapshotStore([])
   const goalProjection = createSnapshotStore(undefined)
+  const planProjection = createSnapshotStore(confirmedPlan(planModeOf(thread)))
   const permissions = createSnapshotStore({ permission: thread.webPermission })
   let recordedTurnPermission
   let lastSavedPermission
   let receivedSavedPermission = false
   let lastSavedPlanMode
   let planRevisionAtConnect = 0
+  let goalRevisionAtConnect = 0
   const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
-  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection],
+  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection], ['plan', planProjection],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
     ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
   const outlineTargets = new Map()
@@ -170,9 +173,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }
   }
 
+  function confirmedPlan(mode) {
+    return mode === undefined ? undefined : { active: mode === 'plan', pending: false }
+  }
+
   /** 命令回执与旁路通知可能交错。提交后的更新只填补期间没有收到的确认。 */
   function publishPlanMode(mode, expectedRevision = state.getSnapshot().planRevision) {
     if (!mode || expectedRevision !== state.getSnapshot().planRevision) return
+    if (state.getSnapshot().planMode !== mode) planProjection.set(confirmedPlan(mode))
     state.update(current => { current.planMode = mode; current.planRevision++ })
   }
 
@@ -192,7 +200,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, ...options })
+    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, goalInputs, ...options })
   }
 
   async function addOlderPage(page) {
@@ -276,6 +284,19 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (changed) publish()
   }
 
+  function publishGoalInputs(inputs) {
+    if (!inputs) return
+    const before = goalInputs
+    goalInputs = inputs
+    let changed = false
+    for (const { id } of rows) {
+      if (JSON.stringify(before[id]) === JSON.stringify(inputs[id])) continue
+      renderTurn(transcript.getTurn(id))
+      changed = true
+    }
+    if (changed) publish()
+  }
+
   async function loadPage(cursor, lifetime = signal) {
     const page = await readPage('turns', { threadId: thread.id, ...(cursor ? { cursor } : {}) }, lifetime)
     lifetime.throwIfAborted()
@@ -309,7 +330,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
     if (!opened || replace) {
       if (replace) clearHistory()
       await addOlderPage(page)
@@ -350,6 +371,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
     if (planMode && planMode !== state.getSnapshot().planMode) publishPlanMode(planMode)
+    if (goal !== undefined) publishGoal(goal, goalRevisionAtConnect)
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
@@ -442,6 +464,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         contextPressure.set(frame.contextPressure)
         publishCancelledToolCalls(frame.cancelledToolCalls)
         publishTurnDirectories(frame.turnWorkingDirectories)
+        publishGoalInputs(frame.goalInputs)
         if (JSON.stringify(recordedTurnPermission) !== JSON.stringify(frame.turnPermission)) {
           recordedTurnPermission = frame.turnPermission
           publishState()
@@ -501,9 +524,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
         publishCancelledToolCalls([])
+        publishGoalInputs({})
         recordedTurnPermission = undefined
         lastSavedPlanMode = undefined
         planRevisionAtConnect = state.getSnapshot().planRevision
+        goalRevisionAtConnect = state.getSnapshot().goalRevision
       }
       if (mode === 'disconnected') {
         liveQuestions = []
@@ -514,8 +539,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (mode !== 'disconnected' || opened || triedFallback) return
       triedFallback = true
       try {
-        const page = await loadPage(undefined, lifetime)
-        await receiveSnapshot({ page, mode: 'history' }, lifetime)
+        const [page, info] = await Promise.all([
+          loadPage(undefined, lifetime), readPage('thread-info', { threadId: thread.id, view: 'goal' }, lifetime).catch(() => undefined),
+        ])
+        await receiveSnapshot({ page, mode: 'history', goal: info?.goal }, lifetime)
       } finally {
         if (lifetime.aborted) triedFallback = false
       }

@@ -39,6 +39,7 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
   const archived = props.useSession(state => state.archived)
+  const plan = props.useProjection('plan', value => value?.active)
   const goal = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
   useLayoutEffect(() => {
     if (!blocked || disabled || !toggleCommandMenu) return
@@ -70,7 +71,7 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
   const withSkillHint = text => `${text}, ${skillHint}`
   const placeholder = goal && !blocked && !disabled ? composerT('goalPlaceholder')
     : !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
-    ? withSkillHint(props.placeholder) : props.placeholder
+    ? (plan ? t('placeholder.plan') : withSkillHint(props.placeholder)) : props.placeholder
   return <Native {...props} placeholder={placeholder} stop={!blocked && knownTurn ? props.stop : undefined}
     t={(key, ...args) => {
       if (key === 'input.commands' && toggleCommandMenu) return commandsLabel

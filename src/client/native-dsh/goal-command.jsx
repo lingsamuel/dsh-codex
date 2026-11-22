@@ -1,6 +1,6 @@
 import { Button, IconGoalOutlineRegular, IconWarningOutlineRegular, Input, Modal, Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
-import { readPage, writeCommandAction } from '../api.js'
+import { writeCommandAction } from '../api.js'
 import { observe, remoteFailure } from './catalog.js'
 import { CommandModal, commandUnavailable, fieldLayout } from './command-action.jsx'
 import { adaptSlot } from './slot-adapter.js'
@@ -69,21 +69,10 @@ export function GoalReplacement({ useSession, session, t }) {
 
 function GoalProgress({ Native, goalSession, useSession, commandT, ...props }) {
   const session = goalSession
-  const connected = useSession(state => state.live.mode === 'live' || state.live.mode === 'history')
   const archived = useSession(state => state.archived)
   const readonly = useSession(commandUnavailable)
   const goal = useSession(state => state.goal)
   const revision = useSession(state => state.goalRevision)
-
-  useEffect(() => {
-    if (!connected || archived || readonly) return
-    const controller = new AbortController()
-    const { goalRevision } = session.getSnapshot()
-    void readPage('thread-info', { threadId: session.sessionId, view: 'goal' }, controller.signal).then(info => {
-      if (!controller.signal.aborted && !info.goalRequiresUnarchive && info.goalAvailable !== false) session.publishGoal(info.goal, goalRevision)
-    }).catch(() => {})
-    return () => controller.abort()
-  }, [session, connected, archived, readonly])
 
   if (!goal || goal.status === 'complete' || archived || readonly) return null
 

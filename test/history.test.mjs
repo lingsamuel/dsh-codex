@@ -2166,10 +2166,12 @@ test('缓存过期后的完整刷新失败，不会让已显示的旧工作区�
 test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线程', { timeout: 5000 }, async t => {
   const threadId = 'observed'
   const head = { id: 'round', status: 'inProgress', items: [] }
+  const goal = { threadId, status: 'active', objective: '核对当前轮次' }
   const old = { id: 'first', type: 'agentMessage', text: '原有', completedAtMs: 1000 }
   const fresh = { id: 'second', type: 'agentMessage', text: '新增', completedAtMs: 2000 }
   const fixture = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'active', activeFlags: [] }, historyMode: 'paginated' } } }),
+    'thread/goal/get': () => ({ result: { goal } }),
     'config/read': () => ({ result: { config: {} } }),
     'thread/turns/list': ({ itemsView }) => ({
       result: { data: [itemsView === 'full' ? { ...head, items: [old] } : head], backwardsCursor: 'head' },
@@ -2187,6 +2189,7 @@ test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线
   const snapshot = await read()
   assert.equal(snapshot.type, 'snapshot')
   assert.equal(snapshot.mode, 'live')
+  assert.deepEqual(snapshot.goal, goal)
   const waiting = { type: 'active', activeFlags: ['waitingOnUserInput'] }
   fixture.broadcast({ id: 'request', method: 'item/tool/requestUserInput', params: { threadId } })
   fixture.broadcast({ method: 'thread/status/changed', params: { threadId, status: waiting } })
@@ -2196,7 +2199,7 @@ test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线
   const change = await read()
   assert.equal(change.type, 'change')
   assert.deepEqual(change.items.map(item => item.id), ['second'])
-  const allowed = new Set(['initialize', 'initialized', 'thread/read', 'config/read', 'thread/turns/list', 'thread/items/list'])
+  const allowed = new Set(['initialize', 'initialized', 'thread/read', 'thread/goal/get', 'config/read', 'thread/turns/list', 'thread/items/list'])
   assert.equal(fixture.messages.every(message => allowed.has(message.method)), true)
   assert.equal(fixture.messages[0].params.clientInfo.name, 'codex_app_server_daemon')
   await reader.cancel()

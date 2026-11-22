@@ -4,6 +4,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { isDeepStrictEqual } from 'node:util'
 import { permissionOf } from '../shared/permissions.js'
 import { planModeOf } from '../shared/plan-mode.js'
+import { goalCommandObjective } from '../shared/user-input.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
 const userCancelled = /^(?:aborted by user(?: after \d[\d.msµnh ]*)?\.?|Wall time: \d+(?:\.\d+)? seconds\r?\naborted by user)\s*$/i
@@ -43,6 +44,9 @@ export function createRolloutFacts(path, signal, threadId) {
   let permissionSequence = 0
   let publishedCancelledTools = false
   let publishedTurnDirectories = false
+  let publishedGoalInputs = false
+  let recordedGoal
+  let pendingGoalInput
   let previous = '{}'
   let queue = Promise.resolve()
 
@@ -57,7 +61,7 @@ export function createRolloutFacts(path, signal, threadId) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context|custom_tool_call|exec_command|shell_command/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|thread_goal_(?:updated|cleared)|UserMessage|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context|custom_tool_call|exec_command|shell_command/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
@@ -79,12 +83,31 @@ export function createRolloutFacts(path, signal, threadId) {
     if (record.type === 'event_msg') {
       if (value?.type === 'task_started' || value?.type === 'turn_started') {
         if (!value.turn_id || turns.at(-1)?.id !== value.turn_id) turns.push({ id: value.turn_id })
+        if (value.turn_id && value.turn_attribution?.turn_trigger === 'goal' && pendingGoalInput) {
+          currentTurn().goalInput = pendingGoalInput
+          pendingGoalInput = undefined
+        }
         pendingPlans.clear()
         pendingToolCalls.clear()
       } else if (value?.type === 'thread_rolled_back' && Number.isSafeInteger(value.num_turns) && value.num_turns > 0) {
         turns.splice(Math.max(0, turns.length - value.num_turns))
         pendingPlans.clear()
         pendingToolCalls.clear()
+        pendingGoalInput = undefined
+      } else if (value?.type === 'thread_goal_updated' && value.threadId === threadId) {
+        const goal = value.goal
+        const objective = goal?.objective?.trim()
+        if (goal?.status === 'active' && objective && (goal.createdAt !== recordedGoal?.createdAt || objective !== recordedGoal?.objective)) {
+          // Codex 的自动目标轮次没有 UserMessage。只用目标写入和轮次归因恢复输入，用量更新不会生成气泡。
+          const time = Date.parse(record.timestamp)
+          pendingGoalInput = { objective, ...(Number.isFinite(time) && { time }) }
+        }
+        recordedGoal = objective && { objective, createdAt: goal.createdAt }
+      } else if (value?.type === 'thread_goal_cleared' && value.threadId === threadId) {
+        recordedGoal = pendingGoalInput = undefined
+      } else if (pendingGoalInput && value?.type === 'item_completed' && value.item?.type === 'UserMessage') {
+        // 桌面端可能先写目标再写气泡，保留原生消息并避免在后续自动轮次重复显示。
+        if (goalCommandObjective(value.item.content) === pendingGoalInput.objective) pendingGoalInput = undefined
       } else if (value?.type === 'plan_update') {
         const plan = normalizePlan(value)
         if (plan) currentTurn().todos = plan
@@ -148,6 +171,7 @@ export function createRolloutFacts(path, signal, threadId) {
         settingsChanges = 0
         ownedPermission = legacyPermission = undefined
         savedPlanMode = undefined
+        recordedGoal = pendingGoalInput = undefined
         followsOwner = false
         permissionSequence = 0
         turns = []
@@ -175,6 +199,8 @@ export function createRolloutFacts(path, signal, threadId) {
       publishedCancelledTools ||= cancelledToolCalls.length > 0
       const turnWorkingDirectories = Object.fromEntries(turns.filter(({ id, cwd }) => id && cwd).map(({ id, cwd }) => [id, cwd]))
       publishedTurnDirectories ||= Object.keys(turnWorkingDirectories).length > 0
+      const goalInputs = Object.fromEntries(turns.filter(turn => turn.goalInput).map(({ id, goalInput }) => [id, goalInput]))
+      publishedGoalInputs ||= Object.keys(goalInputs).length > 0
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
@@ -186,6 +212,7 @@ export function createRolloutFacts(path, signal, threadId) {
         ...(planMode && { planMode }),
         ...(publishedCancelledTools && { cancelledToolCalls }),
         ...(publishedTurnDirectories && { turnWorkingDirectories }),
+        ...(publishedGoalInputs && { goalInputs }),
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

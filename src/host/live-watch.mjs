@@ -182,7 +182,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             if (!goal && !settings) wake()
           }
 
-          async function sendSnapshot({ thread, readState }, replace = false) {
+          async function sendSnapshot({ thread, readState }, replace = false, goal) {
             confirmedCwd = thread.cwd
             const itemCursor = thread.historyMode === 'paginated' ? await readItemTailCursor(connection.request, threadId) : undefined
             const page = await readThreadTurns(connection.request, {
@@ -192,7 +192,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             tail = createHistoryTail(connection.request, thread, page, fromCursor)
             awaitingPreview = !thread.name && !thread.preview
             send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
-              planMode: readDraftPlanMode?.(threadId),
+              planMode: readDraftPlanMode?.(threadId), goal,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
               mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
             if (fromCursor === itemCursor) checkpoint(itemCursor)
@@ -217,9 +217,10 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 await connection.closed
                 return
               }
-              const [reading, config] = await Promise.all([
+              const [reading, config, goalResult] = await Promise.all([
                 connection.request('thread/read', { threadId }),
                 configRead,
+                connection.request('thread/goal/get', { threadId }).catch(() => undefined),
               ])
               const { thread } = reading
               rolloutFacts = createRolloutFacts(thread.path, signal, threadId)
@@ -228,7 +229,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 sqliteHome: sqliteDirectory(config),
               }, wake, signal)
               mode = watching ? 'live' : 'history'
-              await sendSnapshot(reading)
+              await sendSnapshot(reading, false, goalResult?.goal)
               if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteDirectory(config), send, signal)
               for (const message of early) notify(message)
               early.length = 0

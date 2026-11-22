@@ -5,6 +5,31 @@ import test from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createRolloutFacts } from '../src/host/rollout-facts.mjs'
 
+test('恢复自动目标轮次的输入，并去重桌面端已经记录的目标消息', async t => {
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'goal-facts-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const event = (type, payload) => JSON.stringify({
+    type: 'event_msg', timestamp: '2026-11-22T18:45:12.005Z', payload: { type, ...payload },
+  }) + '\n'
+  const goal = (objective, createdAt) => event('thread_goal_updated', {
+    threadId: 'thread', goal: { objective, createdAt, status: 'active' },
+  })
+  const start = (turn_id, turn_trigger) => event('task_started', { turn_id, turn_attribution: { turn_trigger } })
+  await writeFile(path, goal('CLI 目标', 100) + start('auto', 'goal')
+    + goal('CLI 目标', 100) + start('continuation', 'goal')
+    + start('desktop', 'composer') + goal('桌面目标', 200)
+    + event('item_completed', { turn_id: 'desktop', item: { type: 'UserMessage',
+      content: [{ type: 'text', text: '/goal 桌面目标\n' }] } })
+    + start('desktop-continuation', 'goal'))
+  const facts = createRolloutFacts(path, AbortSignal.timeout(5000), 'thread')
+  assert.deepEqual((await facts.read()).goalInputs, {
+    auto: { objective: 'CLI 目标', time: Date.parse('2026-11-22T18:45:12.005Z') },
+  })
+  await appendFile(path, event('thread_rolled_back', { num_turns: 4 }))
+  assert.deepEqual((await facts.read()).goalInputs, {})
+})
+
 test('计划模式优先使用当前线程的设置检查点，旧轮次和父会话不能覆盖它', async t => {
   await mkdir('.runtime', { recursive: true })
   const dir = await mkdtemp(join(process.cwd(), '.runtime', 'plan-mode-'))
