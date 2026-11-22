@@ -96,13 +96,15 @@ DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `t
 
 当前查看的会话进入待答或待审批状态时，Host 临时加入这个已加载的线程，重放请求并用原始请求 ID 转交回答或决定。网页审批使用 DSH 原生审批卡。Codex 的解析通知关闭面板，CLI 可以处理同一个请求。
 
+实时问答复用 DSH 原生答题卡。只要一组题含有 Codex 标记为 `isSecret` 的题，该组的编辑状态就由面板在内存中保管，保密题的自由输入使用遮罩。面板卸载时丢弃草稿，提交时仍按原请求 ID 将答案交给 Codex。
+
 ### 模型和权限
 
 会话管理复用 DSH 同源连接，转发原生回执更新、改名、置顶和模型设置。模型选择器复用 DSH 原生组件，调用 Codex `model/list` 获取当前 provider 的模型和推理等级，对已加载的线程提交 `thread/settings/update`。未加载会话的模型选择保存在网页会话草稿中，发送或编辑后重发时确认 Codex 已应用设置再提交消息。网页旁路跟随原生设置落盘后读取当前值，历史轮次保持原来的模型信息。
 
 权限选择器由 `permissionProfile/list` 提供目录。当前线程在明确选择后应用预设，并显示 Codex 确认的会话设置或已保存的上一轮设置。网页新建的空白线程保留 `thread/start` 的订阅，直到首轮开始、线程关闭或 Host 停止，以接收 `thread/settings/updated`。Host 重启前创建的草稿或其他客户端创建的空白线程缺少此订阅，只能确认 Codex 接收了更改。通用设置只保存此 Web profile 的新会话默认值，通过 `thread/start` 应用到新线程。
 
-运行中，输入栏按活动轮次 ID 核对 rollout 中的 `turn_context`，显示该轮权限记录。后续轮次的预设仍来自原生会话设置。轮次记录缺失时，界面显示本轮权限未确认。`/permissions` 打开同一个输入栏选择器，沿用原生菜单和确认流程。
+运行中，输入栏的权限菜单旁说明插话沿用本轮权限，所选预设从下一轮生效。提示的悬停说明按活动轮次 ID 核对 rollout 中的 `turn_context`，显示本轮记录或未确认状态。
 
 ### 技能、插件与 MCP
 
@@ -116,7 +118,7 @@ DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `t
 
 ### 命令执行与状态投影
 
-原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review`、`/plan`、`/permissions` 和 `/export`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
+原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review`、`/plan` 和 `/export`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
 
 命令提交复用按线程串行的同源流程。`/compact` 和 `/review` 在原生空闲线程上开启轮次，历史投影复用 DSH 压缩行和 Markdown。冷恢复前读取原生待发队列，发现待发项则交由用户处理。`/plan` 读取 Codex 协作模式目录，显式切换时应用 `thread/settings/update`。当前模式来自原生设置通知和已落盘的检查点。`/goal` 用 `thread/goal/get` 读取，用带用户来源的原生请求创建、暂停、恢复或清除，面板跟随目标通知。写操作回执按线程修订号校验，避免覆盖期间送达的更新。
 
