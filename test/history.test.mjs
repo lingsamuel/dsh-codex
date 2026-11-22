@@ -21,13 +21,13 @@ async function fakeCodex(t, methods) {
     ws.once('connection', client => client.once('close', resolve))
   })
   ws.on('connection', client => {
-    client.on('message', message => {
+    client.on('message', async message => {
       const request = JSON.parse(message.toString())
       messages.push(request)
       if (request.id === undefined) return
       const reply = request.method === 'initialize'
         ? { result: { userAgent: 'test Codex', codexHome: directory } }
-        : methods[request.method]?.(request.params)
+        : await methods[request.method]?.(request.params)
       client.send(JSON.stringify({
         id: request.id,
         ...(reply ?? { error: { code: -32601, message: 'method not found' } }),
@@ -55,14 +55,16 @@ async function fakeCodex(t, methods) {
   }
 }
 
-test('网页会话创建和显式加载沿用原生配置，普通发送只进入队列', async t => {
+test('普通发送按需恢复原生会话，恢复失败时保留消息未入队', async t => {
   const thread = { id: 'native-thread', cwd: '/mock', status: { type: 'notLoaded' } }
   const input = [{ type: 'text', text: '请继续', text_elements: [] }]
   const queuedSubmission = { id: 'queued-id', clientUserMessageId: 'browser-id', input }
+  let canResume = false
   const { socketPath, messages } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread } }),
     'thread/start': () => ({ result: { thread } }),
     'thread/resume': () => {
+      if (!canResume) return { error: { code: -32600, message: 'Provider unavailable' } }
       thread.status = { type: 'idle' }
       return { result: { thread } }
     },
@@ -79,10 +81,12 @@ test('网页会话创建和显式加载沿用原生配置，普通发送只进�
   assert.equal((await post('thread/start', { cwd: thread.cwd })).status, 400)
   assert.deepEqual((await (await post('create', { cwd: thread.cwd, projectId: 'project-id', approvalPolicy: 'never' })).json()).thread,
     { ...thread, blank: true })
-  assert.equal((await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })).status, 409)
-  assert.equal((await post('resume', { threadId: thread.id, path: '/another-rollout' })).status, 200)
-  assert.equal((await post('resume', { threadId: thread.id })).status, 200)
+  const blocked = await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })
+  assert.match((await blocked.json()).error, /Provider unavailable/)
+  assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
+  canResume = true
   assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })).json(), { queuedSubmission })
+  thread.status = { type: 'active' }
   assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id' })).json(), { queuedSubmission })
   assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id', expectedTurnId: 'stale-turn' })).json(), { queuedSubmission })
   assert.equal((await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' })).status, 200)
@@ -90,6 +94,7 @@ test('网页会话创建和显式加载沿用原生配置，普通发送只进�
   assert.deepEqual(messages.filter(({ method }) => /^(thread|turn)\//.test(method) && method !== 'thread/read')
     .map(({ method, params }) => [method, params]), [
     ['thread/start', { cwd: thread.cwd, historyMode: 'paginated', projectId: 'project-id' }],
+    ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
@@ -105,7 +110,10 @@ test('队列编辑保留原生附件，显式插话拒绝后保留待发文本',
   const attachment = { type: 'localImage', path: '/mock/image.png' }
   const text = value => ({ type: 'text', text: value, text_elements: [] })
   const item = { id: 'queued-id', clientUserMessageId: 'browser-id', input: [text('before'), attachment] }
+  let activeTurnId = 'completed-turn'
   const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'active' } } } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: activeTurnId, status: 'inProgress' }] } }),
     'thread/queue/list': ({ cursor }) => ({ result: { data: cursor ? [item] : [], nextCursor: cursor ? null : 'next' } }),
     'thread/queue/update': ({ input }) => {
       item.input = input
@@ -131,14 +139,90 @@ test('队列编辑保留原生附件，显式插话拒绝后保留待发文本',
   assert.equal((await missing.json()).reason, 'queue-item-not-found')
   const refused = await queue('steer', { queuedSubmissionId: item.id, expectedTurnId: 'completed-turn' })
   assert.equal(refused.status, 409)
-  assert.equal((await refused.json()).reason, 'steer-unavailable')
+  assert.equal((await refused.json()).reason, 'turn-unavailable')
   assert.deepEqual(messages.filter(({ method }) => ['thread/queue/add', 'turn/steer'].includes(method))
     .map(({ method, params }) => [method, params]), [
     ['turn/steer', { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId, expectedTurnId: 'completed-turn' }],
     ['thread/queue/add', { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId }],
   ])
+  activeTurnId = 'new-turn'
+  const before = messages.length
+  assert.equal((await queue('steer', { queuedSubmissionId: item.id, expectedTurnId: 'completed-turn' })).status, 409)
+  assert.equal(messages.slice(before).some(({ method }) => method === 'thread/queue/delete'), false)
   assert.deepEqual(await (await queue('start')).json(), { turn: { id: 'resumed-turn' } })
   assert.deepEqual(messages.at(-1).params, { threadId })
+})
+
+test('并发发送共用首次恢复，原生只接收两条各自的消息', async t => {
+  const thread = { id: 'cold', status: { type: 'notLoaded' } }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/resume': async () => {
+      await new Promise(resolve => setTimeout(resolve, 45))
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/queue/add': params => ({ result: { queuedSubmission: params } }),
+  })
+  const send = id => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'prompt', mode: 'queue', threadId: thread.id, clientUserMessageId: id,
+      input: [{ type: 'text', text: id }] }),
+  })
+  const responses = await Promise.all([send('first'), send('second')])
+  assert.deepEqual(responses.map(response => response.status), [200, 200])
+  assert.equal(messages.filter(({ method }) => method === 'thread/resume').length, 1)
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/queue/add').map(({ params }) => params.clientUserMessageId).sort(),
+    ['first', 'second'])
+})
+
+test('继续未加载的队列时识别已被原生领取的目标消息', async t => {
+  const thread = { id: 'cold', status: { type: 'notLoaded' } }
+  const target = { id: 'first', clientUserMessageId: 'first-message' }
+  const later = { id: 'second', clientUserMessageId: 'second-message' }
+  const turn = { id: 'resumed-turn', items: [{ type: 'userMessage', clientId: target.clientUserMessageId }] }
+  let queued = [target, later]
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/queue/list': () => ({ result: { data: queued } }),
+    'thread/resume': () => {
+      queued = [later]
+      thread.status = { type: 'active' }
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => ({ result: { data: [turn] } }),
+  })
+  const response = await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation: 'start', threadId: thread.id }),
+  })
+  assert.deepEqual(await response.json(), { turn })
+  assert.equal(messages.filter(({ method }) => method === 'thread/resume').length, 1)
+  assert.equal(messages.some(({ method }) => method === 'thread/queue/start'), false)
+})
+
+test('恢复后队首正在保存时等待原生回显，不启动后一条消息', async t => {
+  const thread = { id: 'cold', status: { type: 'notLoaded' } }
+  const target = { id: 'first', clientUserMessageId: 'first-message' }
+  const turn = { id: 'resumed-turn', items: [{ type: 'userMessage', clientId: target.clientUserMessageId }] }
+  let reads = 0
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/queue/list': () => ({ result: { data: [target] } }),
+    'thread/resume': () => {
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/queue/start': () => ({ error: { code: -32600, message: 'thread already has an active or pending turn' } }),
+    'thread/turns/list': () => ({ result: { data: ++reads === 1 ? [] : [turn] } }),
+  })
+  const response = await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation: 'start', threadId: thread.id }),
+  })
+  assert.deepEqual(await response.json(), { turn })
+  const starts = messages.filter(({ method }) => method === 'thread/queue/start')
+  assert.deepEqual(starts.map(({ params }) => params.queuedSubmissionId), [target.id])
 })
 
 test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', async t => {
@@ -218,13 +302,22 @@ test('会话生命周期使用原生归档、删除和按轮次分支', async t 
 
 test('回退检查原生线程状态，并以所选轮次为排除边界', async t => {
   const thread = { id: 'source', status: { type: 'active' }, historyMode: 'paginated' }
+  let queued = [{ id: 'queued' }]
+  let headTurnId = 'latest'
   const { get, messages } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: headTurnId }] } }),
+    'thread/queue/list': () => ({ result: { data: queued } }),
+    'thread/resume': () => {
+      thread.status = { type: 'idle' }
+      headTurnId = 'concurrent'
+      return { result: { thread } }
+    },
     'thread/revert': () => ({ result: { thread } }),
   })
   const post = beforeTurnId => get('/api/codex/thread-action', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ threadId: thread.id, action: 'revert', beforeTurnId }),
+    body: JSON.stringify({ threadId: thread.id, action: 'revert', beforeTurnId, headTurnId: 'latest' }),
   })
   assert.equal((await post(undefined)).status, 400)
   const running = await post('earlier')
@@ -233,13 +326,50 @@ test('回退检查原生线程状态，并以所选轮次为排除边界', async
   thread.status.type = 'notLoaded'
   const cold = await post('earlier')
   assert.equal(cold.status, 409)
-  assert.match((await cold.json()).error, /尚未加载/)
-  thread.status.type = 'idle'
+  assert.match((await cold.json()).error, /待发/)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+  queued = []
+  assert.equal((await post('earlier')).status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/revert'), false)
+  headTurnId = 'latest'
   assert.equal((await post('earlier')).status, 200)
   assert.deepEqual(messages.filter(({ method }) => method === 'thread/revert').map(({ params }) => params), [
     { threadId: thread.id, beforeTurnId: 'earlier' },
   ])
+  assert.equal(messages.filter(({ method }) => method === 'thread/resume').length, 1)
+})
+
+test('首次发送等到草稿模型已应用再进入原生队列', async t => {
+  const thread = { id: 'cold', modelProvider: 'original', model: 'previous', status: { type: 'notLoaded' } }
+  let modelReads = 0
+  let updating = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => {
+      if (updating && ++modelReads === 2) Object.assign(thread, { model: 'selected', reasoningEffort: 'high' })
+      return { result: { thread } }
+    },
+    'thread/resume': () => {
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/settings/update': ({ model, effort }) => {
+      assert.equal(model, 'selected')
+      assert.equal(effort, 'high')
+      updating = true
+      return { result: {} }
+    },
+    'thread/queue/add': () => ({ result: { model: thread.model, effort: thread.reasoningEffort } }),
+  })
+  const post = provider => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'prompt', mode: 'queue', threadId: thread.id, clientUserMessageId: 'draft',
+      input: [{ type: 'text', text: 'prompt' }], modelDraft: { provider, model: 'selected', reasoningEffort: 'high' } }),
+  })
+  assert.equal((await post('other')).status, 409)
   assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+  assert.deepEqual(await (await post('original')).json(), { model: 'selected', effort: 'high' })
+  assert.deepEqual(messages.map(({ method }) => method).filter(method => ['thread/resume', 'thread/settings/update', 'thread/queue/add'].includes(method)),
+    ['thread/resume', 'thread/settings/update', 'thread/queue/add'])
 })
 
 test('编辑原生用户消息保留附件，回退后才发送，且只接受轮首消息', async t => {

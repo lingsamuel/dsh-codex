@@ -137,3 +137,21 @@ test('冷会话加载失败时标明失败阶段且不尝试入队', async t => 
   assert.match((await response.json()).error, /加载会话失败.*thread\/resume/)
   assert.equal(frames.some(frame => frame.method === 'thread/queue/add'), false)
 })
+
+test('冷恢复已有消息进入新轮次时拒绝旧问题的异步答复', async t => {
+  let head = turnId
+  const { post, frames } = await fakeCodex(t, {
+    'thread/read': () => ({ thread: { id: threadId, status: { type: 'notLoaded' }, historyMode: 'paginated' } }),
+    'thread/queue/list': () => ({ data: [] }),
+    'thread/items/read': () => ({ data: [{ turnId, item }] }),
+    'thread/items/list': () => ({ data: [] }),
+    'thread/turns/list': () => ({ data: [{ id: head }] }),
+    'thread/resume': () => {
+      head = 'new-turn'
+      return { thread: { id: threadId, status: { type: 'active' } } }
+    },
+    'thread/queue/add': () => ({ queuedSubmission: { id: 'unexpected' } }),
+  })
+  assert.equal((await post([{ index: 0, answer: '测试' }])).status, 409)
+  assert.equal(frames.some(frame => frame.method === 'thread/queue/add'), false)
+})

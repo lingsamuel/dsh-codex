@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, readCodexPages } from './app-server.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
@@ -40,19 +41,43 @@ export async function readModelCatalog(request) {
   }
 }
 
-/** 更新后续轮次的选择。加载由明确的继续会话操作触发。 */
-export async function updateModelSelection(request, { threadId, provider, model, reasoningEffort }) {
-  const { thread } = await request('thread/read', { threadId })
-  if (thread.status?.type === 'notLoaded' || thread.canAcceptDirectInput === false || thread.modelProvider !== provider) {
-    const message = thread.modelProvider !== provider ? '会话的模型提供商已变化。'
-      : '请先继续此 Codex 会话，再选择模型。'
-    throw new CodexRpcError({ code: -32600, message, data: { reason: 'modelSelectionUnavailable' } })
+function unavailable(message) {
+  return new CodexRpcError({ code: -32600, message, data: { reason: 'modelSelectionUnavailable' } })
+}
+
+/** 提交前核对草稿仍属于会话的 provider，避免因为过期的选择恢复会话。 */
+export function validateModelDraft(thread, draft) {
+  if (draft === undefined) return
+  if (!draft || typeof draft.provider !== 'string' || !draft.provider.trim()
+    || typeof draft.model !== 'string' || !draft.model.trim()
+    || (draft.reasoningEffort !== undefined && typeof draft.reasoningEffort !== 'string')) {
+    throw new CodexRpcError({ code: -32602, message: '无效的草稿模型设置。' })
   }
+  if (thread.modelProvider !== draft.provider) throw unavailable('会话的模型提供商已变化。')
+}
+
+/** 已加载会话直接应用设置。随消息提交时，等原生确认后再允许发送。 */
+export async function updateModelSelection(request, { threadId, provider, model, reasoningEffort }, signal) {
+  const { thread } = await request('thread/read', { threadId })
+  validateModelDraft(thread, { provider, model, reasoningEffort })
+  if (thread.status?.type === 'notLoaded' || thread.canAcceptDirectInput === false || thread.archived) {
+    throw unavailable('此会话当前无法保存模型设置。')
+  }
+  const matches = selection => selection?.provider === provider && selection.model === model
+    && (!reasoningEffort || selection.reasoningEffort === reasoningEffort)
+  const previous = modelSelectionOf(thread)
+  if (signal && matches(previous)) return { selection: previous }
+
   await request('thread/settings/update', { threadId, model, ...(reasoningEffort && { effort: reasoningEffort }) })
-  const updated = await request('thread/read', { threadId }).catch(() => null)
-  const selection = updated && modelSelectionOf(updated.thread)
-  // 某些版本先确认排队。只有读回已应用的设置才在响应中带回选择，之后由原生流更新。
-  if (selection?.provider === provider && selection.model === model
-    && (!reasoningEffort || selection.reasoningEffort === reasoningEffort)) return { selection }
-  return {}
+  // 某些版本先确认排队。等待草稿设置生效时，不能用旧设置开始下一轮。
+  const deadline = performance.now() + 2_000
+  do {
+    const updated = await request('thread/read', { threadId }).catch(() => null)
+    const selection = updated && modelSelectionOf(updated.thread)
+    if (matches(selection)) return { selection }
+    if (!signal) return {}
+    if (!updated || updated.thread.status?.type === 'notLoaded') break
+    await delay(50, undefined, { signal })
+  } while (performance.now() < deadline)
+  throw unavailable('Codex 尚未确认草稿的模型设置，消息未提交。')
 }

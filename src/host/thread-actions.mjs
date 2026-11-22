@@ -1,16 +1,26 @@
 import { pinnedSectionId } from '../shared/thread-sections.js'
 import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
-import { updateModelSelection } from './models.mjs'
+import { updateModelSelection, validateModelDraft } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { editedInput, sendAfterRevert } from './thread-edit.mjs'
 import { readThreads } from './catalog.mjs'
+import { createThreadSubmissionQueue, resumeThread } from './thread-runtime.mjs'
+import { readLatestTurn } from './live-history.mjs'
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } })
 }
 
+function historyUnavailable(thread) {
+  if (thread.status?.type === 'active') return '会话仍在运行。请停止当前轮次，或等待它结束。'
+  if (thread.historyMode !== 'paginated' || thread.archived || thread.ephemeral || thread.canAcceptDirectInput === false
+    || !['idle', 'notLoaded'].includes(thread.status?.type)) {
+    return '修改历史需要一个支持分页历史且可直接操作的空闲会话。'
+  }
+}
+
 /** 只开放会话管理动作。浏览器不能指定要转发的 RPC 或改变原生线程控制权。 */
-export function createThreadActionRoute(socketPath, ownerSignal) {
+export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue()) {
   const historyActions = new Set()
   return {
     path: '/api/codex/thread-action',
@@ -21,7 +31,7 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
       if (contentType !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const input = await request.json().catch(() => null)
       const { threadId, action, expectedRevision, name, pinned, provider, model, reasoningEffort,
-        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId } = input ?? {}
+        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId, modelDraft } = input ?? {}
       if (typeof threadId !== 'string' || !threadId.trim()) return json({ error: '缺少 Codex 线程 ID。' }, 400)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       let method
@@ -43,7 +53,7 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
         method = 'thread/fork'
         params = { threadId, excludeTurns: true, deferGoalContinuation: true, ...(lastTurnId && { lastTurnId }) }
       } else if ((action === 'revert' || (action === 'edit' && typeof itemId === 'string' && itemId.trim()
-        && typeof text === 'string' && typeof headTurnId === 'string' && headTurnId.trim()))
+        && typeof text === 'string')) && typeof headTurnId === 'string' && headTurnId.trim()
         && typeof beforeTurnId === 'string' && beforeTurnId.trim()) {
         method = 'thread/revert'
         params = { threadId, beforeTurnId }
@@ -59,31 +69,40 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
       }
       try {
         if (action === 'model') {
-          return json(await withCodexReader(socketPath, signal,
-            request => updateModelSelection(request, { threadId, provider, model, reasoningEffort })))
+          return json(await submit(threadId, () => withCodexReader(socketPath, signal,
+            request => updateModelSelection(request, { threadId, provider, model, reasoningEffort }))))
         }
         if (modifiesHistory || (action === 'archive' && stopActivity !== true)) {
-          return await withCodexReader(socketPath, signal, async request => {
+          const run = () => withCodexReader(socketPath, signal, async request => {
             const replacement = action === 'edit' && await editedInput(request, threadId, beforeTurnId, itemId, text)
-            if (replacement) {
-              // 像原生 CLI 编辑一样，按打开编辑框时的历史头检查并发写入。
-              const { data } = await request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'notLoaded' })
-              if (data[0]?.id !== headTurnId) return json({ error: '打开编辑器后会话历史已有变化。请复制草稿并重新打开编辑。' }, 409)
-            }
             const { thread } = await request('thread/read', { threadId })
             if (action === 'archive') {
               const activity = await archiveActivity(request, thread)
               if (activity.length) return json({ reason: 'archiveActive', activity, error: '会话仍有运行中的操作。' }, 409)
+              return json(await request(method, params))
             }
-            // 回退会替换运行时。先查当前状态，避免在浏览时自动恢复线程或中断已开始的 CLI 轮次。
-            if (modifiesHistory) {
-              const status = thread.status?.type
-              if (status === 'notLoaded') return json({ error: 'Codex 尚未加载此会话。请先从输入框继续。' }, 409)
-              if (status === 'active') return json({ error: '会话仍在运行。请在 Codex CLI 中停止当前轮次，或等待它结束。' }, 409)
-              if (status !== 'idle' || thread.historyMode !== 'paginated' || thread.archived
-                || thread.ephemeral || thread.canAcceptDirectInput === false) {
-                return json({ error: '修改历史需要一个支持分页历史且可直接操作的空闲会话。' }, 409)
+
+            const unavailable = historyUnavailable(thread)
+            if (unavailable) return json({ error: unavailable }, 409)
+            const stale = async () => (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== headTurnId
+            const historyChanged = () => json({ error: '会话历史已有变化。请核对记录后重新发起操作。' }, 409)
+            if (await stale()) return historyChanged()
+            if (replacement) validateModelDraft(thread, modelDraft)
+
+            const cold = thread.status.type === 'notLoaded'
+            if (cold) {
+              // 冷恢复可能自行领取待发项。先确认队列为空，再尝试修改历史。
+              const { data } = await request('thread/queue/list', { threadId, limit: 1 })
+              if (data.length) return json({ error: '请先处理待发消息，再修改对话记录。' }, 409)
+              await resumeThread(request, thread)
+            }
+            if (replacement && modelDraft) await updateModelSelection(request, { ...modelDraft, threadId }, signal)
+            if (cold || (replacement && modelDraft)) {
+              const { thread: current } = await request('thread/read', { threadId })
+              if (current.status?.type !== 'idle' || historyUnavailable(current)) {
+                return json({ error: historyUnavailable(current) ?? '会话状态已变化，请重试。' }, 409)
               }
+              if (await stale()) return historyChanged()
             }
             if (!replacement) return json(await request(method, params))
             try {
@@ -93,10 +112,11 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
               if (error instanceof CodexRpcError && [-32602, -32601, -32600].includes(error.code)) throw error
               return json({ error: '无法确认回退是否完成。请先核对当前会话。' }, 409)
             }
-            const sent = await sendAfterRevert(request, threadId, replacement)
+            const sent = await sendAfterRevert(request, threadId, replacement, signal)
             if (sent.error) return json({ error: sent.error }, 409)
             return json(sent)
           })
+          return await (modifiesHistory ? submit(threadId, run) : run())
         }
         const result = await readCodex(method, params, socketPath, signal)
         if (action === 'fork' || action === 'unarchive') {

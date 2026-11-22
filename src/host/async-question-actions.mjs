@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
-import { addressableThread, readConversationQueue } from './conversation-actions.mjs'
-import { readThreadTurns } from './live-history.mjs'
+import { readConversationQueue } from './conversation-actions.mjs'
+import { readLatestTurn } from './live-history.mjs'
+import { addressableThread, createThreadSubmissionQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
 import { answeredAsyncQuestions, asyncQuestionItemId, encodeQuestionReplies } from '../shared/question-replies.js'
 
 function json(value, status = 200) {
@@ -19,11 +20,6 @@ function userInputs(items) {
   return items.filter(item => item.type === 'userMessage').map(item => item.content)
 }
 
-async function readLatestTurn(request, threadId, itemsView) {
-  const { data } = await readThreadTurns(request, { threadId, limit: 1, sortDirection: 'desc', itemsView })
-  return data[0]
-}
-
 function staleQuestion() {
   return json({ error: '会话已进入新轮次，原问题不再等待回答。' }, 409)
 }
@@ -36,7 +32,7 @@ async function readFollowingAnswers(request, threadId, turnId, itemId) {
   }, { type: 'item', itemId })
 }
 
-async function submit(request, threadId, turnId, itemId, answers) {
+async function submit(request, threadId, turnId, itemId, answers, signal) {
   const thread = await addressableThread(request, threadId)
   // 优先读队列，再读历史，覆盖原生正在领取待发消息的情况。
   const queued = await readConversationQueue(request, threadId)
@@ -66,22 +62,24 @@ async function submit(request, threadId, turnId, itemId, answers) {
   if (!legacy && (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
   if (thread.status?.type === 'notLoaded') {
     try {
-      await request('thread/resume', { threadId, excludeTurns: true })
+      await resumeThread(request, thread)
     } catch (error) {
       if (error instanceof CodexRpcError) return json({ error: `加载会话失败，答复尚未入队。${error.message}` }, 409)
       return json({ error: '未收到加载会话的确认，答复尚未入队。' }, 503)
     }
+    if ((await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
   }
 
   const identity = JSON.stringify([threadId, ...replies.map(reply => reply.questionItemId)])
   const clientUserMessageId = `dsh-codex-question-${createHash('sha256').update(identity).digest('hex')}`
   await request('thread/queue/add', { threadId, clientUserMessageId,
     input: [{ type: 'text', text: encodeQuestionReplies(replies), text_elements: [] }] })
+  if (thread.status?.type === 'notLoaded') await waitForThreadActivity(request, threadId, signal)
   return json({ submitted: true })
 }
 
 /** 从已保存的原生问题构建答复。网页并发只限制同一条提问的提交。 */
-export function createAsyncQuestionActionRoute(socketPath, ownerSignal) {
+export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitThread = createThreadSubmissionQueue()) {
   const submitting = new Set()
   return {
     path: '/api/codex/async-question-answer',
@@ -97,7 +95,7 @@ export function createAsyncQuestionActionRoute(socketPath, ownerSignal) {
       submitting.add(key)
       try {
         const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
-        return await withCodexReader(socketPath, signal, rpc => submit(rpc, threadId, turnId, itemId, answers))
+        return await submitThread(threadId, () => withCodexReader(socketPath, signal, rpc => submit(rpc, threadId, turnId, itemId, answers, signal)))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

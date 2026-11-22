@@ -9,14 +9,12 @@ const overlay = 'shell.overlay'
 const labels = {
   zh: {
     revert: '删除本轮及后续对话', unavailable: '当前会话暂不可修改历史。请在 Codex CLI 中检查会话状态。',
-    unloaded: 'Codex 尚未加载此会话。请先使用输入框上的「点击继续会话」。',
     running: '会话仍在运行。请在 Codex CLI 中停止当前轮次，或等待它结束。',
     description: '将删除本轮的提问、回复和工具记录，以及之后的所有轮次。此操作无法撤销。工作区文件和已执行操作的影响会保留。',
     confirm: '确认删除', cancel: '取消', close: '关闭', pending: '正在删除对话记录…',
   },
   en: {
     revert: 'Delete this turn and later history', unavailable: 'This session’s history is unavailable for editing. Check its status in Codex CLI.',
-    unloaded: 'Codex has not loaded this session. Use Click to resume on the composer first.',
     running: 'This session is running. Stop the current turn in Codex CLI or wait for it to finish.',
     description: 'This turn’s prompt, reply, and tool records will be deleted along with all later turns. This cannot be undone. Workspace files and the effects of completed actions will be kept.',
     confirm: 'Delete conversation history', cancel: 'Cancel', close: 'Close', pending: 'Deleting conversation history…',
@@ -31,9 +29,8 @@ function matchNativeActionStyle(button) {
 function TurnRevert({ messageId, useSession, requestRevert, t }) {
   const paginated = useSession(state => state.historyMode === 'paginated' && !state.archived && !state.subagent)
   const unavailable = useSession(({ live, canAcceptDirectInput }) => {
-    if (live.status?.type === 'notLoaded') return 'unloaded'
     if (live.status?.type === 'active') return 'running'
-    return live.status?.type === 'idle' && canAcceptDirectInput !== false ? null : 'unavailable'
+    return ['idle', 'notLoaded'].includes(live.status?.type) && canAcceptDirectInput !== false ? null : 'unavailable'
   })
   if (!paginated) return null
   return <Tooltip label={t(unavailable ?? 'revert')} side="bottom" openOnClick={Boolean(unavailable)}>
@@ -88,8 +85,10 @@ export function installTurnRevert(ctx) {
       name: actions, id: 'codex-turn-revert', locale,
       inject: threadId => ({
         requestRevert(messageId) {
-          const beforeTurnId = scope.sessions.binding(threadId)?.session.finishedTurnOfReply(messageId)
-          if (beforeTurnId) request.set({ threadId, beforeTurnId })
+          const session = scope.sessions.binding(threadId)?.session
+          const beforeTurnId = session?.finishedTurnOfReply(messageId)
+          const headTurnId = session?.latestTurnId()
+          if (beforeTurnId && headTurnId) request.set({ threadId, beforeTurnId, headTurnId })
         },
       }),
     }, TurnRevert))

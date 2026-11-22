@@ -12,8 +12,8 @@ function failure(error) {
 }
 
 /** DSH 决定发送模式和草稿恢复，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, acceptThread) {
-  const { session, events, queueStore, updateState, applyThread, activeTurnId } = history
+export function createSessionInput(ctx, threadId, history, modelDraft) {
+  const { session, events, queueStore, updateState, activeTurnId } = history
   const submissions = new Map()
 
   function retire(requestId, settlement) {
@@ -74,7 +74,8 @@ export function createSessionInput(ctx, threadId, history, acceptThread) {
       const placement = running && mode === 'steer' ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { onRetire, expectedTurnId: mode === 'steer' ? activeTurnId() : undefined })
+      submissions.set(requestId, { onRetire, expectedTurnId: mode === 'steer' ? activeTurnId() : undefined,
+        model: modelDraft.getSnapshot() })
       updateState(state => {
         state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
         state.promptAttempted = true
@@ -84,6 +85,7 @@ export function createSessionInput(ctx, threadId, history, acceptThread) {
     async prompt(content, mode, signal, requestId = crypto.randomUUID()) {
       const submission = submissions.get(requestId)
       const expectedTurnId = submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
+      const selection = submission ? submission.model : modelDraft.getSnapshot()
       updateState(state => {
         state.promptError = null
         state.lastAgentError = null
@@ -92,11 +94,13 @@ export function createSessionInput(ctx, threadId, history, acceptThread) {
       try {
         if (content.some(part => part.type !== 'text')) throw new Error('当前仅支持发送文本消息。')
         const input = content.map(({ text }) => ({ type: 'text', text, text_elements: [] }))
-        await native('prompt', { input, mode, clientUserMessageId: requestId, expectedTurnId }, signal)
+        await native('prompt', { input, mode, clientUserMessageId: requestId, expectedTurnId, modelDraft: selection }, signal)
+        modelDraft.clear(selection)
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。
         if (submissionObserved(requestId)) {
+          modelDraft.clear(selection)
           retire(requestId, observedSubmission)
           return accepted
         }
@@ -120,16 +124,6 @@ export function createSessionInput(ctx, threadId, history, acceptThread) {
     },
     startQueue() {
       return control('queue', { operation: 'start' }, 'send')
-    },
-    async resume() {
-      try {
-        const { thread, workspacePaths } = await native('resume')
-        acceptThread(thread, workspacePaths)
-        applyThread(thread)
-        return accepted
-      } catch (error) {
-        return failure(error)
-      }
     },
   }
 }

@@ -17,7 +17,7 @@ function replaceMethod(object, name, method) {
 function canChangeModel({ archived, live, subagent, canAcceptDirectInput }) {
   return !archived && !subagent && canAcceptDirectInput !== false
     && live.mode !== 'connecting' && live.mode !== 'disconnected'
-    && (live.status?.type === 'idle' || live.status?.type === 'active')
+    && ['notLoaded', 'idle', 'active'].includes(live.status?.type)
 }
 
 function filterDirectory(directory, session) {
@@ -28,16 +28,18 @@ function filterDirectory(directory, session) {
     subscribe(listener) {
       const fromDirectory = directory.subscribe(listener)
       const fromSession = session.subscribe(listener)
-      return () => { fromDirectory(); fromSession() }
+      const fromDraft = session.modelDraft.subscribe(listener)
+      const fromModel = session.projections.faceOf('modelSelection').subscribe(listener)
+      return () => { fromDirectory(); fromSession(); fromDraft(); fromModel() }
     },
     getSnapshot() {
       const catalog = directory.getSnapshot()
       const editable = canChangeModel(session.getSnapshot())
       const saved = session.projections.faceOf('modelSelection').getSnapshot()?.next
-      const current = saved ?? (editable ? catalog.current : null)
+      const current = (editable ? session.modelDraft.getSnapshot() : undefined) ?? saved ?? (editable ? catalog.current : null)
       const provider = current?.provider
       const nextScope = `${provider}:${editable}`
-      if (catalog !== source || nextScope !== scope) {
+      if (catalog !== source || nextScope !== scope || current !== visible?.current) {
         source = catalog
         scope = nextScope
         let groups = catalog.groups.filter(group => group.id === provider)
@@ -70,12 +72,19 @@ export function installModelPicker(ctx, signal) {
       const selectModel = replaceMethod(remote, 'selectModel', async ({ sessionId, provider, model, reasoningEffort }) => {
         const session = scope.sessions.binding(sessionId)?.session
         if (!session || !canChangeModel(session.getSnapshot())) {
-          return { ok: false, error: remoteFailure('请先继续此 Codex 会话，再选择模型。') }
+          return { ok: false, error: remoteFailure('此会话当前无法选择模型。') }
         }
+        if (session.getSnapshot().live.status.type === 'notLoaded') {
+          const selected = { provider, model, reasoningEffort }
+          session.modelDraft.set(selected)
+          return { ok: true, value: { selected } }
+        }
+        const draft = session.modelDraft.getSnapshot()
         try {
           const projection = session.projections.faceOf('modelSelection')
           const before = projection.getSnapshot()
           const { selection } = await writeThreadAction({ action: 'model', threadId: sessionId, provider, model, reasoningEffort }, signal)
+          session.modelDraft.clear(draft)
           if (selection && scope.sessions.binding(sessionId)?.session === session && projection.getSnapshot() === before) {
             session.publishModel(selection)
           }

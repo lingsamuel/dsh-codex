@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText } from '../shared/user-input.js'
 import { readProjects } from './catalog.mjs'
-import { hasNoMaterializedHistory } from './live-history.mjs'
+import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
+import { updateModelSelection, validateModelDraft } from './models.mjs'
+import { addressableThread, createThreadSubmissionQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -36,18 +39,9 @@ export function readConversationQueue(request, threadId) {
   }))
 }
 
-/** 检查线程是否允许网页输入并返回原生状态，保留调用方的加载决策。 */
-export async function addressableThread(request, threadId) {
-  const { thread } = await request('thread/read', { threadId })
-  if (thread.archived || thread.ephemeral || thread.canAcceptDirectInput === false) {
-    throw conflict('thread-unavailable', '此会话无法从网页直接操作。')
-  }
-  return thread
-}
-
-async function loadedThread(request, threadId) {
+async function requireActiveThread(request, threadId) {
   const thread = await addressableThread(request, threadId)
-  if (thread.status?.type === 'notLoaded') throw conflict('not-loaded', '请先加载 Codex 会话。')
+  if (thread.status?.type !== 'active') throw conflict('turn-unavailable', '原轮次已结束或不再运行。')
 }
 
 async function workspaceThread(thread) {
@@ -115,15 +109,49 @@ async function deleteQueued(request, params) {
   return result
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }) {
-  if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
-  if (operation === 'start') {
-    return request('thread/queue/start', {
-      threadId, ...(queuedSubmissionId !== undefined && {
-        queuedSubmissionId: required(queuedSubmissionId, '缺少待发消息 ID。'),
-      }),
-    })
+async function startQueued(request, threadId, queuedSubmissionId, signal) {
+  if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
+  const thread = await addressableThread(request, threadId)
+  if (thread.status?.type !== 'notLoaded') return request('thread/queue/start', { threadId, queuedSubmissionId })
+
+  const queue = await readConversationQueue(request, threadId)
+  const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
+  if (!target) throw missingQueueItem()
+  const resumed = await resumeThread(request, thread)
+  async function claimedTurn() {
+    const turn = await readLatestTurn(request, threadId, 'full')
+    if (turn?.items?.some(item => item.type === 'userMessage' && item.clientId === target.clientUserMessageId)) {
+      if (turn.status === 'inProgress') await waitForThreadActivity(request, threadId, signal)
+      return { turn }
+    }
   }
+
+  // 冷恢复可能已领取队首。始终保留原目标，避免再启动后面的消息。
+  if (resumed.status?.type === 'active') {
+    const claimed = await claimedTurn()
+    if (claimed) return claimed
+  }
+  try {
+    const result = await request('thread/queue/start', { threadId, queuedSubmissionId: target.id })
+    await waitForThreadActivity(request, threadId, signal)
+    return result
+  } catch (error) {
+    if (!(error instanceof CodexRpcError) || error.code !== -32600
+      || !/active or pending turn|queued .*not found/.test(error.message)) throw error
+    const deadline = performance.now() + 750
+    do {
+      const claimed = await claimedTurn()
+      if (claimed) return claimed
+      await delay(50, undefined, { signal })
+    } while (performance.now() < deadline)
+    if ((await readConversationQueue(request, threadId)).some(item => item.id === target.id)) throw error
+    throw conflict('queue-start-unknown', '待发消息已离开队列，暂无法确认是否开始。请检查会话。')
+  }
+}
+
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }, signal) {
+  if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
+  if (operation === 'start') return startQueued(request, threadId, queuedSubmissionId, signal)
   if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
@@ -144,6 +172,11 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     }
   }
 
+  await requireActiveThread(request, threadId)
+  const current = await readLatestTurn(request, threadId, 'notLoaded')
+  if (current?.id !== expectedTurnId || current.status !== 'inProgress') {
+    throw conflict('turn-unavailable', '原插话轮次已结束或发生变化。')
+  }
   // 先原子取走待发项，以免轮次结束时同一条消息又被 Codex 自动领取。
   await deleteQueued(request, target)
   const input = { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId }
@@ -157,12 +190,13 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     } catch {
       throw conflict('queue-steer-not-restored', '插话失败，无法自动恢复待发消息。')
     }
+    if (error.data?.reason === 'steer-unavailable') throw conflict('turn-unavailable', '原插话轮次已结束或发生变化。')
     throw error
   }
 }
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
-export function createConversationActionRoute(socketPath, ownerSignal) {
+export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue()) {
   const creatingProjects = new Map()
   return {
     path: '/api/codex/conversation-action',
@@ -173,7 +207,7 @@ export function createConversationActionRoute(socketPath, ownerSignal) {
       if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const fields = await request.json().catch(() => null)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
-      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId } = fields ?? {}
+      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId, modelDraft } = fields ?? {}
       try {
         if (action === 'project') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
@@ -194,15 +228,18 @@ export function createConversationActionRoute(socketPath, ownerSignal) {
             return workspaceThread({ ...thread, blank: true })
           }))
         }
-        if (!['resume', 'prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')
+        if (!['prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')
         required(threadId, '缺少 Codex 线程 ID。')
         if (action === 'prompt') {
           if (mode !== 'queue' && mode !== 'steer') throw badRequest('无效的发送方式。')
           const params = { threadId, input: promptInput(input), clientUserMessageId: required(clientUserMessageId, '缺少消息 ID。') }
           if (mode === 'steer' && expectedTurnId !== undefined) required(expectedTurnId, '当前轮次 ID 无效。')
-          return json(await withCodexReader(socketPath, signal, async rpc => {
-            await loadedThread(rpc, threadId)
-            if (mode === 'steer' && expectedTurnId) {
+          return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
+            const thread = await addressableThread(rpc, threadId)
+            validateModelDraft(thread, modelDraft)
+            await resumeThread(rpc, thread)
+            if (modelDraft) await updateModelSelection(rpc, { ...modelDraft, threadId }, signal)
+            if (thread.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
                 return await steer(rpc, { ...params, expectedTurnId })
               } catch (error) {
@@ -210,23 +247,20 @@ export function createConversationActionRoute(socketPath, ownerSignal) {
               }
             }
             // turn/start 也能向活动轮次插话。原生队列能处理竞争，并在空闲时自行启动。
-            return rpc('thread/queue/add', params)
-          }))
+            const result = await rpc('thread/queue/add', params)
+            if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, threadId, signal)
+            return result
+          })))
         }
         if (action === 'cancel') {
           required(turnId, '缺少当前轮次 ID。')
           return json(await withCodexReader(socketPath, signal, async rpc => {
-            await loadedThread(rpc, threadId)
+            await requireActiveThread(rpc, threadId)
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        return json(await withCodexReader(socketPath, signal, async rpc => {
-          if (action === 'queue') return queueAction(rpc, threadId, fields)
-          let thread = await addressableThread(rpc, threadId)
-          // 已加载的线程继续由现有的客户端持有，避免重复恢复覆盖运行时标识。
-          if (thread.status?.type === 'notLoaded') ({ thread } = await rpc('thread/resume', { threadId, excludeTurns: true }))
-          return workspaceThread(thread)
-        }))
+        const run = () => withCodexReader(socketPath, signal, rpc => queueAction(rpc, threadId, fields, signal))
+        return json(await (fields.operation === 'start' || fields.operation === 'steer' ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

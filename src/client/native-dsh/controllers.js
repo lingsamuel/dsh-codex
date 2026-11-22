@@ -12,8 +12,19 @@ async function rejectWrite() {
   throw new Error(unsupported)
 }
 
-function codexBinding(ctx, thread, catalog) {
+function codexBinding(ctx, thread, catalog, modelDrafts) {
   const history = createCodexHistory(ctx, thread, catalog)
+  const modelDraft = observe(modelDrafts, drafts => drafts.get(thread.id))
+  function setDraft(selection) {
+    const drafts = new Map(modelDrafts.getSnapshot())
+    if (selection) drafts.set(thread.id, selection)
+    else drafts.delete(thread.id)
+    modelDrafts.set(drafts)
+  }
+  // 切换会话会释放历史绑定，草稿模型应和输入草稿一样仍可在返回时使用。
+  const draft = { ...modelDraft, set: setDraft, clear(selection) {
+    if (selection && modelDraft.getSnapshot() === selection) setDraft(undefined)
+  } }
   return {
     ctx,
     sessionId: thread.id,
@@ -21,7 +32,8 @@ function codexBinding(ctx, thread, catalog) {
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, catalog.acceptThread),
+      ...createSessionInput(ctx, thread.id, history, draft),
+      modelDraft: draft,
       sessionId: thread.id,
       async rename(title) {
         try {
@@ -42,6 +54,7 @@ export function provideCodexControllers(ctx, catalog) {
   let initialization = 'waiting'
   const bindings = new Map()
   const retention = new Map()
+  const modelDrafts = createSnapshotStore(new Map())
   const scopeId = Symbol('Codex session')
 
   function syncSessions() {
@@ -81,7 +94,7 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog), fiber }
+        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }

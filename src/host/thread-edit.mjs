@@ -1,6 +1,7 @@
 import { CodexRpcError, readCodexPages } from './app-server.mjs'
 import { replaceUserInputText } from '../shared/user-input.js'
 import { questionReplies } from '../shared/question-replies.js'
+import { waitForThreadActivity } from './thread-runtime.mjs'
 
 /** 从原生记录提取该轮首条用户输入。只替换文本，附件与引用继续使用 Codex 原对象。 */
 export async function editedInput(request, threadId, turnId, itemId, text) {
@@ -22,11 +23,13 @@ export async function editedInput(request, threadId, turnId, itemId, text) {
 }
 
 /** 回退已提交时单独报告发送结果，避免让界面重新执行破坏性的回退。 */
-export async function sendAfterRevert(request, threadId, input) {
+export async function sendAfterRevert(request, threadId, input, signal) {
   try {
     const { thread } = await request('thread/read', { threadId })
     if (thread.status?.type !== 'idle') return { error: '历史已回退。会话状态已变化，请复制修改后的消息并在 CLI 中发送。' }
-    return await request('turn/start', { threadId, input })
+    const sent = await request('turn/start', { threadId, input })
+    await waitForThreadActivity(request, threadId, signal)
+    return sent
   } catch (error) {
     return { error: error instanceof CodexRpcError
       ? `历史已回退，重新发送失败。${error.message}`

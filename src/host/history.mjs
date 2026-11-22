@@ -9,6 +9,7 @@ import { createQuestionBridge } from './question-bridge.mjs'
 import { createAsyncQuestionActionRoute } from './async-question-actions.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
+import { createThreadSubmissionQueue } from './thread-runtime.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -32,6 +33,7 @@ function requiredParam(query, key, message) {
 export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
+  const submit = createThreadSubmissionQueue()
   const route = (path, read) => ({
     path: `/api/codex/${path}`,
     methods: ['GET'],
@@ -50,10 +52,10 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
-    createThreadActionRoute(socketPath, ownerSignal),
-    createConversationActionRoute(socketPath, ownerSignal),
+    createThreadActionRoute(socketPath, ownerSignal, submit),
+    createConversationActionRoute(socketPath, ownerSignal, submit),
     questions.route,
-    createAsyncQuestionActionRoute(socketPath, ownerSignal),
+    createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
     createWatchRoute(socketPath, ownerSignal, questions),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),

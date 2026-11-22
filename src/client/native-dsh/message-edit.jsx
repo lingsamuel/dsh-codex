@@ -26,7 +26,7 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   const { archived, canAcceptDirectInput, historyMode, live, subagent } = useSyncExternalStore(session.subscribe, session.getSnapshot)
   const source = !archived && !subagent && historyMode === 'paginated'
     ? session.editableInput(node.location.turn?.turn, node.data.seq) : undefined
-  const idle = live.status?.type === 'idle' && canAcceptDirectInput !== false
+  const editable = ['idle', 'notLoaded'].includes(live.status?.type) && canAcceptDirectInput !== false
   const anchor = useRef(null)
   const headAtEdit = useRef(null)
   const [chrome, setChrome] = useState(null)
@@ -53,13 +53,15 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
     if (!saving) setDraft(null)
   }
 
-  const canSend = source && idle && !saving && (draft?.trim() || source.hasAttachments)
+  const canSend = source && editable && !saving && (draft?.trim() || source.hasAttachments)
   async function send() {
     if (!canSend) return
     const { beforeTurnId, itemId } = source
+    const modelDraft = session.modelDraft.getSnapshot()
     setSaving(true)
     try {
-      await writeThreadAction({ threadId, action: 'edit', beforeTurnId, itemId, text: draft, headTurnId: headAtEdit.current })
+      await writeThreadAction({ threadId, action: 'edit', beforeTurnId, itemId, text: draft, headTurnId: headAtEdit.current, modelDraft })
+      session.modelDraft.clear(modelDraft)
       setDraft(null)
     } catch (failure) {
       // 回退后原消息可能已移出视图。把草稿交给页面弹窗，供复制或核对发送结果。
@@ -93,7 +95,7 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
     <Native {...props} renderFactorySlot={renderContent} />
     {chrome && source && !editing && createPortal(
       <Tooltip label={t('edit')} side="bottom">
-        <button type="button" className={chrome.querySelector('button')?.className} aria-label={t('edit')} disabled={!idle}
+        <button type="button" className={chrome.querySelector('button')?.className} aria-label={t('edit')} disabled={!editable}
           onClick={() => { headAtEdit.current = source.headTurnId; setDraft(source.text) }}><IconEditOutlineRegular /></button>
       </Tooltip>, chrome)}
   </>

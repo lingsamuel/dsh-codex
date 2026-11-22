@@ -5,11 +5,10 @@ const bar = 'conversation.composer.bar'
 const dock = 'conversation.composer.dock'
 const locale = 'codex.composer'
 const copy = {
-  zh: { readonly: '此会话无法直接发送消息', archived: '请先取消归档', notLoaded: '请先继续此会话',
+  zh: { readonly: '此会话无法直接发送消息', archived: '请先取消归档',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
     select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列' },
   en: { readonly: 'Direct messages are unavailable for this session', archived: 'Unarchive the session to send messages',
-    notLoaded: 'Resume this session to send messages',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
     select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue' },
 }
@@ -24,7 +23,7 @@ function CatalogStatus({ catalog, t }) {
 
 function ComposerBar({ Native, commandsLabel, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
-  const knownTurn = props.useSession(state => Boolean(state.live.activeTurnId))
+  const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
   useLayoutEffect(() => {
     if (!blocked || disabled || !toggleCommandMenu) return
     const card = keyboard.editor.getRootElement()?.closest('[data-composer-card]')
@@ -58,7 +57,7 @@ function ComposerBar({ Native, commandsLabel, ...props }) {
 
 function ContinueQueue({ useSession, useProjection, startQueue, t }) {
   const ready = useSession(state => state.openState === 'open' && !state.archived && !state.subagent
-    && state.canAcceptDirectInput !== false && state.live.status?.type === 'idle')
+    && state.canAcceptDirectInput !== false && ['idle', 'notLoaded'].includes(state.live.status?.type))
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
   const [starting, setStarting] = useState(false)
   if (!ready || !queued) return null
@@ -87,10 +86,9 @@ export function installComposer(ctx, catalog) {
           binding.ctx.effect(() => {
             const { sessionId, session } = binding
             const sync = () => {
-              const { archived, subagent, canAcceptDirectInput, openState, live } = session.getSnapshot()
+              const { archived, subagent, canAcceptDirectInput, openState } = session.getSnapshot()
               const reason = archived ? 'archived' : subagent || canAcceptDirectInput === false ? 'readonly'
-                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable'
-                  : live.status?.type === 'notLoaded' ? 'notLoaded' : undefined
+                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : undefined
               blocks.set(sessionId, reason ? { reason: t(reason) } : undefined)
             }
             sync()

@@ -443,6 +443,10 @@ export function createCodexHistory(ctx, thread, catalog) {
       event.type === 'assistant/message' && event.data.message.id === messageId))?.id
   }
 
+  function latestTurnId() {
+    return rows.at(-1)?.id
+  }
+
   function editableInput(turn, sequence) {
     const row = rowAtTurn(turn)
     const source = transcript.getTurn(row?.id)
@@ -451,7 +455,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     const message = source.items.find(item => item.type === 'userMessage')
     // 问答可在轮首投影为问答卡，后续第一个可见的普通气泡仍然属于插话。
     if (!message || input?.seq !== sequence || input?.data.id !== message.id) return
-    return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: rows.at(-1).id,
+    return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: latestTurnId(),
       hasAttachments: message.content.some(part => part.type !== 'text') }
   }
 
@@ -459,8 +463,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   return {
     events,
     ready,
-    activeTurnId: () => state.getSnapshot().live.activeTurnId,
-    applyThread,
+    activeTurnId: () => state.getSnapshot().running ? state.getSnapshot().live.activeTurnId : undefined,
     queueStore,
     updateState: edit => state.update(edit),
     session: {
@@ -471,6 +474,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       findMessage,
       turnAtEnd,
       finishedTurnOfReply,
+      latestTurnId,
       editableInput,
       publishModel,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },

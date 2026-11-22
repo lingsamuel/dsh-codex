@@ -20,6 +20,12 @@ export async function readThreadTurns(request, params) {
   }
 }
 
+/** 查询原生历史头，用同一分页入口读取旧版与分页会话。 */
+export async function readLatestTurn(request, threadId, itemsView) {
+  const { data } = await readThreadTurns(request, { threadId, limit: 1, sortDirection: 'desc', itemsView })
+  return data[0]
+}
+
 function same(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
 }
