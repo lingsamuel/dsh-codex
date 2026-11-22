@@ -1,5 +1,6 @@
 import { writeConversationAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
+import { userInputText } from '../../shared/user-input.js'
 
 const accepted = { ok: true, value: { accepted: true } }
 const failedSubmission = { reason: 'failed' }
@@ -20,20 +21,28 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
     const submission = submissions.get(requestId)
     if (!submission) return
     submissions.delete(requestId)
+    if (settlement.reason === 'observed') {
+      // 待发项可能先于 HTTP 回执被领取。保留已送达状态，再交接原生草稿图片。
+      submission.observed = true
+      modelDraft.clear(submission.model)
+      submission.onAccept?.()
+    }
     updateState(state => {
       state.pendingSubmissions = state.pendingSubmissions.filter(item => item.requestId !== requestId)
     })
     submission.onRetire?.(settlement)
   }
 
-  function submissionObserved(requestId) {
-    return queueStore.getSnapshot().some(item => item.clientUserMessageId === requestId)
-      || events.getSnapshot().entries.some(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
+  function observedSettlement(requestId) {
+    const echo = events.getSnapshot().entries.find(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
+    if (echo) return { reason: 'observed', attachments: echo.event.data.content.flatMap(part => part.type === 'image' ? [part.attachment] : []) }
+    if (queueStore.getSnapshot().some(item => item.clientUserMessageId === requestId)) return observedSubmission
   }
 
   function observeSubmissions() {
     for (const requestId of submissions.keys()) {
-      if (submissionObserved(requestId)) retire(requestId, observedSubmission)
+      const settlement = observedSettlement(requestId)
+      if (settlement) retire(requestId, settlement)
     }
   }
 
@@ -68,13 +77,13 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
   }
 
   return {
-    beginSubmission({ mode, text, attachments, onRetire }) {
+    beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
       const requestId = crypto.randomUUID()
       const { running } = session.getSnapshot()
       const placement = running && mode === 'steer' ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { onRetire, expectedTurnId: mode === 'steer' ? activeTurnId() : undefined,
+      submissions.set(requestId, { onAccept, onRetire, expectedTurnId: mode === 'steer' ? activeTurnId() : undefined,
         model: modelDraft.getSnapshot() })
       updateState(state => {
         state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
@@ -92,16 +101,21 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
         state.promptAttempted = true
       })
       try {
-        if (content.some(part => part.type !== 'text')) throw new Error('当前仅支持发送文本消息。')
-        const input = content.map(({ text }) => ({ type: 'text', text, text_elements: [] }))
+        const input = content.map(part => {
+          if (part.type === 'text') return { type: 'text', text: part.text, text_elements: [] }
+          if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }
+          throw new Error('当前仅支持发送文本和图片。')
+        })
         await native('prompt', { input, mode, clientUserMessageId: requestId, expectedTurnId, modelDraft: selection }, signal)
         modelDraft.clear(selection)
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。
-        if (submissionObserved(requestId)) {
+        if (submission?.observed) return accepted
+        const settlement = observedSettlement(requestId)
+        if (settlement) {
           modelDraft.clear(selection)
-          retire(requestId, observedSubmission)
+          retire(requestId, settlement)
           return accepted
         }
         retire(requestId, failedSubmission)
@@ -113,7 +127,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
     },
     async updateQueue(queuedSubmissionId, action) {
       const { kind } = action
-      const options = kind === 'edit' ? { text: action.content.map(part => part.text).join('') }
+      const options = kind === 'edit' ? { text: userInputText(action.content) }
         : kind === 'steer' ? { expectedTurnId: activeTurnId() } : {}
       try {
         await native('queue', { queuedSubmissionId, operation: kind, ...options })

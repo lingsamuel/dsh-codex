@@ -15,10 +15,15 @@ function textBlock(text) {
   return { type: 'text', text }
 }
 
-export function userBlock(part, image) {
+function userBlock(part, image) {
   if (part.type === 'text') return textBlock(part.text)
   if (image) return { type: 'image', attachment: image.attachment }
   return textBlock(part.path || part.name || (part.type === 'image' ? '图片附件' : part.type))
+}
+
+/** 待发和已发送的原生用户内容共用附件投影。 */
+export function projectUserContent(id, content, attachments) {
+  return content.map((part, index) => userBlock(part, attachments?.get(inlineAttachmentId(id, index))))
 }
 
 function questionMarkdown(questions) {
@@ -88,7 +93,7 @@ function turnEvents(turn, number, source, createdAt, attachments) {
 
     if (isUser) {
       if (!replies) {
-        const content = item.content.map((part, index) => userBlock(part, attachments?.get(inlineAttachmentId(item.id, index))))
+        const content = projectUserContent(item.id, item.content, attachments)
         const message = { id: item.id, role: 'user', content, source: { kind: 'user', ...(item.clientId && { rpcId: item.clientId }) } }
         if (hasUserInput) {
           // Codex 的轮内追加已被正式接纳。DSH 用 next-step 的领取记录识别同一个用户气泡为插话。

@@ -1,5 +1,7 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
+import { isComposerImageType } from '../../shared/composer-images.js'
+import { installQueueImages } from './queue-images.jsx'
 
 const bar = 'conversation.composer.bar'
 const dock = 'conversation.composer.dock'
@@ -7,10 +9,12 @@ const locale = 'codex.composer'
 const copy = {
   zh: { readonly: '此会话无法直接发送消息', archived: '请先取消归档',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
-    select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列' },
+    select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列',
+    imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
   en: { readonly: 'Direct messages are unavailable for this session', archived: 'Unarchive the session to send messages',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
-    select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue' },
+    select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue',
+    imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
 
@@ -75,6 +79,7 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
 export function installComposer(ctx, catalog) {
   ctx.effect(() => ctx.locale.register(locale, copy))
   const t = ctx.locale.bind(locale)
+  installQueueImages(ctx)
 
   ctx.inject(['conversation', 'uiSession'], scope => {
     const { blocks } = scope.conversation
@@ -113,7 +118,14 @@ export function installComposer(ctx, catalog) {
     }, ContinueQueue))
   })
 
-  ctx.effect(() => {
+  ctx.inject(['conversation', 'sessions'], scope => scope.effect(() => {
+    const { conversation, sessions } = scope
+    const rebindDraftFiles = conversation.rebindDraftFiles
+    // 工作区切换也要沿用内嵌图片路径，避免原生输入栏尝试向 DSH 暂存 Codex 草稿。
+    const rebindImages = function (sessionId, ids, uploadImages) {
+      return rebindDraftFiles.call(this, sessionId, ids, sessions.binding(sessionId) ? false : uploadImages)
+    }
+    conversation.rebindDraftFiles = rebindImages
     let native
     let restore
     function sync() {
@@ -125,12 +137,19 @@ export function installComposer(ctx, catalog) {
       const inject = entry?.inject
       const Component = entry?.component
       if (!inject || !Component) return
-      const injectComposer = (sessionId, ...args) => ({
-        ...inject(sessionId, ...args),
-        // 此阶段只开放文本输入，Codex 的通用附件流尚未接入。
-        addFiles: undefined,
-        ...(sessionId === undefined ? { accessory: <CatalogStatus catalog={catalog} t={t} /> } : {}),
-      })
+      const injectComposer = (sessionId, ...args) => {
+        const props = inject(sessionId, ...args)
+        if (sessionId === undefined) return { ...props, accessory: <CatalogStatus catalog={catalog} t={t} /> }
+        return { ...props, addFiles(files, directories) {
+          if (!sessions.binding(sessionId)) return t('imageInputUnavailable')
+          if (files.some(file => directories?.has(file) || !isComposerImageType(file.type))) return t('imagesOnly')
+          // 原生草稿负责缩略图、移除和编码，提交时才把图片随消息交给 Codex。
+          const drafts = conversation.createDrafts(sessionId, files, false)
+          if (props.keyboard.addFiles([], drafts.map(draft => draft.id))) return null
+          conversation.releaseDraftAttachments(drafts)
+          return t('imageInputUnavailable')
+        } }
+      }
       function Composer(props) {
         return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} />
       }
@@ -146,6 +165,7 @@ export function installComposer(ctx, catalog) {
     return () => {
       unsubscribe()
       restore?.()
+      if (conversation.rebindDraftFiles === rebindImages) conversation.rebindDraftFiles = rebindDraftFiles
     }
-  })
+  }))
 }

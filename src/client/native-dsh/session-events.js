@@ -2,8 +2,8 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../../shared/pages.js'
 import { readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
-import { readInlineCodexAttachments } from '../native-chat/attachments.js'
-import { projectCodexTurns, userBlock } from '../native-chat/events.js'
+import { readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
+import { projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
@@ -54,6 +54,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   })
   const transcript = createLiveTranscript()
   const attachments = new Map()
+  let queueImages = new Map()
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
@@ -319,10 +320,14 @@ export function createCodexHistory(ctx, thread, catalog) {
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'queue') {
         const { submissions } = frame
-        queueStore.set(submissions)
+        const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, signal, queueImages)))
+        signal.throwIfAborted()
+        // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
+        queueImages = new Map(images.flat().filter(Boolean))
         inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
-          source: { kind: 'user', rpcId: clientUserMessageId }, content: input.map(part => userBlock(part)),
+          source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
         })), 'next-step': [] })
+        queueStore.set(submissions)
         return publishQuestions()
       }
       if (frame.type === 'reading-receipt') {
@@ -478,10 +483,11 @@ export function createCodexHistory(ctx, thread, catalog) {
       editableInput,
       publishModel,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
-      async readAttachment(id) {
-        const value = attachments.get(id)
+      queuedImageUrl: id => queueImages.get(id)?.url,
+      async readAttachment({ attachmentId }) {
+        const value = attachments.get(attachmentId)
         return value
-          ? { ok: true, value }
+          ? { ok: true, value: { attachment: value.attachment, data: value.data } }
           : { ok: false, error: remoteFailure('此附件无法从 Codex 历史接口读取。') }
       },
     },

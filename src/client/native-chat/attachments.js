@@ -13,7 +13,7 @@ async function decodeAttachment(attachmentId, url, signal) {
     await image.decode()
     return [attachmentId, {
       attachment: { attachmentId, mediaType, bytes: data.byteLength, width: image.naturalWidth, height: image.naturalHeight },
-      data,
+      data, url,
     }]
   } catch {
     // 无法解码的附件仍由消息视图显示原有的附件文字。
@@ -21,18 +21,21 @@ async function decodeAttachment(attachmentId, url, signal) {
   }
 }
 
+/** 将消息中的内嵌图片转换为 DSH 附件，允许队列刷新复用同一份图片数据。 */
+export function readInlineUserImages(itemId, content, signal, previous) {
+  const pending = []
+  for (const [index, part] of content.entries()) {
+    if (part.type !== 'image' || !/^data:image\//i.test(part.url)) continue
+    const id = inlineAttachmentId(itemId, index)
+    const cached = previous?.get(id)
+    pending.push(cached?.url === part.url ? [id, cached] : decodeAttachment(id, part.url, signal))
+  }
+  return Promise.all(pending)
+}
+
 /** 为当前页面已有的内嵌图片准备原生 DSH 附件引用与内存中的字节。 */
 export async function readInlineCodexAttachments(turns, signal) {
-  const pending = []
-  for (const turn of turns) {
-    for (const item of turn.items) {
-      if (item.type !== 'userMessage') continue
-      for (const [index, part] of item.content.entries()) {
-        if (part.type === 'image' && /^data:image\//i.test(part.url)) {
-          pending.push(decodeAttachment(inlineAttachmentId(item.id, index), part.url, signal))
-        }
-      }
-    }
-  }
-  return new Map((await Promise.all(pending)).filter(Boolean))
+  const messages = turns.flatMap(turn => turn.items.filter(item => item.type === 'userMessage'))
+  const images = await Promise.all(messages.map(item => readInlineUserImages(item.id, item.content, signal)))
+  return new Map(images.flat().filter(Boolean))
 }

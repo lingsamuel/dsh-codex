@@ -105,6 +105,37 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
   ])
 })
 
+test('网页图片可单独入队、随文本插话并在队列编辑时保留', async t => {
+  const threadId = 'image-thread'
+  const image = { type: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==' }
+  const text = { type: 'text', text: '查看截图', text_elements: [] }
+  const queued = { id: 'image-queue', clientUserMessageId: 'queue-image', input: [image] }
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'active' } } } }),
+    'thread/queue/add': () => ({ result: { queuedSubmission: queued } }),
+    'thread/queue/list': () => ({ result: { data: [queued], nextCursor: null } }),
+    'thread/queue/update': ({ input }) => ({ result: { queuedSubmission: { ...queued, input } } }),
+    'turn/steer': () => ({ result: { turnId: 'active-turn' } }),
+  })
+  const route = createConversationActionRoute(socketPath)
+  const post = fields => route.fetch(new Request('http://local/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId, ...fields }),
+  }))
+  const queue = { action: 'prompt', mode: 'queue', clientUserMessageId: queued.clientUserMessageId }
+
+  assert.equal((await post({ ...queue, input: [image] })).status, 200)
+  assert.equal((await post({ action: 'prompt', mode: 'steer', input: [image, text],
+    clientUserMessageId: 'steer-image', expectedTurnId: 'active-turn' })).status, 200)
+  const edited = await post({ action: 'queue', operation: 'edit', queuedSubmissionId: queued.id, text: text.text })
+  assert.deepEqual((await edited.json()).queuedSubmission.input, [image, text])
+  for (const invalid of [{ type: 'image', url: 'https://example.invalid/image.png' },
+    { type: 'image', url: 'data:image/png;base64,!' }, { type: 'localImage', path: '/mock/image.png' }]) {
+    assert.equal((await post({ ...queue, input: [invalid] })).status, 400)
+  }
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/queue/add' || method === 'turn/steer')
+    .map(({ method, params }) => [method, params.input]), [['thread/queue/add', [image]], ['turn/steer', [image, text]]])
+})
+
 test('队列编辑保留原生附件，显式插话拒绝后保留待发文本', async t => {
   const threadId = 'native-thread'
   const attachment = { type: 'localImage', path: '/mock/image.png' }

@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText } from '../shared/user-input.js'
+import { isComposerImageUrl } from '../shared/composer-images.js'
 import { readProjects } from './catalog.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
@@ -27,9 +28,16 @@ function required(value, message) {
 }
 
 function promptInput(input) {
-  if (!Array.isArray(input) || input.some(part => part?.type !== 'text' || typeof part.text !== 'string')
-    || !input.some(part => part.text.trim())) throw badRequest('请输入消息内容。')
-  return input.map(({ text, text_elements }) => ({ type: 'text', text, text_elements: text_elements ?? [] }))
+  if (!Array.isArray(input)) throw badRequest('请输入消息内容。')
+  const parts = input.map(part => {
+    if (part?.type === 'text' && typeof part.text === 'string') {
+      return { type: 'text', text: part.text, text_elements: part.text_elements ?? [] }
+    }
+    if (part?.type === 'image' && isComposerImageUrl(part.url)) return { type: 'image', url: part.url }
+    throw badRequest('消息只接受文本和有效的内嵌图片。')
+  })
+  if (!parts.some(part => part.type === 'image' || part.text.trim())) throw badRequest('请输入消息内容。')
+  return parts
 }
 
 /** 从原生队列读取当前顺序，供初次投影和队列操作复用。不会加载线程。 */
