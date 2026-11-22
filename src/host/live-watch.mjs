@@ -125,7 +125,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
                 threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
               })
               tail = createHistoryTail(connection.request, thread, page)
-              send({ type: 'snapshot', page, status: thread.status, readState, mode: watching ? 'live' : 'history' })
+              send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode, mode: watching ? 'live' : 'history' })
               for (const message of early) send({ type: 'notification', notification: message })
               early.length = 0
               void sendFacts()

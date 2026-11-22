@@ -81,11 +81,12 @@ export function createCodexHistory(ctx, thread, catalog) {
     events.set({ entries, hasMore, revision: previous.revision + 1, change })
   }
 
-  function publishState({ mode, status } = {}) {
+  function publishState({ mode, status, historyMode } = {}) {
     const lastTurnStatus = transcript.getTurn(rows.at(-1)?.id)?.status
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
       if (status !== undefined) current.live.status = status
+      if (historyMode !== undefined) current.historyMode = historyMode
       current.live.lastTurnStatus = lastTurnStatus
       current.running = current.live.mode === 'live' && current.live.status?.type === 'active'
       current.hasMore = Boolean(nextCursor)
@@ -166,7 +167,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     const revision = ++outlineRevision
     outlineTargets.clear()
     outline.set(undefined)
-    if (!thread.historyMode || anchor === undefined || !cursor) return
+    if (!state.getSnapshot().historyMode || anchor === undefined || !cursor) return
     try {
       const earlier = await readPage('turn-outline', { threadId: thread.id, cursor }, signal)
       if (signal.aborted || revision !== outlineRevision) return
@@ -181,7 +182,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
-  async function receiveSnapshot({ page, status, mode, readState }) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode }) {
     if (!opened) {
       await addOlderPage(page)
       opened = true
@@ -211,7 +212,9 @@ export function createCodexHistory(ctx, thread, catalog) {
       for (const turn of refreshed) await updateTurn(turn)
     }
     publish()
-    publishState({ mode, status })
+    publishState({ mode, status, historyMode })
+    todos.set(undefined)
+    contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
     if (readState !== undefined) catalog?.setReadState(thread.id, readState)
     markReady()

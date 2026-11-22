@@ -151,7 +151,7 @@ test('搜索定位只向前加载未读过的页，保留较新的聊天窗口',
 
 test('轮次导航摘要与已加载轮次使用同一编号，跳转按原生 ID 补齐旧历史', async t => {
   const currentSource = mockTransport(t)
-  const history = createCodexHistory({ effect() {} }, { id: 'thread', historyMode: 'paginated' })
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
   globalThis.fetch = async url => {
     assert.equal(url.searchParams.get('cursor'), 'older')
     return url.pathname.endsWith('/turn-outline')
@@ -159,7 +159,8 @@ test('轮次导航摘要与已加载轮次使用同一编号，跳转按原生 I
       : Response.json({ data: [turn('older-turn', 'completed', [ask])], nextCursor: null })
   }
   const receive = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
-  await receive({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live' })
+  await receive({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live', historyMode: 'paginated' })
+  assert.equal(history.session.getSnapshot().historyMode, 'paginated')
   const outline = history.session.projections.faceOf('turnOutline')
   const [entry] = outline.getSnapshot() ?? await new Promise(resolve => {
     const stop = outline.subscribe(() => { stop(); resolve(outline.getSnapshot()) })
