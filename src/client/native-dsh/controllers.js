@@ -269,10 +269,6 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     scope.effect(() => {
       const currentNavigation = scope.uiWorkspace
       navigation = currentNavigation
-      const startSession = currentNavigation.startSession
-      // RC2 的无参数入口会强制新建。传入原生默认草稿选项，让 DSH 沿用工作区的空白会话。
-      const startWithDraft = (workspaceId, options = {}) => startSession.call(currentNavigation, workspaceId, options)
-      currentNavigation.startSession = startWithDraft
       function reconcile() {
         const { busy, error, selected, threads, childThreads } = catalog.store.getSnapshot()
         if (initialization === 'ready' && selected && !childThreads[selected.id]
@@ -296,7 +292,6 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
       const stop = catalog.store.subscribe(reconcile)
       return () => {
         stop()
-        if (currentNavigation.startSession === startWithDraft) currentNavigation.startSession = startSession
         if (navigation === currentNavigation) navigation = undefined
       }
     })

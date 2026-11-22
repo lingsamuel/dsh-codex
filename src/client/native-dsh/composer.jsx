@@ -2,6 +2,7 @@ import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 import { isComposerImageType } from '../../shared/composer-images.js'
+import { commandUnavailable } from './command-action.jsx'
 import { installQueueImages } from './queue-images.jsx'
 
 const bar = 'conversation.composer.bar'
@@ -37,7 +38,8 @@ function CatalogStatus({ catalog, t }) {
 
 function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, composerT, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
-  const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
+  // 发送锁定期间，原生输入栏仍按取消权限处理活动轮次的 Stop。
+  const canStop = props.useSession(state => state.running && Boolean(state.live.activeTurnId) && !commandUnavailable(state))
   const archived = props.useSession(state => state.archived)
   const plan = props.useProjection('plan', value => value?.active)
   const goal = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
@@ -72,7 +74,7 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
   const placeholder = goal && !blocked && !disabled ? composerT('goalPlaceholder')
     : !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
     ? (plan ? t('placeholder.plan') : withSkillHint(props.placeholder)) : props.placeholder
-  return <Native {...props} placeholder={placeholder} stop={!blocked && knownTurn ? props.stop : undefined}
+  return <Native {...props} placeholder={placeholder} stop={canStop ? props.stop : undefined}
     t={(key, ...args) => {
       if (key === 'input.commands' && toggleCommandMenu) return commandsLabel
       if (goal && (key === 'input.send' || key.startsWith('input.send.'))) return composerT(archived ? 'goalUnarchiveAndSend' : 'goalSend')
