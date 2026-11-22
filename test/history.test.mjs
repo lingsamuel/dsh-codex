@@ -68,6 +68,20 @@ test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t
   assert.deepEqual(messages.map(message => message.method), ['initialize', 'initialized', 'thread/list'])
 })
 
+test('归档浏览按 Codex 原生归档分页保留原会话 ID', async t => {
+  const { get, messages } = await fakeCodex(t, {
+    'thread/list': ({ archived, cursor }) => {
+      assert.equal(archived, true)
+      return { result: cursor
+        ? { data: [{ id: 'second' }], nextCursor: null }
+        : { data: [{ id: 'first' }], nextCursor: 'native-next' } }
+    },
+  })
+  const response = await get('/api/codex/archived')
+  assert.deepEqual(await response.json(), { threads: [{ id: 'first', archived: true }, { id: 'second', archived: true }], workspacePaths: {} })
+  assert.deepEqual(messages.map(message => message.method), ['initialize', 'initialized', 'thread/list', 'thread/list'])
+})
+
 test('正文搜索使用 Codex 返回的会话、片段和游标', async t => {
   const thread = { id: 'older-thread', cwd: '/projects/older' }
   const result = { data: [{ thread, snippet: '正文里的命中' }], nextCursor: 'more' }

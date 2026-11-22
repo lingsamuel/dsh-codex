@@ -37,3 +37,15 @@ test('projects native workspace membership and timestamps into DSH sidebar rows'
   const inferred = workspaces.items.find(workspace => workspace.sessionIds.includes(second.id))
   assert.equal(inferred.updatedAt, new Date(second.updatedAt * 1000).toISOString())
 })
+
+test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
+  const section = { id: '01984de2-8f74-7c91-a3b2-5c5e937cf318', name: 'Pinned' }
+  const { sessions, workspaces } = projectCatalog({ projects: [], workspacePaths: {}, threads: [
+    { id: 'native-pin', cwd: '/repo', section },
+    { id: 'custom-group', cwd: '/repo', section: { id: 'different-id', name: section.name } },
+    { id: 'archived', cwd: '/repo', archived: true, section },
+  ] })
+  assert.deepEqual(workspaces.pinnedSessionIds, ['native-pin'])
+  assert.deepEqual(workspaces.archivedSessionIds, ['archived'])
+  assert.deepEqual(sessions.ids, ['native-pin', 'custom-group', 'archived'])
+})

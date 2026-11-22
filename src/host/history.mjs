@@ -1,5 +1,5 @@
 import { CodexRpcError, readCodex } from './app-server.mjs'
-import { createCatalogReader, readProjectPage } from './catalog.mjs'
+import { createCatalogReader, readArchivedCatalog, readProjectPage } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
@@ -44,6 +44,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   return [
     createWatchRoute(socketPath, ownerSignal),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
+    route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('projects', (query, signal) => readProjectPage(
       (method, params) => readCodex(method, params, socketPath, signal),
       { limit: 60, ...optionalParams(query, ['cursor']) },

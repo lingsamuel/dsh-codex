@@ -26,6 +26,7 @@ export function createHistoryCatalog(signal) {
   let refreshing = false
   let pendingRefresh = false
   let connected = false
+  let archivedThreads = []
   const observedStatuses = new Map()
   const observedReadStates = new Map()
   const searchThreads = new Map()
@@ -37,7 +38,7 @@ export function createHistoryCatalog(signal) {
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
       state.projects = applyChanges(projects, projectChanges).sort((a, b) => a.position - b.position)
-      state.threads = applyChanges(mergePages(threads, searchThreads.values()), threadChanges).map(thread => observedStatuses.has(thread.id)
+      state.threads = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges).map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
       if (!followsLocalReceipts) {
@@ -49,6 +50,21 @@ export function createHistoryCatalog(signal) {
       state.busy = false
       state.error = ''
     })
+  }
+
+  async function loadArchived() {
+    try {
+      const { threads, workspacePaths } = await readPage('archived', {}, signal)
+      signal.throwIfAborted()
+      archivedThreads = threads
+      Object.assign(changedPaths, workspacePaths)
+      store.update(state => {
+        state.threads = applyChanges(mergePages(state.threads.filter(thread => !thread.archived), threads), threadChanges)
+        Object.assign(state.workspacePaths, workspacePaths)
+      })
+    } catch {
+      // 归档暂不可用时保留已加载的清单和普通会话。
+    }
   }
 
   async function refresh(fresh = false) {
@@ -64,6 +80,7 @@ export function createHistoryCatalog(signal) {
         for (const changes of [threadChanges, projectChanges, observedStatuses, observedReadStates]) changes.clear()
         searchThreads.clear()
         publish(await readPage('catalog', { complete: 1, fresh: 1 }, signal))
+        await loadArchived()
         return
       }
       // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
@@ -168,6 +185,7 @@ export function createHistoryCatalog(signal) {
 
   openLiveWatch(null, { receive }, signal)
   void refresh()
+  void loadArchived()
   window.addEventListener('focus', () => { void refresh() }, { signal })
   return catalog
 }

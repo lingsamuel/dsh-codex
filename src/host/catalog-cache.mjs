@@ -25,11 +25,11 @@ export async function readCatalogCache(path) {
 /** 保存原生列表字段和 Codex 提供的预览，实时状态和各轮完整消息按需读取。 */
 export async function saveCatalogCache(path, { projects, threads, workspacePaths }, signal) {
   const projection = {
-    projects: projects.map(({ id, name, roots, createdAt, updatedAt, recencyAt }) => ({
-      id, name, roots, createdAt, updatedAt, recencyAt,
+    projects: projects.map(({ id, name, roots, createdAt, updatedAt, recencyAt, position }) => ({
+      id, name, roots, createdAt, updatedAt, recencyAt, position,
     })),
-    threads: threads.map(({ id, name, preview, cwd, projectId, createdAt, updatedAt }) => ({
-      id, name, preview, cwd, projectId, createdAt, updatedAt,
+    threads: threads.map(({ id, name, preview, cwd, projectId, createdAt, updatedAt, section, historyMode }) => ({
+      id, name, preview, cwd, projectId, createdAt, updatedAt, section, historyMode,
     })),
     workspacePaths,
   }

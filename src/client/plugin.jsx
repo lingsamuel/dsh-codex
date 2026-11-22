@@ -2,6 +2,7 @@ import { createHistoryCatalog } from './catalog.js'
 import { provideCodexControllers } from './native-dsh/controllers.js'
 import { installLiveStatus } from './native-dsh/live-status.jsx'
 import { installMessageSearch } from './native-dsh/message-search.jsx'
+import { installArchiveView } from './native-dsh/archive-view.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -14,6 +15,7 @@ export function apply(ctx) {
   provideCodexControllers(ctx, catalog)
   installLiveStatus(ctx, catalog.store)
   installMessageSearch(ctx)
+  installArchiveView(ctx)
   ctx.slots.inject('conversation.composer.bar', () => ctx.slots.register(
     { name: 'conversation.composer.bar', priority: -1 },
     HistoryStatus,

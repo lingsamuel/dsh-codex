@@ -1,9 +1,10 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
 
-const emptyIds = []
 const emptyProjections = {}
 const noRetention = {}
 const mainRetention = { mainView: 1 }
+// Codex 的内置 Pinned 分组使用固定身份。自建同名分组不等同于置顶。
+const pinnedSectionId = '01984de2-8f74-7c91-a3b2-5c5e937cf318'
 
 export function remoteFailure(message) {
   return { code: 'codex/history', message }
@@ -59,8 +60,8 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
     sessions: { ids, byId, phase, projectionsBySession: emptyProjections },
     workspaces: {
       items,
-      archivedSessionIds: emptyIds,
-      pinnedSessionIds: emptyIds,
+      archivedSessionIds: threads.filter(thread => thread.archived).map(thread => thread.id),
+      pinnedSessionIds: threads.filter(thread => !thread.archived && thread.section?.id === pinnedSectionId).map(thread => thread.id),
       phase,
       state: error ? 'error' : busy ? 'loading' : 'idle',
       error: error ? remoteFailure(error) : null,

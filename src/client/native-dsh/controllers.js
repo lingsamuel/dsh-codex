@@ -124,7 +124,7 @@ export function provideCodexControllers(ctx, catalog) {
         if (initialization !== 'waiting' || busy || error) return
         // DSH 在两个列表就绪后恢复主视图。先打开已有会话，让它无需补建空白会话。
         initialization = 'opening'
-        const thread = selected ?? threads[0]
+        const thread = selected ?? threads.find(thread => !thread.archived) ?? threads[0]
         if (thread) scope.uiWorkspace.openSession(thread.id)
         initialization = 'ready'
         syncSessions()

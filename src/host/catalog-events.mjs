@@ -7,17 +7,17 @@ export async function readCatalogEvent(notification, request) {
     case 'thread/status/changed':
     case 'thread/readState/changed':
       return { type: 'notification', notification }
-    case 'thread/archived':
     case 'thread/deleted':
       return { type: 'thread', id: params.threadId, thread: null }
     case 'thread/started':
     case 'thread/name/updated':
     case 'thread/project/updated':
     case 'thread/section/changed':
+    case 'thread/archived':
     case 'thread/unarchived': {
       const { thread, readState } = params.thread ? params : await request('thread/read', { threadId: params.threadId })
       return {
-        type: 'thread', id: thread.id, thread, readState,
+        type: 'thread', id: thread.id, thread: method === 'thread/archived' ? { ...thread, archived: true } : thread, readState,
         workspacePaths: await resolveWorkspacePaths([thread.cwd]),
       }
     }

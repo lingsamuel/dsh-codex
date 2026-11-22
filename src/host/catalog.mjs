@@ -19,22 +19,32 @@ async function collectPages(read) {
   return mergePages([], entries)
 }
 
+async function readThreads(request, filters) {
+  return collectPages(async params => {
+    const page = await request('thread/list', {
+      ...params, modelProviders: [], sortKey: 'updated_at', ...filters,
+    })
+    if (!page.readStates) return page
+    return { ...page, data: page.data.map(thread => {
+      const readState = page.readStates[thread.id]
+      return readState ? { ...thread, readState } : thread
+    }) }
+  })
+}
+
+/** 归档历史单独补齐，避免拖慢常规目录的首屏。 */
+export async function readArchivedCatalog(socketPath, signal) {
+  const native = await withCodexReader(socketPath, signal, request => readThreads(request, { archived: true }), 90_000)
+  const threads = native.map(thread => ({ ...thread, archived: true }))
+  const workspacePaths = await resolveWorkspacePaths(threads.map(thread => thread.cwd))
+  signal?.throwIfAborted()
+  return { threads, workspacePaths }
+}
+
 async function loadCatalog(socketPath, signal, complete) {
   const { projects, threads } = await withCodexReader(socketPath, signal, async request => {
     const projects = await collectPages(params => readProjectPage(request, params))
-    const threads = await collectPages(async params => {
-      const page = await request('thread/list', {
-        ...params,
-        modelProviders: [],
-        sortKey: 'updated_at',
-        useStateDbOnly: !complete,
-      })
-      if (!page.readStates) return page
-      return { ...page, data: page.data.map(thread => {
-        const readState = page.readStates[thread.id]
-        return readState ? { ...thread, readState } : thread
-      }) }
-    })
+    const threads = await readThreads(request, { useStateDbOnly: !complete })
     return { projects, threads }
   }, complete ? 90_000 : 15_000)
 
