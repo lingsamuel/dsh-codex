@@ -70,6 +70,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const codexApprovals = createSnapshotStore([])
   const codexMcpRequests = createSnapshotStore([])
   const permissions = createSnapshotStore({ permission: thread.webPermission })
+  let recordedTurnPermission
   let lastSavedPermission
   let receivedSavedPermission = false
   let lastSavedPlanMode
@@ -126,6 +127,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 线程状态与已保存轮次各自到达。只有两者都确认运行时，输入栏才能对该轮插话。
       current.running = (current.live.mode === 'live' || current.live.mode === 'history')
         && current.live.status?.type === 'active' && current.live.activeTurnId !== undefined
+      current.live.turnPermission = current.running && recordedTurnPermission?.turnId === current.live.activeTurnId
+        ? recordedTurnPermission.permission : undefined
       current.hasMore = Boolean(nextCursor)
       if (lastTurn) current.blank = false
       if (opened) {
@@ -433,6 +436,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         contextPressure.set(frame.contextPressure)
         publishCancelledToolCalls(frame.cancelledToolCalls)
         publishTurnDirectories(frame.turnWorkingDirectories)
+        if (JSON.stringify(recordedTurnPermission) !== JSON.stringify(frame.turnPermission)) {
+          recordedTurnPermission = frame.turnPermission
+          publishState()
+        }
         const recorded = frame.permission
         if (recorded) {
           const saved = JSON.stringify(recorded)
@@ -488,6 +495,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
         publishCancelledToolCalls([])
+        recordedTurnPermission = undefined
         lastSavedPlanMode = undefined
         planRevisionAtConnect = state.getSnapshot().planRevision
       }

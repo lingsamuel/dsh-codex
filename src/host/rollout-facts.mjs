@@ -62,14 +62,15 @@ export function createRolloutFacts(path, signal, threadId) {
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
     if (record.type === 'turn_context') {
-      const permission = recordPermission(value)
-      if (permission) currentTurn().permission = permission
       const turn = currentTurn()
-      if (typeof value?.cwd === 'string' && isAbsolute(value.cwd)
-        && (!value.turn_id || !turn.id || value.turn_id === turn.id)) {
-        // 旧记录靠开始事件确定归属，新记录也可用自己的轮次 ID 核对。
-        if (value.turn_id) turn.id ??= value.turn_id
-        turn.cwd = value.cwd
+      const turnId = value?.turn_id ?? turn.id
+      // 上下文可能晚于下一轮的开始记录到达。按原生 ID 找回它所属的轮次。
+      const owner = turn.id && turnId !== turn.id ? turns.findLast(candidate => candidate.id === turnId) : turn
+      const permission = recordPermission(value)
+      if (permission && owner) owner.permission = { ...permission, turnId }
+      if (owner && typeof value?.cwd === 'string' && isAbsolute(value.cwd)) {
+        owner.id ??= turnId
+        owner.cwd = value.cwd
       }
       const mode = planModeOf(value)
       if (mode) currentTurn().planMode = mode
@@ -168,6 +169,7 @@ export function createRolloutFacts(path, signal, threadId) {
       const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
         ? turnPermission : legacyPermission
       const permission = displayPermission(ownedPermission ?? latestPermission, turnPermission)
+      const latestTurnPermission = turns.at(-1)?.permission
       const planMode = savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode
       const cancelledToolCalls = turns.flatMap(turn => turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])
       publishedCancelledTools ||= cancelledToolCalls.length > 0
@@ -178,6 +180,9 @@ export function createRolloutFacts(path, signal, threadId) {
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
         settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
         ...(permission && { permission }),
+        ...(latestTurnPermission?.turnId && { turnPermission: {
+          turnId: latestTurnPermission.turnId, permission: latestTurnPermission.permission,
+        } }),
         ...(planMode && { planMode }),
         ...(publishedCancelledTools && { cancelledToolCalls }),
         ...(publishedTurnDirectories && { turnWorkingDirectories }),

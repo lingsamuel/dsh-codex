@@ -23,6 +23,7 @@ import { installCodexSkills } from './native-dsh/skills.js'
 import { installCodexCapabilities } from './native-dsh/codex-capabilities.jsx'
 import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
 import { installWorktrees } from './native-dsh/worktree.jsx'
+import { installSidebarBrand } from './native-dsh/branding.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -32,6 +33,7 @@ export function apply(ctx) {
   ctx.effect(() => () => controller.abort())
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
+  installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog)
   installProjectWorkspaces(ctx, catalog.search)
