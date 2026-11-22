@@ -140,14 +140,23 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        const openWorktree = ({ thread, workspacePaths, permission }, confirmed = true) => {
+        const openWorktree = ({ thread, workspacePaths, permission }, confirmed = true, handoff) => {
           const current = catalog.store.getSnapshot().threads.find(item => item.id === thread.id)
           if (confirmed || !current) {
             catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, confirmed)
           }
           // DSH 先完成输入栏的发送交接。若用户期间已打开其他会话，保留当前视图。
           setTimeout(() => {
-            if (catalog.store.getSnapshot().selected?.id === id) navigation?.openSession(thread.id)
+            if (catalog.store.getSnapshot().selected?.id === id && navigation) {
+              // 在主视图绑定之前接续气泡；实际打开会话时再启动历史连接。
+              const reference = handoff && sessions.retain(thread.id, { source: 'submission', connection: false })
+              try {
+                handoff?.(reference.binding.session)
+                navigation.openSession(thread.id)
+              } finally {
+                reference?.release()
+              }
+            } else handoff?.()
           }, 0)
         }
         record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,

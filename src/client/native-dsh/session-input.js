@@ -39,33 +39,65 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     clearDrafts(model, profileId)
   }
 
-  function retire(requestId, settlement, consumeSettings = true) {
-    const submission = submissions.get(requestId)
-    if (!submission) return
+  function removeSubmission(requestId) {
     submissions.delete(requestId)
-    if (settlement.reason === 'observed') {
-      // 待发项可能先于 HTTP 回执被领取。保留已送达状态，再交接原生草稿图片。
-      submission.observed = true
-      if (consumeSettings) clearDrafts(submission.model, submission.permission)
-      submission.onAccept?.()
-    }
     updateState(state => {
       state.pendingSubmissions = state.pendingSubmissions.filter(item => item.requestId !== requestId)
     })
+  }
+
+  function acceptObserved(submission, consumeSettings = true) {
+    if (submission.observed) return
+    // 队列或历史可以先于 HTTP 回执确认接纳。此时编辑器即可交接草稿，气泡独立等待原生接手。
+    submission.observed = true
+    if (consumeSettings) clearDrafts(submission.model, submission.permission)
+    submission.onAccept?.()
+  }
+
+  function retire(requestId, settlement, consumeSettings = true) {
+    const submission = submissions.get(requestId)
+    if (!submission) return
+    if (settlement.reason === 'observed') acceptObserved(submission, consumeSettings)
+    removeSubmission(requestId)
     submission.onRetire?.(settlement)
   }
 
-  function observedSettlement(requestId, entries = events.getSnapshot().entries) {
+  function historySettlement(requestId, entries) {
     const echo = entries.find(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
     if (echo) return { reason: 'observed', attachments: echo.event.data.content.flatMap(part => part.type === 'image' ? [part.attachment] : []) }
-    if (queueStore.getSnapshot().some(item => item.clientUserMessageId === requestId)) return observedSubmission
+  }
+
+  function observeSubmission(requestId, submission, entries) {
+    submission.settlement ??= historySettlement(requestId, entries)
+    const index = queueStore.getSnapshot().findIndex(item => item.clientUserMessageId === requestId)
+    if (!submission.settlement && index < 0) return false
+    // 空闲发送短暂占用队首。原生消息接手前保留气泡，原生队列清空前也继续屏蔽其旧队列行。
+    const keepInChat = submission.echo?.placement === 'transcript' && index >= 0
+      && (submission.settlement || (index === 0 && !submission.queuedForLater))
+    if (keepInChat) acceptObserved(submission)
+    else retire(requestId, submission.settlement ?? observedSubmission)
+    return true
   }
 
   function observeSubmissions(entries) {
-    for (const requestId of submissions.keys()) {
-      const settlement = observedSettlement(requestId, entries)
-      if (settlement) retire(requestId, settlement)
+    for (const [requestId, submission] of submissions) observeSubmission(requestId, submission, entries)
+  }
+
+  function openSubmittedThread(result, requestId) {
+    const submission = submissions.get(requestId)
+    if (!submission?.echo) {
+      retire(requestId, observedSubmission)
+      return openWorktree(result)
     }
+    acceptObserved(submission)
+    openWorktree(result, true, target => {
+      if (submissions.get(requestId) !== submission) return
+      if (!target) return retire(requestId, observedSubmission)
+      removeSubmission(requestId)
+      const nativeId = result.clientUserMessageId ?? result.queuedSubmission?.clientUserMessageId ?? requestId
+      // DSH 的回调绑定草稿会话。目标历史从自己的附件引用加载，原回调只释放草稿预览。
+      target.adoptSubmission({ ...submission.echo, requestId: nativeId }, () => submission.onRetire?.(observedSubmission), result.queuedForLater)
+    })
   }
 
   ctx.effect(() => {
@@ -178,6 +210,18 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   return {
     acceptSubmittedSettings,
     changePlanMode,
+    /** 在切换会话时接续原气泡和附件所有权，并核对目标可能已加载的原生历史。 */
+    adoptSubmission(echo, onRetire, queuedForLater) {
+      const { requestId } = echo
+      const submission = { echo, onRetire, observed: true, queuedForLater }
+      submissions.set(requestId, submission)
+      observeSubmission(requestId, submission, events.getSnapshot().entries)
+      if (!submissions.has(requestId)) return
+      updateState(state => {
+        state.pendingSubmissions.push(echo)
+        state.promptAttempted = true
+      })
+    },
     decideGoalReplacement: accepted => goalConfirmation?.resolve(accepted),
     dismissGoalError(error) {
       if (session.getSnapshot().goalError === error) updateState(state => { state.goalError = null })
@@ -193,11 +237,12 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const expectedTurnId = mode === 'steer' && plan === undefined ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
+      const echo = isCommandOnly ? undefined : { requestId, placement, time: Date.now(), text: plan ?? text, attachments }
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { onAccept, onRetire, expectedTurnId, worktree, goal,
+      submissions.set(requestId, { echo, onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
       updateState(state => {
-        if (!isCommandOnly) state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text: plan ?? text, attachments })
+        if (echo) state.pendingSubmissions.push(echo)
         state.promptAttempted = true
       })
       return { requestId, abandon: () => retire(requestId, failedSubmission) }
@@ -234,6 +279,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         })
         const { planRevision } = session.getSnapshot()
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
+          ...(submission?.echo?.placement === 'transcript' && { reportQueuedForLater: true }),
           expectedTurnId, modelDraft: selection, permissionDraft: profileId,
           ...(plan !== undefined && { planMode: 'plan' }),
           ...(worktree && { worktree: { kind, id, path, baseRef } }),
@@ -243,19 +289,28 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           goalDraft?.clear(draft)
         }
         if (worktree && result.thread) {
-          // 原生目标是新会话。先让 DSH 清除已送达的原草稿，再切换显示会话。
           worktreeDraft.clear(worktree)
-          retire(requestId, observedSubmission)
-          openWorktree(result)
-        } else acceptSubmittedSettings(selection, profileId, before, result)
+          openSubmittedThread(result, requestId)
+        } else {
+          acceptSubmittedSettings(selection, profileId, before, result)
+          if (result.queuedForLater && submission && submissions.get(requestId) === submission) {
+            submission.queuedForLater = true
+            observeSubmission(requestId, submission, [])
+          }
+        }
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。
+        const entries = events.getSnapshot().entries
+        const current = submissions.get(requestId)
+        if (current) {
+          // 回执丢失后，已经可操作的原生队列项接手。条目已离开队列时仍等历史确认。
+          current.queuedForLater = true
+          if (observeSubmission(requestId, current, entries)) return accepted
+        }
         if (submission?.observed) return accepted
-        const settlement = observedSettlement(requestId)
-        if (settlement) {
+        if (!current && (historySettlement(requestId, entries) || queueStore.getSnapshot().some(item => item.clientUserMessageId === requestId))) {
           clearDrafts(selection, profileId)
-          retire(requestId, settlement)
           return accepted
         }
         retire(requestId, failedSubmission)

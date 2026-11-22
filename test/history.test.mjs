@@ -1086,8 +1086,9 @@ test('中断后空闲发送会启动唯一的新稿，既有待发消息仍由�
     { name: '启动暂停队列中唯一的新稿', pending: [] },
     { name: '保留此前暂停的队列', pending: [{ id: 'old', clientUserMessageId: 'held' }] },
     { name: '初次读取后轮次中断，仍能启动新稿', pending: [], wasActive: true },
+    { name: '本页尚未看到其他客户端启动的轮次，向浏览器确认队首仍在等待', pending: [], becameActive: true },
   ]
-  for (const { name, pending, wasActive } of cases) {
+  for (const { name, pending, wasActive, becameActive } of cases) {
     await t.test(name, async t => {
       const threadId = 'idle-after-interrupt'
       const queued = [...pending]
@@ -1095,7 +1096,7 @@ test('中断后空闲发送会启动唯一的新稿，既有待发消息仍由�
       const { get, messages } = await fakeCodex(t, {
         'thread/read': () => ({ result: { thread: { id: threadId, status: { type: status } } } }),
         'thread/queue/add': params => {
-          status = 'idle'
+          status = becameActive ? 'active' : 'idle'
           const queuedSubmission = { id: 'new', ...params }
           queued.push(queuedSubmission)
           return { result: { queuedSubmission } }
@@ -1110,13 +1111,15 @@ test('中断后空闲发送会启动唯一的新稿，既有待发消息仍由�
       const response = await get('/api/codex/conversation-action', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
           action: 'prompt', threadId, mode: wasActive ? 'queue' : 'steer', expectedTurnId: 'interrupted-turn',
-          clientUserMessageId: 'browser', input: [{ type: 'text', text: '新消息' }],
+          clientUserMessageId: 'browser', input: [{ type: 'text', text: '新消息' }], reportQueuedForLater: true,
         }),
       })
       assert.equal(response.status, 200)
       assert.equal(messages.some(({ method }) => method === 'turn/steer'), false)
-      assert.equal(messages.some(({ method }) => method === 'thread/queue/start'), !pending.length)
-      assert.deepEqual(queued.map(({ id }) => id), pending.length ? ['old', 'new'] : [])
+      const waiting = Boolean(pending.length || becameActive)
+      assert.equal(messages.some(({ method }) => method === 'thread/queue/start'), !waiting)
+      assert.equal((await response.json()).queuedForLater === true, waiting)
+      assert.deepEqual(queued.map(({ id }) => id), waiting ? [...pending.map(({ id }) => id), 'new'] : [])
     })
   }
 })

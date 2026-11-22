@@ -112,18 +112,33 @@ async function deleteQueued(request, params) {
 }
 
 /** 原生暂停队列时，空闲发送仍可启动本次唯一的消息。旧待发项由用户显式继续。 */
-async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId) {
+async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId, reportQueuedForLater) {
+  const readHead = () => request('thread/queue/list', { threadId, limit: 2 })
   try {
     // 入队期间，CLI 或网页可能刚好结束上一轮。用接纳消息后的状态决定是否启动。
     const { thread } = await request('thread/read', { threadId })
-    if (thread.status?.type !== 'idle') return
-    const { data, nextCursor } = await request('thread/queue/list', { threadId, limit: 2 })
-    if (data.length === 1 && data[0].id === queuedSubmissionId && nextCursor == null) {
-      return await request('thread/queue/start', { threadId, queuedSubmissionId })
+    const idle = thread.status?.type === 'idle'
+    if (!idle && !reportQueuedForLater) return {}
+    let queue = await readHead()
+    if (idle && queue.data.length === 1 && queue.data[0].id === queuedSubmissionId && queue.nextCursor == null) {
+      try {
+        return { started: await request('thread/queue/start', { threadId, queuedSubmissionId }) }
+      } catch {
+        if (!reportQueuedForLater) return {}
+        // 原生也可能刚领取消息。只有重新读到仍在等待的条目才让队列接手气泡。
+        queue = await readHead()
+      }
+    }
+    if (reportQueuedForLater) {
+      const containsSubmission = items => items.some(item => item.id === queuedSubmissionId)
+      if (containsSubmission(queue.data) || (queue.nextCursor != null && containsSubmission(await readConversationQueue(request, threadId)))) {
+        return { queuedForLater: true }
+      }
     }
   } catch {
-    // 入队已经确认。原生可能已领取消息或开始另一轮，后续由原生队列接管。
+    // 入队已确认，等待实时队列和历史继续同步。
   }
+  return {}
 }
 
 /** 在变更归档状态或恢复前确认所选设置仍可用于该线程。 */
@@ -357,15 +372,15 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
     return start
   }
 
-  async function recoverWorktreePrompt(rpc, thread, clientUserMessageId, signal) {
+  async function recoverWorktreePrompt(rpc, thread, clientUserMessageId, signal, reportQueuedForLater) {
     // Codex 队列不会按 clientUserMessageId 去重。回执丢失时只确认原消息，不再次写入。
     const deadline = performance.now() + 750
     do {
       const queuedSubmission = (await readConversationQueue(rpc, thread.id)).find(item => item.clientUserMessageId === clientUserMessageId)
       if (queuedSubmission) {
-        const started = await startOnlyQueuedMessage(rpc, thread.id, queuedSubmission.id)
+        const { started, queuedForLater } = await startOnlyQueuedMessage(rpc, thread.id, queuedSubmission.id, reportQueuedForLater)
         scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
-        return { queuedSubmission }
+        return { queuedSubmission, ...(queuedForLater && { queuedForLater }) }
       }
       const turn = await readLatestTurn(rpc, thread.id, 'full')
       if (turn?.items?.some(item => item.type === 'userMessage' && item.clientId === clientUserMessageId)) {
@@ -435,10 +450,11 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
               start.inputDigest = digest
             }
             const destination = start?.native.thread.id ?? threadId
+            const reportQueuedForLater = fields.reportQueuedForLater === true
             const params = { threadId: destination, input: parts, clientUserMessageId }
             const run = () => withCodexReader(socketPath, signal, async rpc => {
               if (start?.uncertain) {
-                const recovered = await recoverWorktreePrompt(rpc, start.native.thread, clientUserMessageId, signal)
+                const recovered = await recoverWorktreePrompt(rpc, start.native.thread, clientUserMessageId, signal, reportQueuedForLater)
                 return planMode ? { ...recovered, planMode } : recovered
               }
               const thread = await submissionThread(rpc, destination, fields, permissions)
@@ -462,10 +478,10 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
                 throw error
               })
               const queuedId = result.queuedSubmission?.id
-              const started = queuedId ? await startOnlyQueuedMessage(rpc, destination, queuedId) : undefined
+              const { started, queuedForLater } = queuedId ? await startOnlyQueuedMessage(rpc, destination, queuedId, reportQueuedForLater) : {}
               scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
               if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, destination, signal)
-              return { ...result, ...(permission && { permission }), ...(planMode && { planMode }) }
+              return { ...result, ...(queuedForLater && { queuedForLater }), ...(permission && { permission }), ...(planMode && { planMode }) }
             })
             const result = await (start ? submit(destination, run) : run())
             if (!start) return result

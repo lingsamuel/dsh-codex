@@ -261,9 +261,10 @@ test('工作树草稿失败后保留提交身份，成功时接纳并打开原�
   const thread = { id: 'new-native', cwd: '/new-worktree' }
   const lifecycle = []
   let selected = worktree
+  let selectedModel = { model: 'mock-model' }
   let fail = true
   const draft = { getSnapshot: () => selected, clear(value) { if (selected === value) selected = undefined } }
-  const model = { getSnapshot: () => undefined, clear() {} }
+  const model = { getSnapshot: () => selectedModel, clear(value) { if (selectedModel === value) selectedModel = undefined } }
   const state = { blank: true, pendingSubmissions: [] }
   const history = {
     session: { getSnapshot: () => state },
@@ -282,7 +283,7 @@ test('工作树草稿失败后保留提交身份，成功时接纳并打开原�
     return fail ? Response.json({ error: 'retry' }, { status: 409 }) : Response.json({ thread })
   })
   const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native-draft', history, model, undefined,
-    draft, result => lifecycle.push(result.thread.id))
+    draft, (result, confirmed, handoff) => { handoff?.(); lifecycle.push(result.thread.id) })
   async function send() {
     const { requestId } = input.beginSubmission({ mode: 'queue', text: '开始', attachments: [],
       onAccept: () => lifecycle.push('accepted'), onRetire: result => lifecycle.push(result.reason) })
@@ -290,9 +291,11 @@ test('工作树草稿失败后保留提交身份，成功时接纳并打开原�
   }
   assert.equal((await send()).ok, false)
   assert.equal(selected, worktree)
+  assert.deepEqual(selectedModel, { model: 'mock-model' })
   fail = false
   assert.equal((await send()).ok, true)
   assert.equal(selected, undefined)
+  assert.equal(selectedModel, undefined)
   assert.deepEqual(lifecycle, ['failed', 'accepted', 'observed', thread.id])
 })
 

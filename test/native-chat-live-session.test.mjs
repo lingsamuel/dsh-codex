@@ -588,6 +588,112 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
   assert.equal(history.session.getSnapshot().running, false)
 })
 
+test('空闲会话提交后立即回显，队列确认与历史推送之间气泡持续可见', async t => {
+  const source = mockTransport(t)
+  const ctx = { effect: install => t.after(install()) }
+  const history = createCodexHistory(ctx, { id: 'thread' })
+  const input = createSessionInput(ctx, 'thread', history, { getSnapshot: () => undefined, clear() {} })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const reply = Promise.withResolvers()
+  globalThis.fetch = () => reply.promise
+  await emit({ type: 'snapshot', page: { data: [] }, mode: 'live', status: { type: 'idle' } })
+  const content = [{ type: 'text', text: '在回答之前显示' }]
+  const accepted = t.mock.fn()
+  const retired = t.mock.fn()
+  const { requestId } = input.beginSubmission({ mode: 'queue', text: content[0].text, attachments: [],
+    onAccept: accepted, onRetire: retired })
+  const echoes = () => history.session.getSnapshot().pendingSubmissions.map(({ requestId, placement, text }) =>
+    [requestId, placement, text])
+  const echo = [[requestId, 'transcript', content[0].text]]
+  assert.deepEqual(echoes(), echo)
+  const sending = input.prompt(content, 'queue', undefined, requestId)
+  const queued = { id: 'queued', clientUserMessageId: requestId, input: content }
+  await emit({ type: 'queue', submissions: [queued] })
+  assert.equal(accepted.mock.callCount(), 1)
+  assert.deepEqual(echoes(), echo)
+
+  reply.resolve(Response.json({ queuedSubmission: queued }))
+  assert.equal((await sending).ok, true)
+  await emit({ type: 'queue', submissions: [] })
+  assert.deepEqual(echoes(), echo)
+  assert.equal(retired.mock.callCount(), 0)
+
+  await emit({ type: 'change', turn: { id: 'current', status: 'inProgress' },
+    items: [{ type: 'userMessage', id: 'sent', clientId: requestId, content }] })
+  assert.deepEqual(echoes(), [])
+  assert.equal(accepted.mock.callCount(), 1)
+  assert.equal(retired.mock.callCount(), 1)
+  assert.deepEqual(history.events.getSnapshot().entries.filter(({ event }) => event.type === 'user/message')
+    .map(({ event }) => [event.data.source.rpcId, event.data.content]), [[requestId, content]])
+
+  // 另一个客户端已启动轮次，但本页还没有收到活动状态。确认为真正等待的队首要交给队列。
+  const waiting = input.beginSubmission({ mode: 'queue', text: content[0].text, attachments: [] })
+  const queuedForLater = { ...queued, id: 'waiting', clientUserMessageId: waiting.requestId }
+  const waitingReply = Promise.withResolvers()
+  globalThis.fetch = () => waitingReply.promise
+  const waitingSend = input.prompt(content, 'queue', undefined, waiting.requestId)
+  await emit({ type: 'queue', submissions: [queuedForLater] })
+  assert.equal(echoes()[0]?.[1], 'transcript')
+  waitingReply.resolve(Response.json({ queuedSubmission: queuedForLater, queuedForLater: true }))
+  assert.equal((await waitingSend).ok, true)
+  assert.deepEqual(echoes(), [])
+  assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0]?.id, queuedForLater.id)
+})
+
+test('首条消息切换到工作树会话时接续本地气泡，直到原生历史接手', async t => {
+  const source = mockTransport(t)
+  const original = { id: 'original', cwd: '/workspace', blank: true, status: { type: 'idle' } }
+  const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
+  const store = createSnapshotStore({ threads: [original], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+  const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
+    acceptThread(thread) { store.update(state => { state.threads.push(thread) }) } }
+  const services = new Map()
+  const ctx = { slots: { subscribe() {} }, provide: (key, value) => services.set(key, value), effect: install => t.after(install()),
+    inject(services, install) { install({ ...ctx, uiWorkspace }) },
+    plugin() {
+      const stops = []
+      return { ctx: { extend: () => ({ effect: install => stops.push(install()) }) },
+        dispose: () => stops.splice(0).reverse().forEach(stop => stop?.()) }
+    } }
+  const main = { source: 'mainView', facets: { conversation: true } }
+  let view
+  const uiWorkspace = { openSession(id) {
+    const next = services.get('sessions').retain(id, main)
+    view?.release()
+    view = next
+  } }
+  provideCodexControllers(ctx, catalog)
+  t.after(() => view.release())
+  const draft = view.binding.session
+  draft.worktreeDraft.set({ kind: 'new', id: crypto.randomUUID() })
+  const reply = Promise.withResolvers()
+  globalThis.fetch = () => reply.promise
+  const content = [{ type: 'text', text: '这是新会话的首条消息' }]
+  const accepted = t.mock.fn()
+  const retired = t.mock.fn()
+  const { requestId } = draft.beginSubmission({ mode: 'queue', text: content[0].text, attachments: [],
+    onAccept: accepted, onRetire: retired })
+  const sending = draft.prompt(content, 'queue', undefined, requestId)
+  assert.equal(draft.getSnapshot().pendingSubmissions[0]?.text, content[0].text)
+  // 恢复丢失的首发回执时，历史仍保留最早提交的 ID。
+  const nativeRequestId = 'original-attempt'
+  reply.resolve(Response.json({ thread: native, clientUserMessageId: nativeRequestId }))
+  assert.equal((await sending).ok, true)
+  t.mock.timers.tick(0)
+  assert.equal(view.sessionId, native.id)
+  assert.deepEqual(view.binding.session.getSnapshot().pendingSubmissions.map(item => item.requestId), [nativeRequestId])
+  assert.equal(accepted.mock.callCount(), 1)
+  assert.equal(retired.mock.callCount(), 0)
+
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  await emit({ type: 'snapshot', page: { data: [] }, mode: 'live', status: { type: 'idle' } })
+  assert.equal(view.binding.session.getSnapshot().pendingSubmissions[0]?.text, content[0].text)
+  await emit({ type: 'change', turn: { id: 'first', status: 'inProgress' },
+    items: [{ type: 'userMessage', id: 'sent', clientId: nativeRequestId, content }] })
+  assert.deepEqual(view.binding.session.getSnapshot().pendingSubmissions, [])
+  assert.equal(retired.mock.callCount(), 1)
+})
+
 test('待发插话副本保留在队列区域，不参与再次插话或编辑器草稿提交', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
