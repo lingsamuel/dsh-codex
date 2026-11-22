@@ -164,3 +164,12 @@ test('读取原生 MCP 工具分页、刷新配置并关联 OAuth 完成通知',
   assert.equal(updated.servers[1].authStatus, 'oAuth')
   assert.equal(updated.servers[1].runtimeStatus, 'connected')
 })
+
+test('网页可清除填过的可选 MCP 文本字段', async () => {
+  const { mcpFieldInput } = await import('../src/client/native-dsh/mcp-field-input.js')
+  assert.equal(mcpFieldInput({ type: 'string', minLength: 1 }, { value: 'text' }), 'text')
+  assert.equal(mcpFieldInput({ type: 'string', minLength: 1 }, { value: '' }), undefined)
+  assert.equal(mcpFieldInput({ type: 'string', format: 'email' }, { value: '' }), undefined)
+  assert.equal(mcpFieldInput({ type: 'string', minLength: 1, required: true }, { value: '' }), '')
+  assert.equal(mcpFieldInput({ type: 'string' }, { value: '' }), '')
+})

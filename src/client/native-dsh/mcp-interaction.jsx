@@ -1,6 +1,7 @@
 import { Button, Checkbox, Input, Modal, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useId, useRef, useState } from 'react'
 import { writeMcpElicitation } from '../api.js'
+import { mcpFieldInput } from './mcp-field-input.js'
 
 const locale = 'codex.mcpInteraction'
 const labels = {
@@ -51,7 +52,7 @@ function RequestField({ field, value, update, disabled, t }) {
       min={field.minimum ?? undefined} max={field.maximum ?? undefined} step={field.type === 'integer' ? 1 : 'any'}
       aria-required={field.required} aria-describedby={field.description ? `${id}-description` : undefined}
       placeholder={field.format === 'date-time' ? t('dateTime') : undefined}
-      onChange={event => update(numeric ? (event.target.value === '' ? undefined : event.target.valueAsNumber) : event.target.value)} />}
+      onChange={event => update(mcpFieldInput(field, event.target))} />}
   </div>
 }
 
