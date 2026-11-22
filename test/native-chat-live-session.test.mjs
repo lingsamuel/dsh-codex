@@ -5,8 +5,10 @@ import test from 'node:test'
 const storeModule = `data:text/javascript,${encodeURIComponent(`
   export function createSnapshotStore(initial) {
     let value = initial
-    return { getSnapshot: () => value, subscribe: () => () => {}, set(next) { value = next },
-      update(edit) { const next = structuredClone(value); edit(next); value = next } }
+    const listeners = new Set()
+    function set(next) { value = next; for (const notify of listeners) notify() }
+    return { getSnapshot: () => value, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) }, set,
+      update(edit) { const next = structuredClone(value); edit(next); set(next) } }
   }
 `)}`
 const hook = registerHooks({
@@ -128,7 +130,7 @@ test('one initial history request keeps the view usable when SSE cannot open', a
 
 test('搜索定位只向前加载未读过的页，保留较新的聊天窗口', async t => {
   const currentSource = mockTransport(t)
-  const history = createCodexHistory({ effect() {} }, { id: 'thread', historyMode: 'paginated' })
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
   const emit = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
   await emit({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live' })
   const original = history.events.getSnapshot().entries.at(-1)
@@ -145,6 +147,28 @@ test('搜索定位只向前加载未读过的页，保留较新的聊天窗口',
   assert.equal(reads, 1)
   assert.strictEqual(history.events.getSnapshot().entries.at(-1), original)
   assert.equal(await history.session.findMessage({ turnId: 'older', itemId: 'missing' }), undefined)
+})
+
+test('轮次导航摘要与已加载轮次使用同一编号，跳转按原生 ID 补齐旧历史', async t => {
+  const currentSource = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread', historyMode: 'paginated' })
+  globalThis.fetch = async url => {
+    assert.equal(url.searchParams.get('cursor'), 'older')
+    return url.pathname.endsWith('/turn-outline')
+      ? Response.json([{ id: 'older-turn', prompt: '旧正文预览', response: '' }])
+      : Response.json({ data: [turn('older-turn', 'completed', [ask])], nextCursor: null })
+  }
+  const receive = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
+  await receive({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live' })
+  const outline = history.session.projections.faceOf('turnOutline')
+  const [entry] = outline.getSnapshot() ?? await new Promise(resolve => {
+    const stop = outline.subscribe(() => { stop(); resolve(outline.getSnapshot()) })
+  })
+  assert.equal(entry.prompt, '旧正文预览')
+  await history.session.loadThrough(entry.seq)
+  const [start] = history.events.getSnapshot().entries
+  assert.equal(start.event.data.codexTurnId, 'older-turn')
+  assert.equal(start.event.data.turn, entry.turn)
 })
 
 test('a reconnect across a page gap fills that gap without discarding the existing window', async t => {

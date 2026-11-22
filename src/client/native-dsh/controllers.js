@@ -4,7 +4,6 @@ import { createCodexHistory } from './session-events.js'
 import { subagentAddress } from './subagents.js'
 
 const searchResultLimit = 20
-const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 const unsupported = '当前页面仅支持浏览 Codex 历史。'
 
 async function rejectWrite() {
@@ -18,10 +17,7 @@ function readonlyBinding(ctx, thread, catalog) {
     sessionId: thread.id,
     eventSource: history.events,
     ready: history.ready,
-    session: {
-      ...history.session,
-      projections: { faceOf: () => emptyProjection },
-    },
+    session: history.session,
   }
 }
 

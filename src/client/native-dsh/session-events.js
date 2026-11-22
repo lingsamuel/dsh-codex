@@ -8,6 +8,10 @@ import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
 
+const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
+// 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
+const outlineSequenceStart = 2 ** 40
+
 function pageBounds(entry) {
   return entry && { beforeSeq: entry.event.seq, beforeTurn: entry.event.data.turn }
 }
@@ -43,12 +47,15 @@ export function createCodexHistory(ctx, thread, catalog) {
   })
   const transcript = createLiveTranscript()
   const attachments = new Map()
+  const outline = createSnapshotStore(undefined)
+  const outlineTargets = new Map()
   const rows = []
   let nextCursor
   let pending
   let queue = Promise.resolve()
   let opened = false
   let triedFallback = false
+  let outlineRevision = 0
   let markReady
   const ready = new Promise(resolve => { markReady = resolve })
   ctx.effect(() => () => {
@@ -149,6 +156,27 @@ export function createCodexHistory(ctx, thread, catalog) {
     return page
   }
 
+  async function refreshOutline() {
+    const anchor = rows[0]?.entries[0]?.event.data.turn
+    const cursor = nextCursor
+    const revision = ++outlineRevision
+    outlineTargets.clear()
+    outline.set(undefined)
+    if (!thread.historyMode || anchor === undefined || !cursor) return
+    try {
+      const earlier = await readPage('turn-outline', { threadId: thread.id, cursor }, signal)
+      if (signal.aborted || revision !== outlineRevision) return
+      outline.set(earlier.map(({ id, prompt, response }, index) => {
+        const turn = anchor - index - 1
+        const seq = outlineSequenceStart + turn
+        outlineTargets.set(seq, id)
+        return { turn, seq, prompt, response }
+      }).reverse())
+    } catch {
+      // 原生导航仍可使用已加载的轮次。
+    }
+  }
+
   async function receiveSnapshot({ page, status, mode, readState }) {
     if (!opened) {
       await addOlderPage(page)
@@ -183,6 +211,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     if (status) catalog?.setStatus(thread.id, status)
     if (readState !== undefined) catalog?.setReadState(thread.id, readState)
     markReady()
+    void refreshOutline()
   }
 
   function fail(error) {
@@ -248,6 +277,11 @@ export function createCodexHistory(ctx, thread, catalog) {
   }
 
   async function loadThrough(seq) {
+    const turnId = outlineTargets.get(seq)
+    if (turnId) {
+      await loadTurn(turnId)
+      return
+    }
     while (!signal.aborted && nextCursor && events.getSnapshot().entries[0]?.event.seq > seq) {
       const cursor = nextCursor
       await loadOlder()
@@ -255,24 +289,26 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
-  /** 定位命中消息，沿用聊天的历史页和现有阅读窗口。 */
-  async function findMessage({ turnId, itemId }, requestSignal = signal) {
+  async function loadTurn(turnId, requestSignal = signal) {
     await ready
     while (!signal.aborted && !requestSignal.aborted) {
       const row = rows.find(turn => turn.id === turnId)
-      if (row) {
-        for (const { event } of row.entries) {
-          if (event.type === 'user/message' && event.data.id === itemId) return { kind: 'input-message', id: itemId }
-          if (event.type === 'assistant/message' && event.data.message.id === itemId) {
-            return { kind: 'assistant-step', id: `${event.data.turn}:${event.data.step}` }
-          }
-        }
-        return
-      }
+      if (row) return row
       const cursor = nextCursor
       if (!cursor) return
       await loadOlder()
       if (cursor === nextCursor) return
+    }
+  }
+
+  /** 定位命中消息，沿用聊天的历史页和现有阅读窗口。 */
+  async function findMessage({ turnId, itemId }, requestSignal) {
+    const row = await loadTurn(turnId, requestSignal)
+    for (const { event } of row?.entries ?? []) {
+      if (event.type === 'user/message' && event.data.id === itemId) return { kind: 'input-message', id: itemId }
+      if (event.type === 'assistant/message' && event.data.message.id === itemId) {
+        return { kind: 'assistant-step', id: `${event.data.turn}:${event.data.step}` }
+      }
     }
   }
 
@@ -286,6 +322,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       loadOlder,
       loadThrough,
       findMessage,
+      projections: { faceOf: key => key === 'turnOutline' ? outline : emptyProjection },
       async readAttachment(id) {
         const value = attachments.get(id)
         return value
