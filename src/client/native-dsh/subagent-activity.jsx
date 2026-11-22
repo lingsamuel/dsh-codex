@@ -10,22 +10,24 @@ const labels = {
 }
 const iconSize = 'calc(16px + var(--dsh-content-font-delta, 0px))'
 const rowStyle = {
-  display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: '6px', minWidth: 0,
-  fontSize: 'var(--dsh-content-font-size, 14px)',
-  lineHeight: 'calc(24px + var(--dsh-content-font-delta, 0px))',
+  display: 'flex', alignItems: 'center', columnGap: '6px', minWidth: 0,
+  font: 'var(--dsw-font-markdown-base)',
   color: 'var(--dsw-alias-label-tertiary)',
 }
 const iconStyle = { display: 'inline-grid', placeItems: 'center', flex: 'none', width: iconSize, height: iconSize }
-const pathStyle = {
-  height: 'auto', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: '0 5px',
+const sentenceStyle = { minWidth: 0, overflowWrap: 'anywhere' }
+// 同 DSH 正文的行内代码共享文本基线，点击控件继承代码的排版。
+const codeStyle = {
+  display: 'inline-flex', alignItems: 'center', maxWidth: '100%', boxSizing: 'border-box', padding: '0 5px',
+  font: 'var(--dsw-font-markdown-code)', fontFamily: 'var(--ds-font-family-code)', fontSize: '0.875em',
   backgroundColor: 'var(--dsw-alias-markdown-inline-code)',
   border: '0.5px solid var(--dsw-alias-border-l1)', borderRadius: 'var(--dsw-radius-sm)',
-  font: 'var(--dsw-font-markdown-code, 0.875em/1.5 monospace)',
-  fontFamily: 'var(--dsh-font-family-code, "Cascadia Mono", "Source Code Pro"), var(--ds-font-family-code, ui-monospace, monospace)',
-  color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start',
+  color: 'var(--dsw-alias-label-secondary)',
 }
-// 等宽字体的字形在行框里略偏上，只校正文字的位置，标签外框仍与过程行居中。
-const pathTextStyle = { display: 'block', font: 'inherit', minWidth: 0, transform: 'translateY(0.04em)' }
+const pathButtonStyle = {
+  display: 'block', height: 'auto', minWidth: 0, padding: 0,
+  background: 'none', font: 'inherit', color: 'inherit', textAlign: 'start', overflowWrap: 'inherit',
+}
 
 function SubagentActivity({ node, open, t }) {
   const { kind, agentThreadId, agentPath } = node.data
@@ -50,14 +52,15 @@ function SubagentActivity({ node, open, t }) {
     }
   }
 
-  const path = <code style={pathTextStyle}>{agentPath}</code>
   return <div style={rowStyle}>
     <span style={iconStyle} aria-hidden><IconUsersOutlineRegular size={16} /></span>
-    <span>{t(kind)}</span>
-    {agentThreadId
-      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>{path}</Button>
-      : <span style={pathStyle}>{path}</span>}
-    {unavailable && <span role="status">{t('unavailable')}</span>}
+    <div style={sentenceStyle}>
+      {t(kind)}{' '}
+      <code style={codeStyle}>{agentThreadId
+        ? <Button size="sm" onClick={openChild} disabled={busy} style={pathButtonStyle}>{agentPath}</Button>
+        : agentPath}</code>
+      {unavailable && <> <span role="status">{t('unavailable')}</span></>}
+    </div>
   </div>
 }
 
