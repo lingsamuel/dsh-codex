@@ -44,19 +44,33 @@ function turn(id, status, items) {
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
 
-test('新分叉领先于已有普通会话并保留手动顺序', async t => {
-  mockTransport(t)
-  const source = { id: 'source', cwd: '/workspace', updatedAt: 1 }
-  const store = createSnapshotStore({
-    projects: [], threads: [source, { ...source, id: 'another' }], childThreads: {},
-    workspacePaths: {},
-  })
-  const fork = { ...source, id: 'fork', updatedAt: 2 }
-  globalThis.fetch = async (url, { body }) => {
+test('网页分叉、CLI 增量和重连补齐共用手动顺序', async t => {
+  const currentSource = mockTransport(t)
+  const now = Math.floor(Date.now() / 1000)
+  const openedAt = now * 1000 + 500
+  t.mock.method(Date, 'now', () => openedAt)
+  function threadIdAt(offset) {
+    const time = (openedAt + offset).toString(16).padStart(12, '0')
+    return `${time.slice(0, 8)}-${time.slice(8)}-7000-8000-000000000001`
+  }
+  const source = { id: 'source', cwd: '/workspace', createdAt: now - 600, updatedAt: now - 60, preview: 'Existing' }
+  const legacy = { ...source, id: threadIdAt(-1), createdAt: now, updatedAt: now + 10 }
+  const fork = { ...source, id: 'fork' }
+  let indexed = [source, { ...source, id: 'another' }]
+  globalThis.fetch = async (url, { body } = {}) => {
+    if (url.pathname.endsWith('/catalog')) {
+      const complete = url.searchParams.has('complete')
+      return Response.json({ projects: [], threads: complete ? [...indexed, legacy] : indexed, workspacePaths: {}, complete })
+    }
+    if (url.pathname.endsWith('/archived')) return Response.json({ threads: [], workspacePaths: {} })
     assert.equal(url.pathname, '/api/codex/thread-action')
     assert.deepEqual(JSON.parse(body), { action: 'fork', threadId: source.id })
-    return Response.json({ thread: fork })
+    return Response.json({ thread: fork, workspacePaths: {} })
   }
+  const controller = new AbortController()
+  t.after(() => controller.abort())
+  const catalog = createHistoryCatalog(controller.signal)
+  const emit = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
   const manualOrder = createSnapshotStore({
     orderBy: 'manual',
     sessionOrderByAccount: {
@@ -70,27 +84,58 @@ test('新分叉领先于已有普通会话并保留手动顺序', async t => {
   } }
   const services = new Map()
   const ctx = {
-    slots: { entriesOfSlot: () => [{ store: { create: () => storeInstance } }] },
+    slots: { entriesOfSlot: () => [{ store: { create: () => storeInstance } }], subscribe() {} },
     provide: (key, value) => services.set(key, value),
     effect: install => install(),
     inject() {},
   }
-  provideCodexControllers(ctx, {
-    store,
-    acceptThread: thread => store.update(state => state.threads.push(thread)),
-  })
-  const expected = {
-    'directory:/workspace': ['fork', 'another', 'source'],
-    '__flat_session_order__': ['fork', 'source', 'unrelated', 'another'],
-    'directory:/other': ['unrelated'],
+  provideCodexControllers(ctx, catalog)
+  const settle = () => new Promise(resolve => setImmediate(resolve))
+  await settle()
+  assert.ok(services.get('sessions').list.getSnapshot().byId[legacy.id])
+
+  function assertOrder(leading) {
+    assert.deepEqual(manualOrder.getSnapshot().sessionOrderByAccount, {
+      'directory:/workspace': [...leading, 'another', 'source'],
+      '__flat_session_order__': [...leading, 'source', 'unrelated', 'another'],
+      'directory:/other': ['unrelated'],
+    })
   }
+  assertOrder([])
+  const gap = { ...source, id: threadIdAt(1), createdAt: now, updatedAt: now }
+  indexed = [...indexed, gap]
+  emit({ type: 'catalog-ready' })
+  await settle()
+  assertOrder([gap.id])
+
   await services.get('sessions').fork({ sessionId: source.id,
-    onCreated: () => assert.deepEqual(manualOrder.getSnapshot().sessionOrderByAccount, expected) })
+    onCreated: () => assertOrder(['fork', gap.id]) })
+
+  const cliDraft = { ...source, id: threadIdAt(2), source: 'cli', blank: true, status: { type: 'idle' },
+    preview: '', createdAt: now, updatedAt: now }
+  emit({ type: 'thread', id: cliDraft.id, thread: cliDraft })
+  assertOrder(['fork', gap.id])
+  emit({ type: 'notification', notification: { method: 'thread/status/changed',
+    params: { threadId: cliDraft.id, status: { type: 'active', activeFlags: [] } } } })
+  assertOrder([cliDraft.id, 'fork', gap.id])
+  const cli = { ...cliDraft, blank: false, preview: 'CLI first message' }
+  emit({ type: 'notification', notification: { method: 'thread/status/changed',
+    params: { threadId: cli.id, status: cli.status } }, thread: cli })
+  assertOrder([cli.id, 'fork', gap.id])
+
+  const missed = { ...cli, id: 'missed', createdAt: now + 2 }
+  indexed = [...indexed, fork, cli, missed, { ...legacy, id: 'backfill' }]
+  emit({ type: 'catalog-ready' })
+  await settle()
+  assert.ok(services.get('sessions').list.getSnapshot().byId.backfill)
+  assertOrder(['missed', cli.id, 'fork', gap.id])
+  emit({ type: 'thread', id: cli.id, thread: { ...cli, updatedAt: now + 20 } })
+  assertOrder(['missed', cli.id, 'fork', gap.id])
 
   manualOrder.update(state => { state.orderBy = 'updated' })
   fork.id = 'recent-fork'
   await services.get('sessions').fork({ sessionId: source.id })
-  assert.deepEqual(manualOrder.getSnapshot().sessionOrderByAccount, expected)
+  assertOrder(['missed', cli.id, 'fork', gap.id])
 })
 
 test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', async t => {

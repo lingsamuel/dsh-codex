@@ -19,11 +19,19 @@ function withThreadStatus(thread, status, blank = thread.blank) {
   }) }
 }
 
+function threadCreatedAt(thread) {
+  // Codex 会话 ID 保留毫秒级创建时间，摘要中的时间只有秒级精度。
+  const uuidTime = /^([0-9a-f]{8})-([0-9a-f]{4})-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.exec(thread.id)
+  return uuidTime ? Number.parseInt(uuidTime[1] + uuidTime[2], 16) : thread.createdAt * 1000
+}
+
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
 export function createHistoryCatalog(signal) {
+  const openedAt = Date.now()
   const store = createSnapshotStore({
     projects: [],
     threads: [],
+    newThreadIds: [],
     childThreads: {},
     childCatalogs: {},
     unreadIds: [],
@@ -39,9 +47,11 @@ export function createHistoryCatalog(signal) {
   let pendingRefresh = false
   let connected = false
   let verified = false
+  let completeReadStarted = false
   let liveProjects
   let archivedThreads = []
   let nextReadVisit = 0
+  const observedThreads = new Map()
   const observedStatuses = new Map()
   const observedReadStates = new Map()
   const searchThreads = new Map()
@@ -51,12 +61,31 @@ export function createHistoryCatalog(signal) {
   const changedPaths = {}
   let followsLocalReceipts = false
 
+  function recordNewThreads(state, threads, confirmedCreation = false) {
+    const additions = []
+    for (const thread of threads) {
+      if (thread.blank || thread.ephemeral || subagentAddress(thread)) continue
+      const observed = observedThreads.get(thread.id)
+      if (observed === true || (observed === false && !confirmedCreation)) continue
+      // 旧历史可能刚更新或刚补齐，用创建时间区分会话新建和目录发现。
+      const createdAt = threadCreatedAt(thread)
+      if (!confirmedCreation && !Number.isFinite(createdAt)) continue
+      const created = !thread.archived && (confirmedCreation || createdAt >= openedAt)
+      observedThreads.set(thread.id, created)
+      if (created) additions.push({ id: thread.id, createdAt })
+    }
+    additions.sort((a, b) => a.createdAt - b.createdAt)
+    for (const thread of additions) state.newThreadIds.push(thread.id)
+  }
+
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
       state.projects = liveProjects ?? projects
-      state.threads = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges).map(thread => observedStatuses.has(thread.id)
+      const merged = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges)
+      state.threads = merged.map(thread => observedStatuses.has(thread.id)
         ? withThreadStatus(thread, observedStatuses.get(thread.id))
         : thread)
+      recordNewThreads(state, merged)
       state.readStates = Object.fromEntries(state.threads.flatMap(({ id, readState }) => {
         const receipt = observedReadStates.get(id) ?? readState
         return receipt ? [[id, receipt]] : []
@@ -73,6 +102,7 @@ export function createHistoryCatalog(signal) {
 
   async function refreshCompleteCatalog() {
     const earlier = new Map(threadChanges)
+    completeReadStarted = true
     const snapshot = await readPage('catalog', { complete: 1, fresh: 1 }, signal)
     // 原生快照涵盖读取前的增量。从此保留新的事件，避免旧启动事件盖住已保存的预览。
     for (const thread of snapshot.threads) {
@@ -90,6 +120,7 @@ export function createHistoryCatalog(signal) {
       Object.assign(changedPaths, workspacePaths)
       store.update(state => {
         state.threads = applyChanges(mergePages(state.threads.filter(thread => !thread.archived), threads), threadChanges)
+        recordNewThreads(state, threads)
         for (const { id, readState } of threads) {
           if (readState && !state.readStates[id]) state.readStates[id] = readState
         }
@@ -218,8 +249,8 @@ export function createHistoryCatalog(signal) {
     loadChildren,
     resolveSubagent,
     setReadState,
-    acceptThread(thread, workspacePaths) {
-      receive({ type: 'thread', id: thread.id, thread, workspacePaths })
+    acceptThread(thread, workspacePaths, confirmedCreation = false) {
+      receive({ type: 'thread', id: thread.id, thread, workspacePaths, confirmedCreation })
     },
     acceptProject(project, workspacePaths) {
       const projects = mergePages(store.getSnapshot().projects, [project])
@@ -259,6 +290,7 @@ export function createHistoryCatalog(signal) {
         for (const thread of found) searchThreads.set(thread.id, thread)
         Object.assign(changedPaths, workspacePaths)
         state.threads = mergePages(state.threads, found)
+        recordNewThreads(state, found)
         state.workspacePaths = { ...state.workspacePaths, ...workspacePaths }
       })
       return { items: data.map(({ thread, snippet }) => ({ sessionId: thread.id, snippet })), hasMore: Boolean(nextCursor) }
@@ -275,7 +307,10 @@ export function createHistoryCatalog(signal) {
       if (thread.blank && !updated.blank) threadChanges.set(threadId, updated)
       store.update(state => {
         if (child) state.childThreads[threadId] = updated
-        else state.threads[index] = updated
+        else {
+          state.threads[index] = updated
+          if (thread.blank && status?.type === 'active') recordNewThreads(state, [updated])
+        }
         if (state.selected?.id === threadId) state.selected = updated
       })
     },
@@ -298,8 +333,10 @@ export function createHistoryCatalog(signal) {
 
   function receive(frame) {
     if (frame.type === 'catalog-ready') {
-      if (connected) void refresh(true)
+      // 完整清单可能先于首次订阅开始读取，需要补上两者之间的新增。
+      const catchUp = connected || completeReadStarted
       connected = true
+      if (catchUp) void refresh(true)
     } else if (frame.type === 'unread') catalog.applyUnread(frame)
     else if (frame.type === 'notification') {
       const { method, params } = frame.notification
@@ -309,7 +346,7 @@ export function createHistoryCatalog(signal) {
       }
       if (method === 'thread/readState/changed') catalog.setReadState(params.threadId, params.readState)
     } else if (frame.type === 'thread') {
-      const { id, thread, readState, workspacePaths } = frame
+      const { id, thread, readState, workspacePaths, confirmedCreation } = frame
       const { childThreads, threads } = store.getSnapshot()
       const previous = childThreads[id] ?? threads.find(thread => thread.id === id)
       const status = observedStatuses.get(id) ?? thread?.status ?? previous?.status
@@ -341,6 +378,7 @@ export function createHistoryCatalog(signal) {
       Object.assign(changedPaths, workspacePaths)
       store.update(state => {
         state.threads = applyChanges(state.threads, [[id, current]]).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+        if (current && !thread.blank) recordNewThreads(state, [current], confirmedCreation)
         Object.assign(state.workspacePaths, workspacePaths)
         if (current && state.selected?.id === id) state.selected = current
         if (!current) delete state.readStates[id]

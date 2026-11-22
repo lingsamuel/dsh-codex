@@ -7,6 +7,7 @@ import { writeConversationAction, writeThreadAction } from '../api.js'
 
 const searchResultLimit = 20
 const flatSessionOrderKey = '__flat_session_order__'
+const workspaceSlot = 'sidebar.workspaces'
 const unsupported = '此操作暂未开放，请使用 Codex CLI。'
 
 async function rejectWrite() {
@@ -53,12 +54,38 @@ export function provideCodexControllers(ctx, catalog) {
   const projected = observe(catalog.store, projectCatalog)
   const list = createSnapshotStore({ ...projected.getSnapshot().sessions, phase: 'pending' })
   let initialization = 'waiting'
+  let handledNewThreads = 0
   const bindings = new Map()
   const retention = new Map()
   const modelDrafts = createSnapshotStore(new Map())
   const scopeId = Symbol('Codex session')
 
+  function syncManualOrder() {
+    const { newThreadIds } = catalog.store.getSnapshot()
+    if (handledNewThreads === newThreadIds.length) return
+    const view = ctx.slots.entriesOfSlot(workspaceSlot)[0]?.store?.create()
+    if (!view) return
+    const arrivals = newThreadIds.slice(handledNewThreads)
+    handledNewThreads = newThreadIds.length
+    const viewState = view.getSnapshot()
+    if (viewState.orderBy !== 'manual') return
+
+    const { sessions, workspaces } = projected.getSnapshot()
+    const orders = {}
+    for (const id of arrivals) {
+      if (!sessions.byId[id] || sessions.byId[id].blank || workspaces.archivedSessionIds.includes(id)) continue
+      const workspace = workspaces.items.find(item => item.sessionIds.includes(id))
+      for (const key of [workspace?.workspaceId ?? '', flatSessionOrderKey]) {
+        const order = orders[key] ?? viewState.sessionOrderByAccount[key] ?? []
+        if (!order.includes(id)) orders[key] = [id, ...order]
+      }
+    }
+    // 复用侧栏保存顺序的操作，置顶分区继续由 DSH 生成。
+    if (Object.keys(orders).length) view.actions.syncSessionOrders(orders)
+  }
+
   function syncSessions() {
+    syncManualOrder()
     const snapshot = projected.getSnapshot().sessions
     list.set(initialization === 'ready' ? snapshot : { ...snapshot, phase: 'pending' })
   }
@@ -141,19 +168,7 @@ export function provideCodexControllers(ctx, catalog) {
       if (atSeq !== undefined && !lastTurnId) throw new Error('找不到可分支的 Codex 轮次。')
       const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'fork', lastTurnId })
       // DSH 的回复分支会立即打开新会话，必须先让保留引用能从原生目录找到它。
-      catalog.acceptThread(thread, workspacePaths)
-      const view = ctx.slots.entriesOfSlot('sidebar.workspaces')[0]?.store?.create()
-      const viewState = view?.getSnapshot()
-      if (viewState?.orderBy === 'manual') {
-        const workspace = workspaces.list.getSnapshot().items.find(item => item.sessionIds.includes(thread.id))
-        const orders = {}
-        // 复用侧栏保存顺序的操作，置顶分区继续由 DSH 生成。
-        for (const key of [workspace?.workspaceId ?? '', flatSessionOrderKey]) {
-          const order = viewState.sessionOrderByAccount[key] ?? []
-          orders[key] = [thread.id, ...order.filter(id => id !== thread.id)]
-        }
-        view.actions.syncSessionOrders(orders)
-      }
+      catalog.acceptThread(thread, workspacePaths, true)
       onCreated?.(thread.id)
       return thread.id
     },
@@ -203,6 +218,7 @@ export function provideCodexControllers(ctx, catalog) {
   ctx.provide('workspaces', workspaces)
   ctx.provide('fileUpload', { upload: rejectWrite })
   ctx.effect(() => catalog.store.subscribe(syncSessions))
+  ctx.effect(() => ctx.slots.subscribe(workspaceSlot, syncManualOrder))
   ctx.inject(['uiWorkspace'], scope => {
     scope.effect(() => {
       const navigation = scope.uiWorkspace
