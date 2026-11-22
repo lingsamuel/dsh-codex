@@ -16,7 +16,7 @@ const labels = {
     dangerFullAccess: '完全权限', externalSandbox: '外部沙箱', 'on-request': '按需', untrusted: '不受信时', never: '从不', granular: '按类别',
     managed: '托管沙箱', reviewer: '审批人：{name}', user: '用户', auto_review: '自动审查', guardian_subagent: '审查子代理',
     subsequent: '后续轮次 · {details}',
-    currentTurn: '本轮权限 · {mode}', nextTurnMode: '下轮权限 · {name}', unconfirmed: '未确认',
+    currentTurn: '本轮权限 · {mode}', nextTurnMode: '下轮权限 · {name}',
     steerScope: '新权限从下一轮生效，插话沿用本轮权限',
     sessionFullAccess: '完全权限会为此会话的后续轮次解除 Codex 沙箱限制。审批继续由该会话的 Codex 策略决定。',
     defaultFullAccess: '从此网页新建的会话将使用 Codex 完全权限预设并解除沙箱限制。审批方式由 Codex 配置决定。',
@@ -29,7 +29,7 @@ const labels = {
     dangerFullAccess: 'Full Access', externalSandbox: 'External Sandbox', 'on-request': 'On request', untrusted: 'When untrusted', never: 'Never', granular: 'By category',
     managed: 'Managed sandbox', reviewer: 'Reviewer: {name}', user: 'User', auto_review: 'Auto review', guardian_subagent: 'Review subagent',
     subsequent: 'Subsequent turns · {details}',
-    currentTurn: 'Current turn permissions · {mode}', nextTurnMode: 'Next turn permissions · {name}', unconfirmed: 'Unconfirmed',
+    currentTurn: 'Current turn permissions · {mode}', nextTurnMode: 'Next turn permissions · {name}',
     steerScope: 'New permissions apply next turn. Steering uses current turn permissions.',
     sessionFullAccess: 'Full access removes Codex sandbox restrictions for subsequent turns of this session. Codex continues to apply the session’s approval policy.',
     defaultFullAccess: 'New sessions created from this web interface will use Codex Full access without sandbox restrictions. Codex configuration determines approvals.',
@@ -78,6 +78,16 @@ function details(permission, t, heading) {
   return [heading ?? (permission.source !== 'runtime' && effectiveLabel(permission, t)), sandbox && t('sandbox', { mode: sandbox }),
     approval && t('approval', { policy: Object.hasOwn(labels.en, approval) ? t(approval) : approval }),
     reviewer && t('reviewer', { name: Object.hasOwn(labels.en, reviewer) ? t(reviewer) : reviewer })].filter(Boolean).join(' · ')
+}
+
+function permissionsDiffer(turn, next) {
+  if (!turn || !next) return false
+  const fields = ['profileId', 'approvalPolicy', 'approvalsReviewer']
+  if (fields.some(field => turn[field] && next[field] && turn[field] !== next[field])) return true
+  const turnSandbox = sandboxNames[turn.sandbox]
+  const nextSandbox = sandboxNames[next.sandbox]
+  // 原生设置可能只保存托管沙箱。只有双方都能识别出具体模式时才据此判定差异。
+  return Boolean(turnSandbox && nextSandbox && turnSandbox !== 'managed' && nextSandbox !== 'managed' && turnSandbox !== nextSandbox)
 }
 
 function canSelect(state) {
@@ -240,6 +250,7 @@ export function installPermissions(ctx, catalog, signal) {
       const draft = props.usePermissionDraft(value => value)
       const editable = props.useSession(canSelect)
       const turn = props.useSession(state => state.running ? state.live.turnPermission ?? null : undefined)
+      const hasText = props.useInput(input => input.phase === 'plain' && Boolean(input.draft.trim()))
       const current = draft ? { profileId: draft, source: 'draft' } : projection?.permission
       const available = props.usePermissionCatalog(state => state.value?.options)
       const value = current?.profileId && permissionOptionValue(current.profileId)
@@ -248,7 +259,7 @@ export function installPermissions(ctx, catalog, signal) {
       const summary = details(current, t)
       const title = current?.source === 'runtime' ? t('subsequent', { details: summary || effectiveLabel(current, t) }) : summary
       const running = turn !== undefined
-      const turnLabel = running && t('currentTurn', { mode: turn ? permissionLabel(turn, t) : t('unconfirmed') })
+      const showSteerScope = hasText && permissionsDiffer(turn, projection?.permission)
       return createElement('span', { title, style: pickerStyle },
         createElement(Native, {
           ...props, locked: props.locked || !editable, useProjection: () => ({ currentValue }),
@@ -258,7 +269,9 @@ export function installPermissions(ctx, catalog, signal) {
             return props.t(key, ...args)
           },
         }),
-        running && createElement('span', { style: steerScopeStyle, title: turn ? details(turn, t, turnLabel) : turnLabel }, t('steerScope')),
+        showSteerScope && createElement('span', { style: steerScopeStyle,
+          title: details(turn, t, t('currentTurn', { mode: permissionLabel(turn, t) })),
+        }, t('steerScope')),
       )
     },
   })))

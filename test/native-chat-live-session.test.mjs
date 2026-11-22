@@ -242,7 +242,7 @@ test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原�
   assert.deepEqual(projection.getSnapshot().permission, cached)
 })
 
-test('运行中权限选择器说明插话范围，切换预设只提交权限更新', async t => {
+test('运行中有正文且下轮权限有变化时才提示插话范围', async t => {
   mockTransport(t)
   const owner = new AbortController()
   const catalog = createSnapshotStore({ selected: { id: 'thread' } })
@@ -250,7 +250,9 @@ test('运行中权限选择器说明插话范围，切换预设只提交权限�
   const draft = { ...createSnapshotStore(undefined), clear() {} }
   const work = { profileId: ':workspace', sandbox: 'workspace-write', approvalPolicy: 'on-request', source: 'saved' }
   const state = { openState: 'open', running: true, live: { status: { type: 'active' }, turnPermission: work } }
-  const projection = createSnapshotStore({})
+  const input = { phase: 'plain', draft: '' }
+  const unchanged = { permission: { ...work, sandbox: 'workspaceWrite', source: 'runtime' } }
+  const projection = createSnapshotStore(unchanged)
   const session = { permissionDraft: draft, getSnapshot: () => state, projections: { faceOf: () => projection },
     publishPermission: permission => projection.set({ permission }) }
   const calls = []
@@ -282,16 +284,31 @@ test('运行中权限选择器说明插话范围，切换预设只提交权限�
 
   const provided = slot.inject('thread')
   const render = () => slot.component({ ...provided, useProjection: () => projection.getSnapshot(), useSession: use => use(state),
-    usePermissionDraft: use => use(draft.getSnapshot()), usePermissionCatalog: use => use(provided.hooks.permissionCatalog.getSnapshot()), t: key => key })
+    useInput: use => use(input), usePermissionDraft: use => use(draft.getSnapshot()),
+    usePermissionCatalog: use => use(provided.hooks.permissionCatalog.getSnapshot()), t: key => key })
   const hint = () => render().children.find(child => child?.children?.includes('新权限从下一轮生效，插话沿用本轮权限'))
-  assert.equal(hint()?.props.title, '本轮权限 · 工作区内修改 · 沙箱：工作区内修改 · 审批：按需')
   const native = render().children.find(child => child?.type === Native)
   assert.equal(native?.props.t('mode', { name: '仅可查看' }), '下轮权限 · 仅可查看')
 
+  assert.equal(hint(), undefined)
+  input.draft = '补充要求'
+  assert.equal(hint(), undefined)
   assert.equal(await provided.select('read-only'), true)
   assert.deepEqual(calls, [['/api/codex/permission-action', { action: 'select', threadId: 'thread', profileId: ':read-only' }]])
   assert.deepEqual(projection.getSnapshot().permission, readOnly)
   assert.equal(hint()?.props.title, '本轮权限 · 工作区内修改 · 沙箱：工作区内修改 · 审批：按需')
+  input.draft = ' \n '
+  assert.equal(hint(), undefined)
+  input.draft = '补充要求'
+  input.phase = 'sending'
+  assert.equal(hint(), undefined)
+  input.phase = 'plain'
+  projection.set(unchanged)
+  assert.equal(hint(), undefined)
+  projection.set({ permission: readOnly })
+  state.live.turnPermission = undefined
+  assert.equal(hint(), undefined)
+  state.live.turnPermission = work
   state.running = false
   assert.equal(hint(), undefined)
 })
