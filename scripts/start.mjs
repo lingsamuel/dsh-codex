@@ -24,7 +24,7 @@ async function legacyProfilePatch(home, profile, manifest) {
   const entries = composeEntries(layers)
   if (!entries.some(entry => entry.name === pluginName)) return
   const defaults = composeEntries([loadOverlayPatches('dsh', join(root, 'profile', 'cordis.patch.yml'))])
-  const viewIds = new Set(['ui-goal', 'ui-sidebar-files'])
+  const viewIds = new Set(['ui-goal', 'ui-sidebar-files', 'ui-file-actions'])
   const configured = new Set(entries.map(entry => entry.id))
   const missing = defaults.filter(entry => viewIds.has(entry.id) && !configured.has(entry.id))
   if (!missing.length) return

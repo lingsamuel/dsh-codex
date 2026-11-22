@@ -9,6 +9,7 @@ import { parseEntryYaml, stringifyEntryYaml } from '@deepseek-ai/cordis-plugin-i
 const project = fileURLToPath(new URL('../', import.meta.url))
 const dshManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const savedSetting = '- id: ui-conversation\n  config:\n    busyEnterBehavior: steer\n'
+const fileActions = { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' }
 
 async function fixture(t) {
   await mkdir(join(project, '.runtime'), { recursive: true })
@@ -43,7 +44,7 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
   })
   const defaults = await readFile(join(root, 'profile', 'cordis.patch.yml'), 'utf8')
   const previousDefaults = parseEntryYaml(defaults).map(patch => patch.insert ? {
-    insert: patch.insert.filter(entry => !['ui-goal', 'ui-sidebar-files'].includes(entry.id)),
+    insert: patch.insert.filter(entry => !['ui-goal', 'ui-sidebar-files', fileActions.id].includes(entry.id)),
   } : patch)
   const previousPatch = stringifyEntryYaml(previousDefaults) + savedSetting
   await mkdir(profile, { recursive: true })
@@ -53,6 +54,7 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
   const config = dump('--dump-config')
   assert.match(config, /busyEnterBehavior: steer/)
   assert.match(config, /name: ['"]?@deepseek-ai\/dsh-client-ui-goal/)
+  assert.deepEqual(parseEntryYaml(config).find(entry => entry.id === fileActions.id), fileActions)
   assert.deepEqual(parseEntryYaml(config).find(entry => entry.id === 'ui-sidebar-files'), {
     id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files',
   })
@@ -79,6 +81,7 @@ test('临时 Profile 加载插件默认配置，并在进程退出后清理', { 
   const freshConfig = dump('--fresh-profile', '--dump-config')
   assert.match(freshConfig, /name: dsh-chatgpt/)
   assert.doesNotMatch(freshConfig, /busyEnterBehavior: steer/)
+  assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === fileActions.id), fileActions)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === 'ui-sidebar-files'), {
     id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files',
   })

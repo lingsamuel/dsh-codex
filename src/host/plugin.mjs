@@ -25,10 +25,13 @@ export async function apply(ctx) {
   for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory, ctx.attachments)) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
-  const [{ formatCodexMarkdown }, { formatSessionMarkdown }] = await Promise.all([
+  const [{ formatCodexMarkdown }, { formatSessionMarkdown }, { createSessionMediaReferences }, fileSystem] = await Promise.all([
     import('../../dist/session-markdown.mjs'),
     ctx.loader.import('@deepseek-ai/dsh-session-log-export'),
+    import('../../dist/session-media-references.mjs'),
+    ctx.loader.import('@deepseek-ai/dsh-fs'),
   ])
+  ctx.plugin(createSessionMediaReferences(fileSystem))
   const exportSession = createSessionExportRoute(process.env.DSH_CHATGPT_SOCKET, owner.signal,
     (thread, turns, cancelled) => formatCodexMarkdown(thread, turns, formatSessionMarkdown, cancelled))
   ctx.effect(() => ctx.connection.fetch.register(exportSession))
