@@ -62,7 +62,9 @@ test('插件目录、App 授权和安装状态读回原生 Codex，区分本地�
   const remoteId = 'plugins_mail_remote_fixture'
   let installed = false
   const native = await nativeRpc(t, (method, params) => {
-    const plugin = { id: 'notes@lab', name: 'notes', installed, enabled: installed, source: { type: 'local' } }
+    const plugin = { id: 'notes@lab', name: 'notes', installed, enabled: installed, source: { type: 'local' },
+      interface: { displayName: 'Notes', shortDescription: 'Project notes', longDescription: 'Keep project notes.',
+        screenshotUrls: ['https://example.invalid/screenshot'] } }
     const local = { name: 'lab', path: marketplacePath, plugins: [plugin] }
     const remote = { id: 'mail@remote', name: 'mail', installed, enabled: installed, source: { type: 'remote' },
       remotePluginId: 'plugins_alternate_backend_id', shareContext: { remotePluginId: remoteId } }
@@ -94,14 +96,25 @@ test('插件目录、App 授权和安装状态读回原生 Codex，区分本地�
       default: throw new Error(`unexpected ${method}`)
     }
   })
-  const request = (path, params) => access(createCodexPluginRoutes(native.socketPath, native.signal), path, params)
+  const routes = createCodexPluginRoutes(native.socketPath, native.signal)
+  const request = (path, params) => access(routes, path, params)
+  const installedOnly = await (await request('plugins', { cwd, part: 'installed' })).json()
+  assert.deepEqual(installedOnly.installed.marketplaces, [])
+  assert.deepEqual(native.calls.map(call => call.method), ['plugin/installed'])
   const initial = await (await request('plugins', { cwd })).json()
   assert.deepEqual(initial.installed.marketplaces, [])
   assert.deepEqual(initial.catalog.marketplaces.map(market => market.name), ['lab', 'remote'])
   const [local, remote] = initial.catalog.marketplaces
+  assert.equal(local.plugins[0].interface.shortDescription, 'Project notes')
+  assert.equal(local.plugins[0].interface.screenshotUrls, undefined)
   const detail = pluginRequestSource(local, local.plugins[0])
   assert.deepEqual(detail, { pluginName: 'notes', marketplacePath })
-  assert.equal((await (await request('plugin', detail)).json()).appStates[0].isAccessible, false)
+  const metadata = await (await request('plugin', detail)).json()
+  assert.deepEqual(metadata.plugin.apps, [app])
+  assert.equal(metadata.plugin.summary.interface.longDescription, 'Keep project notes.')
+  assert.equal(native.calls.some(call => call.method === 'app/list'), false)
+  const appStates = () => request('plugin-apps', { appIds: JSON.stringify([app.id]) }).then(response => response.json())
+  assert.equal((await appStates()).appStates[0].isAccessible, false)
   assert.equal((await request('plugin', { ...detail, remoteMarketplaceName: 'remote' })).status, 400)
   const remoteSource = pluginRequestSource(remote, remote.plugins[0])
   const remoteDetail = await (await request('plugin', remoteSource)).json()
@@ -114,7 +127,7 @@ test('插件目录、App 授权和安装状态读回原生 Codex，区分本地�
   const plugin = await (await request('plugin', detail)).json()
   assert.deepEqual(plugin.plugin.skills, [{ name: 'write' }])
   assert.deepEqual(plugin.plugin.mcpServers, ['notes'])
-  assert.deepEqual(plugin.appStates, [{ ...app, isAccessible: true, isEnabled: true }])
+  assert.deepEqual((await appStates()).appStates, [{ ...app, isAccessible: true, isEnabled: true }])
   assert.equal(pluginUninstallId(plugin.plugin.summary), 'notes@lab')
   assert.equal(pluginUninstallId({ ...remoteDetail.plugin.summary, shareContext: null }), 'plugins_alternate_backend_id')
   assert.equal((await request('plugins', { method: 'POST', action: 'uninstall', pluginId: pluginUninstallId(remoteDetail.plugin.summary) })).status, 200)

@@ -2,6 +2,11 @@ import { installCodexPluginSettings } from './codex-plugin-settings.jsx'
 import { installCodexMcpSettings } from './codex-mcp-settings.jsx'
 
 const settingsStyles = `
+  [data-shortcut-modal="settings"] > :has([data-codex-plugins]) {
+    --dsh-scrollbar-width: 9px;
+    --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-hover-l2);
+    scrollbar-gutter: stable;
+  }
   .codex-settings {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -41,6 +46,7 @@ const settingsStyles = `
   }
   .codex-settings-heading { gap: 4px; }
   .codex-settings-search { min-width: 0; }
+  .codex-settings-more { justify-self: start; }
   .codex-settings-list {
     padding: 0;
     list-style: none;

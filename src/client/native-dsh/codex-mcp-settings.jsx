@@ -14,7 +14,8 @@ const labels = {
     failed: 'Codex 报告 OAuth 登录失败。', unknown: '完成授权后刷新状态。',
     'runtime.notStarted': '未启动', 'runtime.starting': '启动中', 'runtime.connected': '已连接',
     'runtime.authenticationRequired': '需要身份验证', 'runtime.failed': '连接失败', 'runtime.cancelled': '连接已取消',
-    'runtime.disabled': '已停用', 'runtime.unknown': '连接状态未知',
+    'runtime.disabled': '已停用', 'runtime.unknown': '暂无会话连接状态',
+    'discovery.configured': '已配置', 'discovery.available': '工具可用', 'discovery.failed': '工具读取失败',
     'auth.unknown': '授权状态未知', 'auth.unsupported': '不支持 OAuth', 'auth.notLoggedIn': '未登录',
     'auth.bearerToken': 'Bearer Token', 'auth.oAuth': '已通过 OAuth 登录',
   },
@@ -26,7 +27,8 @@ const labels = {
     failed: 'Codex reported an OAuth sign-in failure.', unknown: 'Refresh status after authorization.',
     'runtime.notStarted': 'Not started', 'runtime.starting': 'Starting', 'runtime.connected': 'Connected',
     'runtime.authenticationRequired': 'Authentication required', 'runtime.failed': 'Connection failed', 'runtime.cancelled': 'Connection canceled',
-    'runtime.disabled': 'Disabled', 'runtime.unknown': 'Unknown connection status',
+    'runtime.disabled': 'Disabled', 'runtime.unknown': 'Session connection status unavailable',
+    'discovery.configured': 'Configured', 'discovery.available': 'Tools available', 'discovery.failed': 'Tool discovery failed',
     'auth.unknown': 'Unknown authorization status', 'auth.unsupported': 'OAuth unavailable', 'auth.notLoggedIn': 'Signed out',
     'auth.bearerToken': 'Bearer token', 'auth.oAuth': 'Signed in with OAuth',
   },
@@ -38,19 +40,25 @@ const runtimeTones = {
   failed: 'danger',
 }
 
-function McpServer({ server, login, startLogin, busy, t }) {
+function McpServer({ server, threadId, login, startLogin, busy, t }) {
   const tools = Object.values(server.tools ?? {})
   const { name, runtimeStatus, authStatus } = server
   const canLogin = ['notLoggedIn', 'oAuth'].includes(authStatus) || runtimeStatus === 'authenticationRequired'
   const waitingForOAuth = login?.state === 'pending'
+  let status = `runtime.${runtimeStatus ?? 'unknown'}`
+  let tone = runtimeTones[runtimeStatus] ?? 'neutral'
+  // 全局查询没有会话连接。工具可能来自原生缓存，只用它描述工具发现结果。
+  if (!threadId) {
+    const available = server.serverInfo || server.toolListMeta || tools.length
+    status = server.toolsError ? 'discovery.failed' : available ? 'discovery.available' : 'discovery.configured'
+    tone = server.toolsError ? 'warning' : available ? 'info' : 'neutral'
+  }
   return <section className="codex-settings-card codex-settings-content">
     <div className="codex-settings-toolbar">
       <div className="codex-settings-heading">
         <h3>{name}</h3>
         <div className="codex-settings-statuses">
-          <Tag className="codex-settings-tag" tone={runtimeTones[runtimeStatus] ?? 'neutral'}>
-            {t(`runtime.${runtimeStatus ?? 'unknown'}`)}
-          </Tag>
+          <Tag className="codex-settings-tag" tone={tone}>{t(status)}</Tag>
           <span className="codex-settings-secondary">{t(`auth.${authStatus ?? 'unknown'}`)}</span>
         </div>
       </div>
@@ -152,7 +160,7 @@ function McpInventory({ threadId, t }) {
     {loading && <p role="status" className="codex-settings-notice">{t('loading')}</p>}
     {error && <p role="alert" className="codex-settings-notice">{error}</p>}
     {servers?.length === 0 && <p role="status" className="codex-settings-notice">{t('empty')}</p>}
-    {servers?.map(server => <McpServer key={server.name} {...{ server, t }} busy={busy}
+    {servers?.map(server => <McpServer key={server.name} {...{ server, threadId, t }} busy={busy}
       login={login?.name === server.name ? login : undefined} startLogin={name => change('login', name)} />)}
   </div>
 }
