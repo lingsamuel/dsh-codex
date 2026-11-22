@@ -14,4 +14,4 @@ DSH ChatGPT 是本机 Codex 的展示和转发层。它在独立的 DeepSeek Har
 
 Codex 持有会话历史、模型、权限和执行状态。插件通过本机共享 Codex App Server 读取这些状态，并把网页上的操作交给 Codex 执行。运行时需要既有的 Codex 登录与共享服务，网页默认只监听本机回环地址。
 
-[给 AI 助手的安装指南](manual/ai-install.md) · [架构](https://github.com/lingsamuel/dsh-codex/blob/master/docs/architecture.md)
+[安装与使用](manual/guide.md) · [给 AI 助手的安装指南](manual/ai-install.md) · [架构](https://github.com/lingsamuel/dsh-codex/blob/master/docs/architecture.md)
