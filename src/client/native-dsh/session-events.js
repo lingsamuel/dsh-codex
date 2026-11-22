@@ -60,6 +60,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const attachments = new Map()
   let queueImages = new Map()
   let cancelledToolCalls = new Map()
+  let turnWorkingDirectories = {}
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
@@ -181,7 +182,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, ...options })
+    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, ...options })
   }
 
   async function addOlderPage(page) {
@@ -242,6 +243,21 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     let changed = false
     for (const id of new Set([...previous.keys(), ...cancelledToolCalls.keys()])) {
       if (JSON.stringify(previous.get(id)) === JSON.stringify(cancelledToolCalls.get(id))) continue
+      const turn = transcript.getTurn(id)
+      if (!turn) continue
+      renderTurn(turn)
+      changed = true
+    }
+    if (changed) publish()
+  }
+
+  function publishTurnDirectories(directories) {
+    if (!directories) return
+    const before = turnWorkingDirectories
+    turnWorkingDirectories = directories
+    let changed = false
+    for (const { id } of rows) {
+      if (before[id] === directories[id]) continue
       const turn = transcript.getTurn(id)
       if (!turn) continue
       renderTurn(turn)
@@ -414,6 +430,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         todos.set(frame.todos)
         contextPressure.set(frame.contextPressure)
         publishCancelledToolCalls(frame.cancelledToolCalls)
+        publishTurnDirectories(frame.turnWorkingDirectories)
         const recorded = frame.permission
         if (recorded) {
           const saved = JSON.stringify(recorded)

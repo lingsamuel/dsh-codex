@@ -10,7 +10,7 @@ import { modelSelectionOf } from '../shared/model-selection.js'
 const encoder = new TextEncoder()
 const catalogMethods = new Set([
   'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
-  'thread/archived', 'thread/unarchived', 'thread/deleted', 'thread/section/changed', 'project/changed',
+  'thread/settings/updated', 'thread/archived', 'thread/unarchived', 'thread/deleted', 'thread/section/changed', 'project/changed',
 ])
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
@@ -52,6 +52,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           let receiptSequence = 0
           let rolloutFacts
           let settingsStamp
+          let confirmedCwd
           let wakeQueue
           let connection
           let catalogReady = false
@@ -80,7 +81,13 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             const result = await connection.request('thread/read', { threadId }).catch(error => {
               connection.close(error)
             })
-            if (result && settingsStamp === stamp) send({ type: 'model-selection', selection: modelSelectionOf(result.thread) })
+            if (result && settingsStamp === stamp) {
+              send({ type: 'model-selection', selection: modelSelectionOf(result.thread) })
+              if (result.thread.cwd !== confirmedCwd) {
+                confirmedCwd = result.thread.cwd
+                send({ type: 'thread-summary', thread: result.thread })
+              }
+            }
           }
 
           function wake() {
@@ -176,6 +183,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           }
 
           async function sendSnapshot({ thread, readState }, replace = false) {
+            confirmedCwd = thread.cwd
             const itemCursor = thread.historyMode === 'paginated' ? await readItemTailCursor(connection.request, threadId) : undefined
             const page = await readThreadTurns(connection.request, {
               threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',

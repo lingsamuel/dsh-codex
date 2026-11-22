@@ -35,10 +35,11 @@ function changeRetainCount(counts, key, delta) {
   else delete counts[key]
 }
 
-function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, retention) {
+function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, worktreeDrafts, retention, openWorktree) {
   const history = createCodexHistory(ctx, thread, catalog, retention)
   const modelDraft = sessionDraft(modelDrafts, thread.id)
   const permissionDraft = sessionDraft(permissionDrafts, thread.id)
+  const worktreeDraft = sessionDraft(worktreeDrafts, thread.id)
   return {
     ctx,
     sessionId: thread.id,
@@ -46,7 +47,8 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, reten
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft),
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree),
+      worktreeDraft,
       modelDraft,
       permissionDraft,
       sessionId: thread.id,
@@ -72,6 +74,8 @@ export function provideCodexControllers(ctx, catalog) {
   const retention = new Map()
   const modelDrafts = createSnapshotStore(new Map())
   const permissionDrafts = createSnapshotStore(new Map())
+  const worktreeDrafts = createSnapshotStore(new Map())
+  let navigation
   const scopeId = Symbol('Codex session')
 
   function syncManualOrder() {
@@ -137,7 +141,15 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts, permissionDrafts, observer), fiber }
+        const openWorktree = ({ thread, workspacePaths, permission }) => {
+          catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, true)
+          // DSH 先完成输入栏的发送交接。若用户期间已打开其他会话，保留当前视图。
+          setTimeout(() => {
+            if (catalog.store.getSnapshot().selected?.id === id) navigation?.openSession(thread.id)
+          }, 0)
+        }
+        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,
+          modelDrafts, permissionDrafts, worktreeDrafts, observer, openWorktree), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }
@@ -241,11 +253,12 @@ export function provideCodexControllers(ctx, catalog) {
   ctx.effect(() => ctx.slots.subscribe(workspaceSlot, syncManualOrder))
   ctx.inject(['uiWorkspace'], scope => {
     scope.effect(() => {
-      const navigation = scope.uiWorkspace
-      const startSession = navigation.startSession
+      const currentNavigation = scope.uiWorkspace
+      navigation = currentNavigation
+      const startSession = currentNavigation.startSession
       // RC2 的无参数入口会强制新建。传入原生默认草稿选项，让 DSH 沿用工作区的空白会话。
-      const startWithDraft = (workspaceId, options = {}) => startSession.call(navigation, workspaceId, options)
-      navigation.startSession = startWithDraft
+      const startWithDraft = (workspaceId, options = {}) => startSession.call(currentNavigation, workspaceId, options)
+      currentNavigation.startSession = startWithDraft
       function reconcile() {
         const { busy, error, selected, threads, childThreads } = catalog.store.getSnapshot()
         if (initialization === 'ready' && selected && !childThreads[selected.id]
@@ -258,7 +271,7 @@ export function provideCodexControllers(ctx, catalog) {
         if (initialization !== 'waiting' || busy || error) return
         // DSH 自己保存上次选中的会话，包括只留草稿的空白会话。
         initialization = 'opening'
-        const saved = navigation.selection?.getSnapshot()?.sessionId
+        const saved = currentNavigation.selection?.getSnapshot()?.sessionId
         const thread = selected ?? threads.find(thread => thread.id === saved)
           ?? threads.find(thread => !thread.archived && !thread.blank) ?? threads[0]
         if (thread) scope.uiWorkspace.openSession(thread.id)
@@ -269,7 +282,8 @@ export function provideCodexControllers(ctx, catalog) {
       const stop = catalog.store.subscribe(reconcile)
       return () => {
         stop()
-        if (navigation.startSession === startWithDraft) navigation.startSession = startSession
+        if (currentNavigation.startSession === startWithDraft) currentNavigation.startSession = startSession
+        if (navigation === currentNavigation) navigation = undefined
       }
     })
   })

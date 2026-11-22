@@ -23,6 +23,10 @@ export function writeCommandAction(parameters, signal) {
   return writeAction('command-action', parameters, signal)
 }
 
+export function writeWorktreeAction(parameters, signal) {
+  return writeAction('worktree-action', parameters, signal)
+}
+
 export function writeProjectAction(parameters, signal) {
   return writeAction('project-action', parameters, signal)
 }

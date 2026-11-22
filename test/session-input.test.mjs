@@ -101,3 +101,43 @@ test('查看归档队列只请求取消归档和列表，保留草稿设置', as
   const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, model, permission)
   assert.deepEqual(await input.viewQueue(), { ok: true, value: { empty: false } })
 })
+
+test('工作树草稿失败后保留提交身份，成功时接纳并打开原生目标', async t => {
+  const worktree = { kind: 'new', id: crypto.randomUUID(), baseRef: 'refs/heads/main' }
+  const thread = { id: 'new-native', cwd: '/new-worktree' }
+  const lifecycle = []
+  let selected = worktree
+  let fail = true
+  const draft = { getSnapshot: () => selected, clear(value) { if (selected === value) selected = undefined } }
+  const model = { getSnapshot: () => undefined, clear() {} }
+  const state = { blank: true, pendingSubmissions: [] }
+  const history = {
+    session: { getSnapshot: () => state },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe: () => () => {} },
+    queueStore: { getSnapshot: () => [], subscribe: () => () => {} },
+    updateState: edit => edit(state),
+  }
+  const originalDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = originalDocument })
+  t.mock.method(globalThis, 'fetch', async (_, request) => {
+    const sent = JSON.parse(request.body)
+    assert.equal(sent.threadId, 'native-draft')
+    assert.deepEqual(sent.worktree, worktree)
+    assert.equal(sent.clientUserMessageId, worktree.id)
+    return fail ? Response.json({ error: 'retry' }, { status: 409 }) : Response.json({ thread })
+  })
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native-draft', history, model, undefined,
+    draft, result => lifecycle.push(result.thread.id))
+  async function send() {
+    const { requestId } = input.beginSubmission({ mode: 'queue', text: '开始', attachments: [],
+      onAccept: () => lifecycle.push('accepted'), onRetire: result => lifecycle.push(result.reason) })
+    return input.prompt([{ type: 'text', text: '开始' }], 'queue', undefined, requestId)
+  }
+  assert.equal((await send()).ok, false)
+  assert.equal(selected, worktree)
+  fail = false
+  assert.equal((await send()).ok, true)
+  assert.equal(selected, undefined)
+  assert.deepEqual(lifecycle, ['failed', 'accepted', 'observed', thread.id])
+})

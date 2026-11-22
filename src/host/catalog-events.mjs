@@ -34,6 +34,7 @@ export async function readCatalogEvent(notification, request) {
     case 'thread/started':
     case 'thread/name/updated':
     case 'thread/project/updated':
+    case 'thread/settings/updated':
     case 'thread/section/changed':
     case 'thread/archived':
     case 'thread/unarchived': {

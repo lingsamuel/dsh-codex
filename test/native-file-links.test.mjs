@@ -28,3 +28,8 @@ test('只转换 Markdown 文件目标并保留链接文字、代码与外部链�
     .replace('file:///home/user/main.js#17', '/home/user/main.js#L17')
     .replace('/home/user/a.ts:9', '/home/user/a.ts#L9'))
 })
+
+test('原生轮次目录固定相对文件引用，同时保留跳转、外部地址与绝对文件路径', () => {
+  const markdown = '[文件](src/name%20one.ts:3) [文档](README.md) [跳转](#detail) [外部](https://example.test/file) [绝对](/already/absolute.txt)'
+  assert.equal(projectFileLinks(markdown, '/main checkout'), '[文件](/main%20checkout/src/name%20one.ts#L3) [文档](/main%20checkout/README.md) [跳转](#detail) [外部](https://example.test/file) [绝对](/already/absolute.txt)')
+})

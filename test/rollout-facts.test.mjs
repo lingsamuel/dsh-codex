@@ -125,3 +125,18 @@ test('从原生记录回放已取消的工具调用，并沿原轮次回退', as
   await appendFile(path, line('event_msg', { type: 'thread_rolled_back', num_turns: 1 }))
   assert.deepEqual((await facts.read()).cancelledToolCalls, [])
 })
+
+test('保留每个已保存轮次自己的工作目录，回退时丢弃已删除轮次的目录', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'facts-cwd-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const line = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const event = (type, payload) => line('event_msg', { type, ...payload })
+  await writeFile(path, event('task_started', { turn_id: 'first' }) + line('turn_context', { cwd: '/main repo' })
+    + event('task_started', { turn_id: 'second' }) + line('turn_context', { turn_id: 'second', cwd: '/other checkout' }))
+  const facts = createRolloutFacts(path, new AbortController().signal)
+  assert.deepEqual((await facts.read()).turnWorkingDirectories, { first: '/main repo', second: '/other checkout' })
+  await appendFile(path, event('thread_rolled_back', { num_turns: 1 }))
+  assert.deepEqual((await facts.read()).turnWorkingDirectories, { first: '/main repo' })
+})
