@@ -78,31 +78,82 @@ function turnEndReason({ status, error }) {
   return { kind: 'completed' }
 }
 
-function mergeCancelledToolCalls(items, cancelled) {
-  if (!cancelled?.length) return items
-  const pending = new Map(cancelled.map(call => [call.id, call]))
-  const native = items.map(item => {
-    const call = pending.get(item.id)
-    if (!call) return item
-    pending.delete(item.id)
-    if (item.type !== 'commandExecution' || item.status !== 'inProgress') return item
-    // 有启动记录却缺少原生完成事件时，沿用命令的身份和已收到的输出。
-    return { ...item, status: 'failed', completedAtMs: call.completedAtMs,
-      aggregatedOutput: [item.aggregatedOutput, call.output].filter(Boolean).join('\n') }
-  })
-  const timeOf = item => item.completedAtMs ?? item.startedAtMs ?? Infinity
-  const recovered = [...pending.values()]
-    .map(call => ({ ...call, type: 'cancelledToolCall', id: `codex:cancelled:${call.id}` }))
-    .sort((a, b) => timeOf(a) - timeOf(b))
-  // 保留原生条目的相对顺序，将补充记录插到其完成时间所在的位置。
-  let index = 0
-  const merged = []
-  for (const item of native) {
-    const time = timeOf(item)
-    while (index < recovered.length && Number.isFinite(time) && timeOf(recovered[index]) < time) merged.push(recovered[index++])
-    merged.push(item)
+function itemTime(item) {
+  return item.completedAtMs ?? item.startedAtMs ?? Infinity
+}
+
+function mergeCancelledToolCalls(items, cancelled, firstChanged, previous) {
+  let state = previous
+  let nativeFrom = 0
+  if (state?.calls !== cancelled) {
+    const unmatched = new Map(cancelled.map(call => [call.id, call]))
+    const matched = new Map()
+    for (const [index, item] of items.entries()) {
+      const call = unmatched.get(item.id)
+      if (!call) continue
+      unmatched.delete(item.id)
+      matched.set(index, { call })
+    }
+    const recovered = [...unmatched.values()]
+      .map(call => ({ call, item: { ...call, type: 'cancelledToolCall', id: `codex:cancelled:${call.id}` } }))
+      .sort((a, b) => itemTime(a.item) - itemTime(b.item))
+    const pending = new Map(recovered.map(tool => [tool.call.id, tool]))
+    state = { calls: cancelled, matched, pending, recovered, recoveredThrough: [], items: [] }
+  } else {
+    const { matched, pending, recoveredThrough } = state
+    nativeFrom = Math.min(firstChanged, recoveredThrough.length, items.length)
+    if (pending.size) {
+      const pendingCount = pending.size
+      for (let index = nativeFrom; index < items.length; index++) {
+        const id = items[index].id
+        const tool = pending.get(id)
+        if (!tool) continue
+        // 同 ID 的原生条目晚到时，从旧补录位置移除副本，之前的插入计数仍然有效。
+        nativeFrom = Math.min(nativeFrom, tool.before)
+        pending.delete(id)
+        matched.set(index, { call: tool.call })
+      }
+      if (pending.size !== pendingCount) state.recovered = state.recovered.filter(tool => pending.has(tool.call.id))
+    }
   }
-  return [...merged, ...recovered.slice(index)]
+
+  const { matched, recovered, recoveredThrough, items: merged } = state
+  // 每个原生条目记下已经插入的补录数量。暂留在尾部的补录可能被新条目推后。
+  let recoveredIndex = recoveredThrough[nativeFrom - 1] ?? 0
+  let index = nativeFrom + recoveredIndex
+  let changedAt = index
+  function append(item) {
+    if (changedAt === index && merged[index] === item) changedAt++
+    merged[index++] = item
+  }
+  function insertRecovered(before) {
+    const tool = recovered[recoveredIndex++]
+    tool.before = before
+    append(tool.item)
+  }
+  for (let nativeIndex = nativeFrom; nativeIndex < items.length; nativeIndex++) {
+    let item = items[nativeIndex]
+    const match = matched.get(nativeIndex)
+    if (match && item.type === 'commandExecution' && item.status === 'inProgress') {
+      // 有启动记录却缺少原生完成事件时，沿用命令的身份和已收到的输出。
+      if (match.native !== item) {
+        match.native = item
+        match.completed = { ...item, status: 'failed', completedAtMs: match.call.completedAtMs,
+          aggregatedOutput: [item.aggregatedOutput, match.call.output].filter(Boolean).join('\n') }
+      }
+      item = match.completed
+    }
+    const time = itemTime(item)
+    while (recoveredIndex < recovered.length && Number.isFinite(time) && itemTime(recovered[recoveredIndex].item) < time) {
+      insertRecovered(nativeIndex)
+    }
+    append(item)
+    recoveredThrough[nativeIndex] = recoveredIndex
+  }
+  while (recoveredIndex < recovered.length) insertRecovered(items.length)
+  merged.length = index
+  recoveredThrough.length = items.length
+  return { state, from: state === previous && firstChanged > 0 ? changedAt : 0 }
 }
 
 function turnEvents(turn, number, {
@@ -114,9 +165,18 @@ function turnEvents(turn, number, {
   const cwd = turnWorkingDirectories?.[turn.id]
   const goalInput = goalInputs?.[turn.id]
   const goalCompletion = goalCompletions?.[turn.id]
-  // 补录工具按时间插入，原生条目位置无法直接映射到合并后的事件位置。
-  const previous = cancelled?.length ? undefined : liveTurns?.get(turn.id)
-  const checkpoints = previous?.checkpoints ?? (!cancelled?.length && turn.status === 'inProgress' && liveTurns ? [] : undefined)
+  const previous = liveTurns?.get(turn.id)
+  const checkpoints = previous?.checkpoints ?? (turn.status === 'inProgress' && liveTurns ? [] : undefined)
+  let items = turn.items
+  let cancelledMerge
+  if (cancelled?.length) {
+    const merged = mergeCancelledToolCalls(items, cancelled, firstChanged, previous?.cancelledMerge)
+    cancelledMerge = merged.state
+    items = cancelledMerge.items
+    firstChanged = merged.from
+  } else if (previous?.cancelledMerge) {
+    firstChanged = 0
+  }
   let from = previous ? Math.min(firstChanged, checkpoints.length) : 0
   // 成功结束时，旧记录中尚未确认完成的压缩也会生成结束事件。
   if (turn.status === 'completed') from = Math.min(from, previous?.openCompactionIndex ?? Infinity)
@@ -125,7 +185,6 @@ function turnEvents(turn, number, {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
   }
 
-  const items = mergeCancelledToolCalls(turn.items, cancelled)
   const explicitStart = milliseconds(turn.startedAt)
   let firstTimedIndex = previous?.firstTimedIndex ?? Infinity
   if (explicitStart == null && from <= firstTimedIndex) {
@@ -258,7 +317,7 @@ function turnEvents(turn, number, {
     if (item.type === 'contextCompaction' && item.completedAtMs == null) openCompactionIndex = Math.min(openCompactionIndex, index)
   }
   if (checkpoints && turn.status === 'inProgress') {
-    liveTurns.set(turn.id, { checkpoints, firstTimedIndex, startedAt, goalMessageId, goalItemIndex, openCompactionIndex })
+    liveTurns.set(turn.id, { checkpoints, firstTimedIndex, startedAt, goalMessageId, goalItemIndex, openCompactionIndex, cancelledMerge })
   } else liveTurns?.delete(turn.id)
 
   if (turn.status !== 'inProgress') {

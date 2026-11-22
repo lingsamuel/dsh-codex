@@ -316,7 +316,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     cancelledToolCalls = Map.groupBy(calls, call => call.turnId)
     let changed = false
     for (const id of new Set([...previous.keys(), ...cancelledToolCalls.keys()])) {
-      if (JSON.stringify(previous.get(id)) === JSON.stringify(cancelledToolCalls.get(id))) continue
+      const known = previous.get(id)
+      if (JSON.stringify(known) === JSON.stringify(cancelledToolCalls.get(id))) {
+        cancelledToolCalls.set(id, known)
+        continue
+      }
       const turn = transcript.getTurn(id)
       if (!turn) continue
       renderTurn(turn)
