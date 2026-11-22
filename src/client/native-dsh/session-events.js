@@ -17,6 +17,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   const { signal } = controller
   const state = createSnapshotStore({
     sessionId: thread.id,
+    historyMode: thread.historyMode,
     pendingSubmissions: [],
     running: false,
     subagent: null,
@@ -252,6 +253,27 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
+  /** 定位命中消息，沿用聊天的历史页和现有阅读窗口。 */
+  async function findMessage({ turnId, itemId }, requestSignal = signal) {
+    await ready
+    while (!signal.aborted && !requestSignal.aborted) {
+      const row = rows.find(turn => turn.id === turnId)
+      if (row) {
+        for (const { event } of row.entries) {
+          if (event.type === 'user/message' && event.data.id === itemId) return { kind: 'input-message', id: itemId }
+          if (event.type === 'assistant/message' && event.data.message.id === itemId) {
+            return { kind: 'assistant-step', id: `${event.data.turn}:${event.data.step}` }
+          }
+        }
+        return
+      }
+      const cursor = nextCursor
+      if (!cursor) return
+      await loadOlder()
+      if (cursor === nextCursor) return
+    }
+  }
+
   openLiveWatch(thread.id, { receive, changeMode }, signal)
   return {
     events,
@@ -261,6 +283,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       subscribe: state.subscribe,
       loadOlder,
       loadThrough,
+      findMessage,
       async readAttachment(id) {
         const value = attachments.get(id)
         return value

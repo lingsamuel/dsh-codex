@@ -17,6 +17,7 @@ await build({
     'react',
     'react/jsx-runtime',
     '@deepseek-ai/dsh-client-store',
+    '@deepseek-ai/dsh-client-ui-primitives',
   ],
   banner: {
     js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,

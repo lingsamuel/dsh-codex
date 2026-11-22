@@ -126,6 +126,27 @@ test('one initial history request keeps the view usable when SSE cannot open', a
   assert.ok(history.events.getSnapshot().entries.some(entry => entry.event.type === 'user/message'))
 })
 
+test('搜索定位只向前加载未读过的页，保留较新的聊天窗口', async t => {
+  const currentSource = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread', historyMode: 'paginated' })
+  const emit = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live' })
+  const original = history.events.getSnapshot().entries.at(-1)
+  let reads = 0
+  globalThis.fetch = async url => {
+    reads++
+    assert.equal(url.searchParams.get('cursor'), 'older')
+    return Response.json({ data: [turn('older', 'completed', [ask])], nextCursor: null })
+  }
+  const hit = { turnId: 'older', itemId: ask.id }
+  const target = await history.session.findMessage(hit)
+  assert.deepEqual(target, { kind: 'input-message', id: ask.id })
+  assert.deepEqual(await history.session.findMessage(hit), target)
+  assert.equal(reads, 1)
+  assert.strictEqual(history.events.getSnapshot().entries.at(-1), original)
+  assert.equal(await history.session.findMessage({ turnId: 'older', itemId: 'missing' }), undefined)
+})
+
 test('a reconnect across a page gap fills that gap without discarding the existing window', async t => {
   const currentSource = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })

@@ -12,7 +12,7 @@ npm start -- --no-open
 
 DSH 原生侧栏显示 Codex 的项目和工作目录。打开页面后，侧栏先显示缓存或已索引的项目，再从 Codex 自动补齐和刷新。同一个目录的大小写别名使用实际名称。浏览器默认打开一条近期的 Codex 会话。展开工作区可切换会话，从对话顶部可加载更早的轮次。
 
-侧栏搜索同时查找标题、工作区和 Codex 的会话正文。正文结果显示 Codex 返回的片段，点击即可打开对应会话。
+侧栏搜索同时查找标题、工作区和 Codex 的会话正文。正文结果显示 Codex 返回的片段，点击即可打开对应会话。使用分页历史的会话在标题栏提供会话内搜索，点击结果可跳到对应消息。
 
 默认通过 `codex app-server daemon version` 查找当前环境中的共享服务。自定义 socket 可设置 `DSH_CHATGPT_SOCKET`，自定义 Codex 或 DSH 可执行文件可分别设置 `DSH_CHATGPT_CODEX_BIN` 和 `DSH_CHATGPT_DSH_BIN`。
 

@@ -4,7 +4,7 @@ DSH ChatGPT 运行在独立的 DSH Profile 中。它使用原生 DSH 工作区�
 
 Host 连接 WSL 中已经运行的 Codex App Server，通过 `project/list`、`thread/list` 和 `thread/turns/list` 读取原生记录。已登记的项目使用原生项目 ID，其余线程按 `cwd` 展示。会话列表分页沿用 Codex 对旧历史的索引补齐行为。
 
-DSH 的会话搜索调用 Codex `thread/search`，在内存清单补上此前未知的命中会话，正文摘要保留为当次搜索结果。
+DSH 的会话搜索调用 Codex `thread/search`，在内存清单补上此前未知的命中会话，正文摘要保留为当次搜索结果。分页会话内的搜索用 `thread/searchOccurrences` 取得原生消息位置，沿旧页游标加载尚未显示的轮次并滚动至聊天节点。
 
 打开对话时，Host 通过认证后的 SSE 连接发送首次历史页，随后监听 Codex 原生历史文件的变化和 App Server 广播的线程状态。分页存储使用原生记录游标读取尾部新增内容，旧版 rollout 读取受变更影响的尾部轮次。浏览器接收新增或更新的条目及完成、失败、审批和问答等待状态，旧历史继续按需分页。
 
