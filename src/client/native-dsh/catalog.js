@@ -1,4 +1,5 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
+import { subagentAddress } from './subagents.js'
 
 const noRetention = {}
 const mainRetention = { mainView: 1 }
@@ -33,10 +34,13 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
   const ids = threads.map(thread => thread.id)
   const byId = Object.fromEntries([...threads, ...Object.values(childThreads)].map(thread => {
     const title = threadTitle(thread)
+    // DSH 面包屑沿摘要中的直接父级逐级向上查找。
+    const address = subagentAddress(thread)
     return [thread.id, {
       id: thread.id,
       title,
       displayTitle: title,
+      ...(address && { origin: 'subagent', parentId: address.parentSessionId }),
       cwd: thread.cwd || undefined,
       running: thread.status?.type === 'active',
       retainedBy: selected?.id === thread.id ? mainRetention : noRetention,
