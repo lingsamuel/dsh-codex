@@ -67,24 +67,24 @@ function createDefaultPreference(path) {
 }
 
 /** 切换是显式操作。冷会话在恢复时应用预设，避免队列先用旧策略运行。 */
-export async function updateThreadPermission(request, threadId, profileId, waitForConfirmation) {
+export async function updateThreadPermission(request, threadId, profileId, waitForConfirmation, readDraftPermission) {
   const thread = await addressableThread(request, threadId)
   await requireProfile(request, thread.cwd, profileId)
   const cold = thread.status?.type === 'notLoaded'
   if (cold && await isArchived(request, threadId)) throw invalid('请先取消归档再切换会话权限。')
-  if (!cold && !thread.preview && thread.historyMode === 'paginated') {
+  if (!readDraftPermission && !cold && !thread.preview && thread.historyMode === 'paginated') {
     try {
       await request('thread/turns/list', { threadId, limit: 1, itemsView: 'notLoaded' })
     } catch (error) {
       if (!hasNoMaterializedHistory(error)) throw error
-      // 首条消息之前原生允许设置，但无法通过 resume 加入线程接收确认通知。
+      // 没有创建连接的空线程可以提交设置，但暂时无法订阅其确认通知。
       await request('thread/settings/update', { threadId, permissions: profileId })
       return { profileId, source: 'requested' }
     }
   }
   // 热附加只在用户主动切换时发生，为本次操作接收 Codex 的实际设置通知。
-  const resumed = await request('thread/resume', { threadId, excludeTurns: true, ...(cold && { permissions: profileId }) })
-  const permission = permissionOf(resumed)
+  const permission = readDraftPermission && !cold ? readDraftPermission()
+    : permissionOf(await request('thread/resume', { threadId, excludeTurns: true, ...(cold && { permissions: profileId }) }))
   if (permission?.profileId === profileId) return permission
   await request('thread/settings/update', { threadId, permissions: profileId })
   return waitForConfirmation()
@@ -94,6 +94,7 @@ export async function updateThreadPermission(request, threadId, profileId, waitF
 export function createPermissionActions(socketPath, ownerSignal, preferencePath, submit = createThreadSubmissionQueue()) {
   const preference = createDefaultPreference(preferencePath)
   const known = new Map()
+  const drafts = new Map()
 
   function storePermission(threadId, permission) {
     if (!permission) return undefined
@@ -107,27 +108,75 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     return storePermission(threadId, permissionOf(settings))
   }
 
+  /** 保留网页草稿的创建订阅，空线程尚不能经 resume 接收原生设置确认。 */
+  async function withThreadCreation(signal, create) {
+    const creation = new AbortController()
+    const lifetime = ownerSignal ? AbortSignal.any([creation.signal, ownerSignal]) : creation.signal
+    const abort = () => creation.abort(signal.reason)
+    signal.throwIfAborted()
+    signal.addEventListener('abort', abort, { once: true })
+    let connection
+    let draft
+    let retained = false
+    try {
+      connection = await openCodexReader(socketPath, lifetime, ({ method, params }) => {
+        if (!draft || params?.threadId !== draft.id) return
+        if (method === 'thread/settings/updated') {
+          draft.permission = remember(draft.id, params.threadSettings)
+          draft.confirm?.(draft.permission)
+        } else if (['turn/started', 'thread/archived', 'thread/deleted', 'thread/closed'].includes(method)) {
+          // 原生开始首轮后可按普通线程处理。已在等待的设置确认仍使用创建订阅。
+          draft.finished = true
+          if (!draft.confirm) connection.close()
+        }
+      })
+      const result = await create(connection.request, started => {
+        const id = started.thread.id
+        draft = { id, connection, permission: remember(id, started) }
+        return draft.permission
+      })
+      signal.throwIfAborted()
+      if (draft && !draft.finished) {
+        drafts.set(draft.id, draft)
+        void connection.closed.then(() => drafts.delete(draft.id))
+        retained = true
+      }
+      return result
+    } finally {
+      signal.removeEventListener('abort', abort)
+      if (!retained) connection?.close()
+    }
+  }
+
   async function switchPermission(threadId, profileId, signal) {
     const deadline = new AbortController()
     const lifetime = AbortSignal.any([signal, deadline.signal, AbortSignal.timeout(15_000)])
     const { promise, resolve } = Promise.withResolvers()
+    const draft = drafts.get(threadId)
+    function confirm(permission) {
+      if (permission?.profileId === profileId) resolve(permission)
+    }
+    if (draft) draft.confirm = confirm
     let connection
     try {
       connection = await openCodexReader(socketPath, lifetime, ({ method, params }) => {
         if (method !== 'thread/settings/updated' || params?.threadId !== threadId) return
-        const mode = remember(threadId, params.threadSettings)
-        if (mode?.profileId === profileId) resolve(mode)
+        confirm(remember(threadId, params.threadSettings))
       })
       const permission = await updateThreadPermission(connection.request, threadId, profileId, () => Promise.race([
         promise,
         delay(5_000, undefined, { signal: lifetime }).then(() => {
           throw new CodexRpcError({ code: -32600, message: 'Codex 尚未确认权限切换，请查看当前模式后重试。' })
         }),
-      ]))
+      ]), draft && (() => draft.permission))
       return { permission: storePermission(threadId, permission) }
     } finally {
       deadline.abort()
       connection?.close()
+      if (draft) {
+        draft.confirm = undefined
+        if (draft.finished) draft.connection.close()
+      }
     }
   }
 
@@ -148,6 +197,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
 
   return {
     remember,
+    withThreadCreation,
     async startOptions(request, cwd) {
       const profileId = await preference.get()
       if (profileId === null) return {}
@@ -160,7 +210,8 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
         const thread = threadId ? (await rpc('thread/read', { threadId })).thread : undefined
         const [profiles, defaultProfile] = await Promise.all([permissionProfiles(rpc, thread?.cwd), preference.get()])
         const cached = known.get(threadId)
-        const permission = cached?.source === 'runtime' ? { ...cached, source: 'saved' } : cached
+        const permission = drafts.get(threadId)?.permission
+          ?? (cached?.source === 'runtime' ? { ...cached, source: 'saved' } : cached)
         return { profiles, defaultProfile, ...(permission && { permission }) }
       })
     }),

@@ -234,15 +234,16 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
           if (projectId !== undefined) required(projectId, '项目 ID 无效。')
           if (reuseThreadId !== undefined) required(reuseThreadId, '草稿会话 ID 无效。')
-          return json(await withCodexReader(socketPath, signal, async rpc => {
+          async function create(rpc, retainDraft) {
             const reused = await reusableDraft(rpc, reuseThreadId, cwd, projectId)
             if (reused) return workspaceThread({ ...reused, blank: true })
             const started = await rpc('thread/start', {
               cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...await permissions?.startOptions(rpc, cwd),
             })
-            const permission = permissions?.remember(started.thread.id, started)
+            const permission = retainDraft?.(started)
             return { ...await workspaceThread({ ...started.thread, blank: true }), ...(permission && { permission }) }
-          }))
+          }
+          return json(permissions ? await permissions.withThreadCreation(signal, create) : await withCodexReader(socketPath, signal, create))
         }
         if (!['prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')
         required(threadId, '缺少 Codex 线程 ID。')

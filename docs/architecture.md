@@ -56,7 +56,7 @@ DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `t
 
 会话管理复用 DSH 同源连接，转发原生回执更新、改名、置顶和模型设置。模型选择器复用 DSH 原生组件，调用 Codex `model/list` 获取当前 provider 的模型和推理等级，对已加载的线程提交 `thread/settings/update`。未加载会话的模型选择保存在网页会话草稿中，发送或编辑后重发时确认 Codex 已应用设置再提交消息。网页旁路跟随原生设置落盘后读取当前值，历史轮次保持原来的模型信息。
 
-权限选择器由 `permissionProfile/list` 提供目录。当前线程在明确选择后应用预设，并显示 Codex 确认的会话设置或已保存的上一轮设置。通用设置只保存此 Web profile 的新会话默认值，通过 `thread/start` 应用到新线程。
+权限选择器由 `permissionProfile/list` 提供目录。当前线程在明确选择后应用预设，并显示 Codex 确认的会话设置或已保存的上一轮设置。网页新建的空白线程保留 `thread/start` 的订阅，直到首轮开始、线程关闭或 Host 停止，以接收 `thread/settings/updated`。Host 重启前创建的草稿或其他客户端创建的空白线程缺少此订阅，只能确认 Codex 接收了更改。通用设置只保存此 Web profile 的新会话默认值，通过 `thread/start` 应用到新线程。
 
 ## Visualize 内嵌预览
 

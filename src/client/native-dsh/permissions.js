@@ -9,7 +9,7 @@ const locale = 'codex.permissions'
 const follow = 'follow-codex'
 const labels = {
   zh: {
-    follow: '跟随 Codex', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '待确认：{mode}',
+    follow: '跟随 Codex', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '已提交，首轮确认：{mode}',
     defaultDescription: '仅用于从此网页新建的 Codex 会话。', unavailable: '所选默认权限不再可用。',
     sandbox: '沙箱：{mode}', approval: '审批：{policy}', readOnly: '仅可查看', workspaceWrite: '工作区内修改',
     dangerFullAccess: '完全权限', externalSandbox: '外部沙箱', 'on-request': '按需', untrusted: '不受信时', never: '从不', granular: '按类别',
@@ -19,7 +19,7 @@ const labels = {
     defaultFullAccess: '从此网页新建的会话将使用 Codex 完全权限预设并解除沙箱限制。审批方式由 Codex 配置决定。',
   },
   en: {
-    follow: 'Follow Codex', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Awaiting confirmation: {mode}',
+    follow: 'Follow Codex', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Submitted for first turn: {mode}',
     defaultDescription: 'Applies only to new Codex sessions created from this web interface.', unavailable: 'The saved default is no longer selectable.',
     sandbox: 'Sandbox: {mode}', approval: 'Approval: {policy}', readOnly: 'Read Only', workspaceWrite: 'Workspace Write',
     dangerFullAccess: 'Full Access', externalSandbox: 'External Sandbox', 'on-request': 'On request', untrusted: 'When untrusted', never: 'Never', granular: 'By category',

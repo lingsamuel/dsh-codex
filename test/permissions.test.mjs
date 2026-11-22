@@ -106,3 +106,85 @@ test('首条消息前可设置权限，同时把原生尚未确认的选择单�
   assert.deepEqual(pending, { profileId: ':read-only', source: 'requested' })
   assert.deepEqual(calls.at(-1), ['thread/settings/update', { threadId: 'draft', permissions: ':read-only' }])
 })
+
+test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确认', async t => {
+  const { createHistoryRoutes } = await import('../src/host/history.mjs')
+  const directory = await mkdtemp(join(process.cwd(), '.runtime', 'perm-draft-'))
+  const socket = join(directory, 'api.sock')
+  const server = createServer()
+  const ws = new WebSocketServer({ server })
+  const owner = new AbortController()
+  const thread = { id: 'draft', cwd: directory, status: { type: 'idle' }, historyMode: 'paginated', preview: '' }
+  const initial = { activePermissionProfile: { id: ':read-only' }, approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } }
+  let creator
+  const applied = Promise.withResolvers()
+  const update = Promise.withResolvers()
+  ws.on('connection', client => client.on('message', raw => {
+    const { id, method, params } = JSON.parse(raw)
+    if (id === undefined) return
+    const reply = result => client.send(JSON.stringify({ id, result }))
+    const notify = (method, params) => creator?.send(JSON.stringify({ method, params }))
+    if (method === 'initialize') return reply({})
+    if (method === 'thread/start') {
+      creator = client
+      return reply({ thread, ...initial })
+    }
+    if (method === 'thread/read') return reply({ thread })
+    if (method === 'thread/queue/list') return reply({ data: [] })
+    if (method === 'permissionProfile/list') return reply({ data: [{ id: ':danger-full-access', allowed: true }] })
+    if (method === 'thread/turns/list') {
+      return client.send(JSON.stringify({ id, error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }))
+    }
+    if (method === 'thread/settings/update') {
+      reply({})
+      update.resolve(params)
+      void applied.promise.then(() => notify('thread/settings/updated', { threadId: thread.id, threadSettings: {
+        activePermissionProfile: { id: params.permissions }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'dangerFullAccess' },
+      } }))
+      return
+    }
+    assert.fail(`unexpected ${method}`)
+  }))
+  server.listen(socket)
+  await once(server, 'listening')
+  t.after(async () => {
+    owner.abort()
+    for (const client of ws.clients) client.terminate()
+    ws.close()
+    const closed = once(server, 'close')
+    server.close()
+    await closed
+    await rm(directory, { recursive: true, force: true })
+  })
+
+  const routes = createHistoryRoutes(socket, owner.signal)
+  function post(path, fields, signal) {
+    const route = routes.find(route => route.path === `/api/codex/${path}`)
+    return route.fetch(new Request(`http://localhost${route.path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields), signal,
+    }))
+  }
+
+  const request = new AbortController()
+  const created = await post('conversation-action', { action: 'create', cwd: directory }, request.signal)
+  assert.equal(created.status, 200)
+  assert.equal((await created.json()).permission.profileId, ':read-only')
+  request.abort()
+  const reopened = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: thread.id })
+  assert.equal((await reopened.json()).thread.id, thread.id)
+  const selection = post('permission-action', { action: 'select', threadId: thread.id, profileId: ':danger-full-access' })
+  assert.deepEqual(await update.promise, { threadId: thread.id, permissions: ':danger-full-access' })
+  applied.resolve()
+  const response = await selection
+  assert.equal(response.status, 200)
+  const expected = {
+    profileId: ':danger-full-access', approvalPolicy: 'on-request', sandbox: 'dangerFullAccess', source: 'runtime',
+  }
+  assert.deepEqual((await response.json()).permission, expected)
+  const catalog = routes.find(route => route.path === '/api/codex/permissions')
+  const loaded = await catalog.fetch(new Request(`http://localhost${catalog.path}?threadId=${thread.id}`))
+  assert.deepEqual((await loaded.json()).permission, expected)
+  const released = once(creator, 'close', { signal: AbortSignal.timeout(1_000) })
+  creator.send(JSON.stringify({ method: 'turn/started', params: { threadId: thread.id, turn: { id: 'first-turn' } } }))
+  await released
+})
