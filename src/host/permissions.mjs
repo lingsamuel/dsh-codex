@@ -243,12 +243,14 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
       return withCodexReader(socketPath, signal, async rpc => {
         const thread = threadId ? (await rpc('thread/read', { threadId })).thread : undefined
         const [profiles, defaultProfile] = await Promise.all([permissionProfiles(rpc, threadId ? thread?.cwd : cwd), preference.get()])
-        if (!threadId && cwd) {
-          const config = defaultProfile === null ? (await rpc('config/read', { cwd, includeLayers: false }).catch(error => {
-            if (error instanceof CodexRpcError && error.code === -32601) return null
+        if (!threadId) {
+          // 通用设置预览 Codex 的配置，草稿仍优先使用网页选好的预设。
+          const webProfile = cwd ? defaultProfile : null
+          const config = webProfile === null ? (await rpc('config/read', { ...(cwd && { cwd }), includeLayers: false }).catch(error => {
+            if (!cwd || error instanceof CodexRpcError && error.code === -32601) return null
             throw error
           }))?.config : undefined
-          const profileId = defaultProfile ?? config?.default_permissions
+          const profileId = webProfile ?? config?.default_permissions
           const permission = permissionOf({
             ...config,
             activePermissionProfile: profileId ? { id: profileId } : undefined,

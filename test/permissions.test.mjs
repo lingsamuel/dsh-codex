@@ -56,6 +56,33 @@ test('网页默认预设只在新建时生效，重新读取仍可用，并拒�
   ])
 })
 
+test('通用设置预览 Codex 自身的默认权限，网页预设单独返回', async t => {
+  const { createPermissionActions } = await import('../src/host/permissions.mjs')
+  const { socket, ws } = await permissionServer(t)
+  const calls = []
+  ws.on('connection', client => client.on('message', raw => {
+    const { id, method, params } = JSON.parse(raw)
+    if (id === undefined) return
+    calls.push([method, params])
+    const result = method === 'config/read' ? { config: { sandbox_mode: 'workspace-write' } }
+      : method === 'permissionProfile/list' ? { data: [{ id: ':read-only', allowed: true }] } : {}
+    client.send(JSON.stringify({ id, result }))
+  }))
+  const { catalogRoute, actionRoute } = createPermissionActions(socket)
+  const read = async () => (await catalogRoute.fetch(new Request(`http://local${catalogRoute.path}`))).json()
+  const permission = { profileId: null, sandbox: 'workspace-write', source: 'configured' }
+  assert.deepEqual(await read(), { profiles: [{ id: ':read-only' }], defaultProfile: null, permission })
+  const saved = await actionRoute.fetch(new Request(`http://local${actionRoute.path}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'default', profileId: ':read-only' }),
+  }))
+  assert.equal(saved.status, 200)
+  assert.deepEqual(await read(), { profiles: [{ id: ':read-only' }], defaultProfile: ':read-only', permission })
+  assert.deepEqual(calls.filter(([method]) => method === 'config/read').map(([, params]) => params),
+    [{ includeLayers: false }, { includeLayers: false }])
+  assert.equal(calls.some(([method]) => method === 'thread/start' || method === 'thread/resume'), false)
+})
+
 test('未创建原生会话时按草稿工作目录读取允许的权限预设', async t => {
   const { createPermissionActions } = await import('../src/host/permissions.mjs')
   const { directory, socket, ws } = await permissionServer(t)

@@ -10,7 +10,7 @@ const locale = 'codex.permissions'
 const follow = 'follow-codex'
 const labels = {
   zh: {
-    follow: '跟随 Codex', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '已提交，首轮确认：{mode}',
+    follow: '跟随 Codex', following: '跟随 Codex · {value}', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '已提交，首轮确认：{mode}',
     defaultDescription: '仅用于从此网页新建的 Codex 会话。', unavailable: '所选默认权限不再可用。',
     draft: '发送或继续队列时应用：{mode}', configured: '新会话默认：{mode}',
     sandbox: '沙箱：{mode}', approval: '审批：{policy}', readOnly: '仅可查看', workspaceWrite: '工作区内修改',
@@ -23,7 +23,7 @@ const labels = {
     defaultFullAccess: '从此网页新建的会话将使用 Codex 完全权限预设并解除沙箱限制。审批方式由 Codex 配置决定。',
   },
   en: {
-    follow: 'Follow Codex', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Submitted for first turn: {mode}',
+    follow: 'Follow Codex', following: 'Follow Codex · {value}', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Submitted for first turn: {mode}',
     defaultDescription: 'Applies only to new Codex sessions created from this web interface.', unavailable: 'The saved default is no longer selectable.',
     draft: 'Apply on send or queue start: {mode}', configured: 'Default for new sessions: {mode}',
     sandbox: 'Sandbox: {mode}', approval: 'Approval: {policy}', readOnly: 'Read Only', workspaceWrite: 'Workspace Write',
@@ -122,8 +122,11 @@ export function installPermissions(ctx, catalog, signal) {
   function publishDefaults(snapshot) {
     defaultDirectory = nativeCatalog(snapshot, t)
     const { defaultPreset, defaultOptions } = defaultDirectory
+    const permission = snapshot.permission
+    const preview = (permission?.profileId || permission?.sandbox) && permissionLabel(permission, t)
     defaults.set({ status: 'ready', writable: true, revision: 0, currentValue: defaultPreset,
-      options: defaultOptions.map(option => ({ id: option.value, label: option.name })),
+      options: defaultOptions.map(option => ({ id: option.value,
+        label: option.value === follow && preview ? t('following', { value: preview }) : option.name })),
       error: defaultOptions.some(option => option.value === defaultPreset) ? null : t('unavailable') })
   }
   function defaultError(error) {

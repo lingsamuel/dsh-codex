@@ -9,13 +9,13 @@ const labels = {
   zh: {
     model: '新会话默认模型', modelDescription: '用于此 DSH Profile 新建的 Codex 会话。',
     effort: '新会话思考强度', effortDescription: '可用档位由新会话的默认模型决定。',
-    follow: '跟随 Codex', followingEffort: '跟随 Codex · {effort}', loading: '正在读取…',
+    follow: '跟随 Codex', following: '跟随 Codex · {value}', loading: '正在读取…',
     retry: '重试', unavailable: '当前模型未提供思考强度选项。',
   },
   en: {
     model: 'Default model for new sessions', modelDescription: 'Applies to new Codex sessions created in this DSH profile.',
     effort: 'Reasoning effort for new sessions', effortDescription: 'Available levels depend on the default model.',
-    follow: 'Follow Codex', followingEffort: 'Follow Codex · {effort}', loading: 'Loading…',
+    follow: 'Follow Codex', following: 'Follow Codex · {value}', loading: 'Loading…',
     retry: 'Retry', unavailable: 'The current model does not advertise reasoning effort levels.',
   },
 }
@@ -48,17 +48,19 @@ function ModelDefaultSettings({ t, load, save }) {
   const native = catalog?.default
   const provider = catalog?.groups.find(group => group.id === native?.provider)
   const models = provider?.models ?? []
-  const selectedModel = catalog?.groups.find(group => group.id === (saved?.provider ?? native?.provider))
-    ?.models.find(model => model.id === (saved?.model ?? native?.model))
+  const nativeModel = models.find(model => model.id === native?.model)
+  const selectedModel = saved?.model ? catalog.groups.find(group => group.id === saved.provider)
+    ?.models.find(model => model.id === saved.model) : nativeModel
   const modelValue = !saved?.model ? followCodex
     : saved.provider === provider?.id ? `model:${saved.model}` : `saved:${saved.model}`
-  const modelLabel = saved?.model ? selectedModel?.name ?? saved.model : t('follow')
+  const modelFollowLabel = native?.model ? t('following', { value: nativeModel?.name ?? native.model }) : t('follow')
+  const modelLabel = saved?.model ? selectedModel?.name ?? saved.model : modelFollowLabel
   const efforts = selectedModel?.reasoning?.efforts ?? []
   const effortValue = saved?.reasoningEffort ?? followCodex
   const effortLabel = saved?.reasoningEffort ?? (native?.reasoningEffort
-    ? t('followingEffort', { effort: native.reasoningEffort }) : t('follow'))
+    ? t('following', { value: native.reasoningEffort }) : t('follow'))
   const follow = { id: followCodex, label: t('follow') }
-  const modelOptions = [follow, ...models.map(model => ({ id: `model:${model.id}`, label: model.name }))]
+  const modelOptions = [{ id: followCodex, label: modelFollowLabel }, ...models.map(model => ({ id: `model:${model.id}`, label: model.name }))]
   const effortOptions = [...(!saved?.model ? [follow] : []), ...efforts.map(effort => ({ id: effort.id, label: effort.name }))]
 
   async function apply(selection) {
@@ -79,7 +81,7 @@ function ModelDefaultSettings({ t, load, save }) {
     if (!data || saving || id === modelValue) return
     if (id === followCodex) {
       const reasoningEffort = saved?.reasoningEffort
-      const nativeEfforts = models.find(model => model.id === native.model)?.reasoning?.efforts
+      const nativeEfforts = nativeModel?.reasoning?.efforts
       void apply(nativeEfforts?.some(level => level.id === reasoningEffort) ? { reasoningEffort } : null)
     } else {
       const model = models.find(option => `model:${option.id}` === id)
