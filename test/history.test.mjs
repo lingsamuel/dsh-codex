@@ -163,6 +163,22 @@ test('会话详情保留 Codex 的模型设置和 Goal，两个读取共用连�
   assert.deepEqual(messages.map(message => message.method).sort(), ['initialize', 'initialized', 'thread/read', 'thread/goal/get'].sort())
 })
 
+test('会话详情分页读取已加载线程的原生后台终端', async t => {
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'native', status: { type: 'idle' } } } }),
+    'thread/backgroundTerminals/list': params => {
+      assert.equal(params.threadId, 'native')
+      return { result: params.cursor
+        ? { data: [{ processId: 'second', command: 'second', cwd: '/repo' }], nextCursor: null }
+        : { data: [{ processId: 'first', command: 'first', cwd: '/repo' }], nextCursor: 'next' } }
+    },
+  })
+  const info = await (await get('/api/codex/thread-info?threadId=native')).json()
+  assert.equal(info.goal, null)
+  assert.deepEqual(info.terminals.map(terminal => terminal.processId), ['first', 'second'])
+  assert.equal(messages.some(message => message.method === 'thread/resume'), false)
+})
+
 test('已淘汰的分页游标返回上游错误', async t => {
   const { get } = await fakeCodex(t, {
     'thread/turns/list': () => ({ error: { code: -32602, message: 'invalid cursor' } }),

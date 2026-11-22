@@ -22,7 +22,7 @@ DSH 原生侧栏显示 Codex 的项目和工作目录。打开页面后，侧栏
 
 包含文件改动的轮次会列出改过的路径。展开路径可查看 Codex 记录的补丁，包括同一文件在该轮的多次改动。
 
-标题栏「Codex 会话详情」显示当前模型、推理强度和已有的 `/goal`，以及可用的目标状态和用量。
+标题栏「Codex 会话详情」显示当前模型、推理强度和已有的 `/goal`，以及可用的目标状态和用量。已加载的会话还会显示 Codex 返回的后台终端列表。
 
 默认通过 `codex app-server daemon version` 查找当前环境中的共享服务。自定义 socket 可设置 `DSH_CHATGPT_SOCKET`，自定义 Codex 或 DSH 可执行文件可分别设置 `DSH_CHATGPT_CODEX_BIN` 和 `DSH_CHATGPT_DSH_BIN`。
 

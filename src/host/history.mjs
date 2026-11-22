@@ -1,4 +1,4 @@
-import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
+import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
@@ -50,14 +50,20 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     route('thread-info', (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       return withCodexReader(socketPath, signal, async request => {
+        function unavailable(error) {
+          if (error.code === -32601 || error.code === -32602) return null
+          throw error
+        }
         const [{ thread }, goalResult] = await Promise.all([
           request('thread/read', { threadId }),
-          request('thread/goal/get', { threadId }).catch(error => {
-            if (error.code === -32601 || error.code === -32602) return null
-            throw error
-          }),
+          request('thread/goal/get', { threadId }).catch(unavailable),
         ])
-        return { model: thread.model, reasoningEffort: thread.reasoningEffort, goal: goalResult?.goal ?? null }
+        const terminals = thread.status?.type && thread.status.type !== 'notLoaded'
+          ? await readCodexPages(cursor => request('thread/backgroundTerminals/list', {
+            threadId, limit: 50, ...(cursor && { cursor }),
+          })).catch(unavailable)
+          : undefined
+        return { model: thread.model, reasoningEffort: thread.reasoningEffort, goal: goalResult?.goal ?? null, terminals }
       })
     }),
     route('projects', (query, signal) => readProjectPage(

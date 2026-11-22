@@ -1,4 +1,4 @@
-import { Button, IconInfoOutlineRegular, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconInfoOutlineRegular, Modal, PathLabel } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage } from '../api.js'
 
@@ -7,10 +7,10 @@ const locale = 'codex.session.info'
 const copy = {
   zh: { title: 'Codex 会话详情', close: '关闭', loading: '正在读取…', model: '模型', effort: '推理强度', goal: '目标',
     used: '已使用 token', budget: 'token 预算', empty: '此会话没有可显示的详情。', active: '进行中', paused: '暂停',
-    blocked: '受阻', usageLimited: '达到用量限制', budgetLimited: '达到预算', complete: '已完成' },
+    blocked: '受阻', usageLimited: '达到用量限制', budgetLimited: '达到预算', complete: '已完成', terminals: '后台终端' },
   en: { title: 'Codex session details', close: 'Close', loading: 'Loading…', model: 'Model', effort: 'Reasoning effort', goal: 'Goal',
     used: 'Tokens used', budget: 'Token budget', empty: 'No details are available for this session.', active: 'Active', paused: 'Paused',
-    blocked: 'Blocked', usageLimited: 'Usage limited', budgetLimited: 'Budget limited', complete: 'Complete' },
+    blocked: 'Blocked', usageLimited: 'Usage limited', budgetLimited: 'Budget limited', complete: 'Complete', terminals: 'Background terminals' },
 }
 
 function Goal({ goal, t }) {
@@ -60,7 +60,13 @@ function SessionInfo({ sessionId, useSession, t }) {
         {info.reasoningEffort && <><dt>{t('effort')}</dt><dd>{info.reasoningEffort}</dd></>}
       </dl>}
       {goal && <Goal goal={goal} t={t} />}
-      {info && !info.model && !info.reasoningEffort && !goal && <p>{t('empty')}</p>}
+      {info?.terminals?.length > 0 && <section>
+        <h3>{t('terminals')}</h3>
+        <ul>{info.terminals.map(terminal => <li key={terminal.processId}>
+          <code>{terminal.command}</code>{terminal.cwd && <PathLabel path={terminal.cwd} />}
+        </li>)}</ul>
+      </section>}
+      {info && !info.model && !info.reasoningEffort && !goal && !info.terminals?.length && <p>{t('empty')}</p>}
     </Modal>
   </>
 }
