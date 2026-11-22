@@ -26,7 +26,8 @@ function fieldOf(name, schema, required) {
   const common = ['type', 'title', 'description', 'default']
   const field = { name, type, title, description, required }
   let constraints
-  if (type === 'string' && uses(schema, [...common, 'enum', 'enumNames', 'oneOf'])) {
+  const hasChoices = Object.hasOwn(schema, 'enum') || Object.hasOwn(schema, 'oneOf')
+  if (type === 'string' && hasChoices && uses(schema, [...common, 'enum', 'enumNames', 'oneOf'])) {
     field.options = choicesOf(schema)
     if (!field.options) return
   } else if (type === 'string' && uses(schema, [...common, 'format', 'minLength', 'maxLength'])) {
