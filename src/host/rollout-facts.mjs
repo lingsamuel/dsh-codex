@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { permissionOf } from '../shared/permissions.js'
 import { planModeOf } from '../shared/plan-mode.js'
 import { goalCommandObjective } from '../shared/user-input.js'
+import { goalCompletion } from '../shared/goal-completion.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
 const userCancelled = /^(?:aborted by user(?: after \d[\d.msµnh ]*)?\.?|Wall time: \d+(?:\.\d+)? seconds\r?\naborted by user)\s*$/i
@@ -12,6 +13,19 @@ const userCancelled = /^(?:aborted by user(?: after \d[\d.msµnh ]*)?\.?|Wall ti
 function normalizePlan(value) {
   if (!Array.isArray(value?.plan) || !value.plan.every(step => typeof step?.step === 'string' && statuses.has(step.status))) return
   return value.plan.map(({ step, status }) => ({ content: step, status }))
+}
+
+function readGoalToolResult(output, threadId, recordedGoal) {
+  const parts = Array.isArray(output) ? output.map(part => part.text) : [output]
+  for (const part of parts) {
+    if (typeof part !== 'string' || !part.includes('"goal"')) continue
+    let value
+    try { value = JSON.parse(part) } catch { continue }
+    const goal = value?.goal
+    if (!goal || goal.threadId !== threadId || (recordedGoal &&
+      (goal.objective !== recordedGoal.objective || goal.createdAt !== recordedGoal.createdAt))) continue
+    return goal
+  }
 }
 
 function displayPermission(recorded, turn) {
@@ -45,6 +59,7 @@ export function createRolloutFacts(path, signal, threadId) {
   let publishedCancelledTools = false
   let publishedTurnDirectories = false
   let publishedGoalInputs = false
+  let publishedGoalCompletions = false
   let recordedGoal
   let pendingGoalInput
   let previous = '{}'
@@ -61,7 +76,7 @@ export function createRolloutFacts(path, signal, threadId) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|thread_goal_(?:updated|cleared)|UserMessage|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context|custom_tool_call|exec_command|shell_command/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|thread_goal_(?:updated|cleared)|UserMessage|plan_update|update_plan|(?:create|update)_goal|function_call_output|token_count|thread_settings_applied|turn_context|custom_tool_call|exec_command|shell_command/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
@@ -105,9 +120,17 @@ export function createRolloutFacts(path, signal, threadId) {
         recordedGoal = objective && { objective, createdAt: goal.createdAt }
       } else if (value?.type === 'thread_goal_cleared' && value.threadId === threadId) {
         recordedGoal = pendingGoalInput = undefined
-      } else if (pendingGoalInput && value?.type === 'item_completed' && value.item?.type === 'UserMessage') {
-        // 桌面端可能先写目标再写气泡，保留原生消息并避免在后续自动轮次重复显示。
-        if (goalCommandObjective(value.item.content) === pendingGoalInput.objective) pendingGoalInput = undefined
+      } else if (value?.type === 'item_completed' && value.item?.type === 'UserMessage') {
+        const objective = goalCommandObjective(value.item.content)
+        const turn = turns.findLast(turn => turn.id === value.turn_id)
+        if (!objective || !turn || !value.item.id) return
+        const input = { objective, messageId: value.item.id }
+        turn.goalMessage = input
+        // 记录桌面端气泡的身份，使同一条消息既能高亮，也不会在自动续跑时重复出现。
+        if (objective === pendingGoalInput?.objective) {
+          turn.goalInput = { ...pendingGoalInput, ...input }
+          pendingGoalInput = undefined
+        }
       } else if (value?.type === 'plan_update') {
         const plan = normalizePlan(value)
         if (plan) currentTurn().todos = plan
@@ -131,18 +154,34 @@ export function createRolloutFacts(path, signal, threadId) {
       return
     }
     if (record.type !== 'response_item' || !value?.call_id) return
+    const goalCall = value.type === 'function_call' && !value.namespace && ['create_goal', 'update_goal'].includes(value.name)
+      ? value.name
+      : value.type === 'custom_tool_call' && value.name === 'exec'
+        ? value.input?.match(/\btools\.(create_goal|update_goal)\s*\(/u)?.[1] : undefined
     const input = value.type === 'custom_tool_call' && value.name === 'exec' ? value.input
-      : value.type === 'function_call' && ['exec_command', 'shell_command'].includes(value.name) ? value.arguments : undefined
+      : value.type === 'function_call' && (goalCall || ['exec_command', 'shell_command'].includes(value.name)) ? value.arguments : undefined
     if (typeof input === 'string' && currentTurn().id) {
-      pendingToolCalls.set(value.call_id, { id: value.call_id, name: value.name, input, startedAtMs: Date.parse(record.timestamp) })
+      pendingToolCalls.set(value.call_id, { id: value.call_id, name: value.name, input, startedAtMs: Date.parse(record.timestamp),
+        ...(goalCall && { goalCall }) })
     } else if (value.type === 'custom_tool_call_output' || value.type === 'function_call_output') {
       const call = pendingToolCalls.get(value.call_id)
       pendingToolCalls.delete(value.call_id)
-      if (call && typeof value.output === 'string' && userCancelled.test(value.output)) {
+      if (call?.goalCall) {
+        // 桌面端可能在收到达成通知后清除目标。工具回执仍保存在原生轮次中。
+        const turn = currentTurn()
+        const created = call.goalCall === 'create_goal'
+        const goal = readGoalToolResult(value.output, threadId, created ? undefined : recordedGoal)
+        if (created && goal?.status === 'active' && turn.goalMessage) turn.goalInput ??= turn.goalMessage
+        const completion = goalCompletion(goal)
+        if (completion) turn.goalCompletion = completion
+      }
+      if (call && ['exec', 'exec_command', 'shell_command'].includes(call.name)
+        && typeof value.output === 'string' && userCancelled.test(value.output)) {
         // 有些请求在执行前取消，Codex 只保留这对原始调用和返回，常规轮次没有工具项。
         const turn = currentTurn()
         turn.cancelledToolCalls ??= []
-        turn.cancelledToolCalls.push({ ...call, output: value.output, completedAtMs: Date.parse(record.timestamp) })
+        const { goalCall, ...execution } = call
+        turn.cancelledToolCalls.push({ ...execution, output: value.output, completedAtMs: Date.parse(record.timestamp) })
       }
     }
     if (value.type === 'function_call' && value.name === 'update_plan' && !value.namespace) {
@@ -201,6 +240,8 @@ export function createRolloutFacts(path, signal, threadId) {
       publishedTurnDirectories ||= Object.keys(turnWorkingDirectories).length > 0
       const goalInputs = Object.fromEntries(turns.filter(turn => turn.goalInput).map(({ id, goalInput }) => [id, goalInput]))
       publishedGoalInputs ||= Object.keys(goalInputs).length > 0
+      const goalCompletions = Object.fromEntries(turns.filter(turn => turn.goalCompletion).map(({ id, goalCompletion }) => [id, goalCompletion]))
+      publishedGoalCompletions ||= Object.keys(goalCompletions).length > 0
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
@@ -213,6 +254,7 @@ export function createRolloutFacts(path, signal, threadId) {
         ...(publishedCancelledTools && { cancelledToolCalls }),
         ...(publishedTurnDirectories && { turnWorkingDirectories }),
         ...(publishedGoalInputs && { goalInputs }),
+        ...(publishedGoalCompletions && { goalCompletions }),
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

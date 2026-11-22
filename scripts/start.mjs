@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
-import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -15,6 +15,23 @@ const options = delimiter === -1 ? argv : argv.slice(0, delimiter)
 const fresh = options.includes('--fresh-profile')
 const dshArgs = [...options.filter(arg => arg !== '--fresh-profile'), ...argv.slice(options.length)]
 
+async function legacyGoalPatch(home, profile, manifest) {
+  const { dsh } = JSON.parse(await readFile(manifest, 'utf8'))
+  if (dsh?.profile?.bundles?.includes(pluginName)) return
+  const { composeEntries, loadOptionalPatches, loadOverlayPatches } = await import('@deepseek-ai/dsh-app-boot')
+  const layers = [join(profile, 'cordis.patch.yml'), join(home, 'cordis.patch.yml')]
+    .map(path => loadOptionalPatches('dsh', path) ?? [])
+  const entries = composeEntries(layers)
+  if (!entries.some(entry => entry.name === pluginName) || entries.some(entry => entry.id === 'ui-goal')) return
+  const defaults = composeEntries([loadOverlayPatches('dsh', join(root, 'profile', 'cordis.patch.yml'))])
+  const goal = defaults.find(entry => entry.id === 'ui-goal')
+  if (!goal) return
+  // 旧启动器把默认插件复制进了用户补丁。补齐缺失的原生视图，保留那份配置和清单。
+  const path = join(runtime, 'legacy-ui-goal.patch.yml')
+  await writeFile(path, JSON.stringify([{ insert: [goal] }]) + '\n')
+  return path
+}
+
 async function prepareProfile(home) {
   const profile = join(home, 'profiles', profileName)
   const modules = join(profile, 'node_modules')
@@ -27,7 +44,7 @@ async function prepareProfile(home) {
   }
 
   const manifest = join(profile, 'package.json')
-  if (existsSync(manifest)) return
+  if (existsSync(manifest)) return legacyGoalPatch(home, profile, manifest)
 
   // 组合包提供插件默认配置，DSH 的用户补丁可独立保存。先写完整清单再创建链接，避免并发启动读到半份文件。
   const staging = await mkdtemp(join(profile, '.initialize-'))
@@ -49,9 +66,9 @@ async function prepareProfile(home) {
 await mkdir(runtime, { recursive: true })
 const home = fresh ? await mkdtemp(join(runtime, 'dsh-fresh-')) : join(runtime, 'dsh')
 try {
-  await prepareProfile(home)
+  const legacyPatch = await prepareProfile(home)
   const executable = process.env.DSH_CHATGPT_DSH_BIN || 'dsh'
-  const child = spawn(executable, ['--profile', profileName, ...dshArgs], {
+  const child = spawn(executable, ['--profile', profileName, ...(legacyPatch ? ['--patch', legacyPatch] : []), ...dshArgs], {
     cwd: root,
     env: {
       ...process.env,

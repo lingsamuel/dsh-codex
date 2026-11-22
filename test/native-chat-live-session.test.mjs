@@ -193,6 +193,19 @@ test('实时快照恢复 GoalBar 和 Plan 模式，目标气泡随历史补齐',
   assert.equal(session.projections.faceOf('goal').getSnapshot(), null)
 })
 
+test('保留计划的原生条目身份和正文，供聊天及侧栏共用', async t => {
+  const source = mockTransport(t)
+  const { session } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const item = { type: 'plan', id: 'plan-item', text: '# 计划\n\n- 核对结果。' }
+  await source().onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live',
+    page: { data: [turn('plan-turn', 'completed', [item, answer])] },
+  }) })
+  assert.equal(session.planMarkdown('plan-turn', item.id), item.text)
+  assert.equal(session.planMarkdown('plan-turn', answer.id), undefined)
+  assert.equal(await session.readPlanMarkdown('plan-turn', item.id), item.text)
+  assert.equal(await session.readPlanMarkdown('unknown', item.id), undefined)
+})
+
 test('活动轮次显示自己的权限，切换后续权限和重新连接按轮次核对', async t => {
   const source = mockTransport(t)
   const { session } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })

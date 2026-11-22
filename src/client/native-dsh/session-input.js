@@ -1,6 +1,6 @@
 import { readPage, writeCommandAction, writeConversationAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
-import { userInputText } from '../../shared/user-input.js'
+import { goalCommandObjective, userInputText } from '../../shared/user-input.js'
 
 const accepted = { ok: true, value: { accepted: true } }
 const failedSubmission = { reason: 'failed' }
@@ -114,14 +114,13 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     }
   }
 
-  async function submitGoal(content, goalDraftValue, worktree, selection, profileId, before, unarchive, signal, requestId) {
+  async function submitGoal(content, objective, goalDraftValue, worktree, selection, profileId, before, unarchive, signal, requestId) {
     if (session.getSnapshot().planChanging) throw new Error('正在切换计划模式，请等待 Codex 确认后再提交。')
     if (content.some(part => part.type !== 'text') || worktree) {
       throw new Error('目标使用输入栏正文。请移除附件和待创建的工作树，或退出 Goal 模式后按普通消息发送。')
     }
-    const objective = userInputText(content).trim()
     if (!objective) throw new Error('请输入目标内容。')
-    const tokenBudget = goalDraftValue.budget ? Number(goalDraftValue.budget) : undefined
+    const tokenBudget = goalDraftValue?.budget ? Number(goalDraftValue.budget) : undefined
     if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new Error('Token 预算必须是正整数。')
     const command = (action, fields) => writeCommandAction({ threadId, action, ...fields, ...(unarchive && { unarchive: true }) }, signal)
     if (session.getSnapshot().planMode === 'plan') {
@@ -142,7 +141,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       ...(goal && { expectedGoal: { objective: goal.objective, createdAt: goal.createdAt } }) })
     session.publishGoal(result.goal, goalRevision)
     acceptSubmittedSettings(selection, profileId, before, result)
-    goalDraft.clear(goalDraftValue)
+    if (goalDraftValue) goalDraft.clear(goalDraftValue)
     retire(requestId, observedSubmission)
     return accepted
   }
@@ -168,7 +167,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const { running, archived, blank } = session.getSnapshot()
       const worktree = blank && !archived ? worktreeDraft?.getSnapshot() : undefined
       const goal = goalDraft?.getSnapshot()
-      const requestId = (!goal && worktree?.id) || crypto.randomUUID()
+      const submitsGoal = Boolean(goal || goalCommandObjective([{ type: 'text', text }]))
+      const requestId = (!submitsGoal && worktree?.id) || crypto.randomUUID()
       const expectedTurnId = mode === 'steer' ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
@@ -176,7 +176,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       submissions.set(requestId, { onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
       updateState(state => {
-        if (!goal) state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
+        if (!submitsGoal) state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
         state.promptAttempted = true
       })
       return { requestId, abandon: () => retire(requestId, failedSubmission) }
@@ -191,6 +191,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const before = permissionSnapshot(profileId)
       const unarchive = submission ? submission.unarchive : session.getSnapshot().archived
       const goal = submission ? submission.goal : goalDraft?.getSnapshot()
+      const objective = goal ? userInputText(content).trim() : goalCommandObjective(content)
       updateState(state => {
         state.promptError = null
         state.goalError = null
@@ -198,7 +199,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         state.promptAttempted = true
       })
       try {
-        if (goal) return await submitGoal(content, goal, worktree, selection, profileId, before, unarchive, signal, requestId)
+        if (goal || objective) {
+          return await submitGoal(content, objective, goal, worktree, selection, profileId, before, unarchive, signal, requestId)
+        }
         const input = content.map(part => {
           if (part.type === 'text') return { type: 'text', text: part.text, text_elements: [] }
           if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }

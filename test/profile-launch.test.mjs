@@ -40,14 +40,19 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
     description: 'Persistent profile',
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
   })
-  const previousPatch = await readFile(join(root, 'profile', 'cordis.patch.yml'), 'utf8') + savedSetting
+  const defaults = await readFile(join(root, 'profile', 'cordis.patch.yml'), 'utf8')
+  const previousPatch = defaults.replace("    - id: ui-goal\n      name: '@deepseek-ai/dsh-client-ui-goal'\n", '') + savedSetting
   await mkdir(profile, { recursive: true })
   await writeFile(manifest, previousManifest)
   await writeFile(patch, previousPatch)
 
-  assert.match(dump('--dump-config'), /busyEnterBehavior: steer/)
+  const config = dump('--dump-config')
+  assert.match(config, /busyEnterBehavior: steer/)
+  assert.match(config, /name: ['"]?@deepseek-ai\/dsh-client-ui-goal/)
   assert.equal(await readFile(patch, 'utf8'), previousPatch)
   assert.equal(await readFile(manifest, 'utf8'), previousManifest)
+  await writeFile(patch, defaults + savedSetting)
+  assert.equal([...dump('--dump-config').matchAll(/name: ['"]?@deepseek-ai\/dsh-client-ui-goal/g)].length, 1)
 })
 
 test('临时 Profile 加载插件默认配置，并在进程退出后清理', { skip: process.platform === 'win32' }, async t => {

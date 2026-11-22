@@ -3,11 +3,11 @@ import { useEffect, useState } from 'react'
 import { readSessionMarkdown } from '../api.js'
 import { CommandModal } from './command-action.jsx'
 
-function downloadMarkdown(markdown, title) {
+export function downloadMarkdown(markdown, title, prefix = 'codex-') {
   const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown; charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
-  link.download = `codex-${title.replace(/[\u0000-\u001f<>:"/\\|?*]/g, '-').slice(0, 120)}.md`
+  link.download = `${prefix}${title.replace(/[\u0000-\u001f<>:"/\\|?*]/g, '-').slice(0, 120)}.md`
   link.click()
   window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
 }

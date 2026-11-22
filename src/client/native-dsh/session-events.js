@@ -11,6 +11,7 @@ import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
 import { permissionOf } from '../../shared/permissions.js'
 import { planModeOf } from '../../shared/plan-mode.js'
+import { goalCompletion } from '../../shared/goal-completion.js'
 import { userInputText } from '../../shared/user-input.js'
 import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
@@ -63,6 +64,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let cancelledToolCalls = new Map()
   let turnWorkingDirectories = {}
   let goalInputs = {}
+  let savedGoalCompletions = {}
+  let goalCompletions = {}
+  const announcedGoalCompletions = new Map()
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
@@ -200,7 +204,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, goalInputs, ...options })
+    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, goalInputs, goalCompletions, ...options })
   }
 
   async function addOlderPage(page) {
@@ -284,17 +288,37 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (changed) publish()
   }
 
-  function publishGoalInputs(inputs) {
-    if (!inputs) return
+  function publishGoalHistory(inputs = goalInputs, savedCompletions = savedGoalCompletions) {
     const before = goalInputs
+    const previousCompletions = goalCompletions
     goalInputs = inputs
+    savedGoalCompletions = savedCompletions
+    goalCompletions = { ...Object.fromEntries(announcedGoalCompletions), ...savedCompletions }
     let changed = false
     for (const { id } of rows) {
-      if (JSON.stringify(before[id]) === JSON.stringify(inputs[id])) continue
+      if (JSON.stringify(before[id]) === JSON.stringify(inputs[id])
+        && previousCompletions[id]?.timeUsedSeconds === goalCompletions[id]?.timeUsedSeconds) continue
       renderTurn(transcript.getTurn(id))
       changed = true
     }
     if (changed) publish()
+  }
+
+  function publishGoalCompletion(goal, turnId) {
+    const completion = goalCompletion(goal)
+    if (!completion) return
+    // 重连的目标快照没有轮次 ID。只在完成时间落入一个确定的轮次时补齐。
+    if (turnId == null && Number.isFinite(goal.updatedAt)) {
+      const matching = rows.filter(({ id }) => {
+        const { startedAt, completedAt } = transcript.getTurn(id)
+        return Number.isFinite(startedAt) && Number.isFinite(completedAt)
+          && startedAt <= goal.updatedAt && goal.updatedAt <= completedAt
+      })
+      if (matching.length === 1) turnId = matching[0].id
+    }
+    if (turnId == null || announcedGoalCompletions.get(turnId)?.timeUsedSeconds === completion.timeUsedSeconds) return
+    announcedGoalCompletions.set(turnId, completion)
+    publishGoalHistory()
   }
 
   async function loadPage(cursor, lifetime = signal) {
@@ -371,7 +395,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
     if (planMode && planMode !== state.getSnapshot().planMode) publishPlanMode(planMode)
-    if (goal !== undefined) publishGoal(goal, goalRevisionAtConnect)
+    if (goal !== undefined && state.getSnapshot().goalRevision === goalRevisionAtConnect) {
+      publishGoal(goal, goalRevisionAtConnect)
+      publishGoalCompletion(goal)
+    }
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
@@ -464,7 +491,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         contextPressure.set(frame.contextPressure)
         publishCancelledToolCalls(frame.cancelledToolCalls)
         publishTurnDirectories(frame.turnWorkingDirectories)
-        publishGoalInputs(frame.goalInputs)
+        if (frame.goalInputs || frame.goalCompletions) publishGoalHistory(frame.goalInputs, frame.goalCompletions)
         if (JSON.stringify(recordedTurnPermission) !== JSON.stringify(frame.turnPermission)) {
           recordedTurnPermission = frame.turnPermission
           publishState()
@@ -514,6 +541,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
           publishState({ archived: method === 'thread/archived' })
         } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
           publishGoal(params.goal ?? null)
+          publishGoalCompletion(params.goal, params.turnId)
         }
       }
     }, lifetime)
@@ -524,7 +552,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
         publishCancelledToolCalls([])
-        publishGoalInputs({})
+        publishGoalHistory({}, {})
         recordedTurnPermission = undefined
         lastSavedPlanMode = undefined
         planRevisionAtConnect = state.getSnapshot().planRevision
@@ -591,6 +619,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       await loadOlder()
       if (cursor === nextCursor) return
     }
+  }
+
+  function planMarkdown(turnId, itemId) {
+    return transcript.getTurn(turnId)?.items.find(item => item.type === 'plan' && item.id === itemId)?.text
   }
 
   /** 定位命中消息，沿用聊天的历史页和现有阅读窗口。 */
@@ -695,6 +727,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       subscribe: state.subscribe,
       loadOlder,
       loadThrough,
+      planMarkdown,
+      async readPlanMarkdown(turnId, itemId, requestSignal) {
+        await loadTurn(turnId, requestSignal)
+        return planMarkdown(turnId, itemId)
+      },
       findMessage,
       turnAtEnd,
       finishedTurnOfReply,

@@ -43,6 +43,17 @@ test('目标轮次用原生 DSH 用户气泡显示手动设定的目标', () => 
   assert.deepEqual(types(entries, 'user/message').map(({ data, time }) => [data.id, data.content[0].text, time]), [
     ['codex:goal:auto', '/goal 核对发布项', 99_990], ['saved', '/goal 核对发布项\n', 100_000],
   ])
+  assert.deepEqual(types(entries, 'user/message').map(({ data }) => data.source.codexGoal), [true, true])
+})
+
+test('达成提示只落在 Codex 确认完成目标的轮次尾部', () => {
+  const completed = { timeUsedSeconds: 18 }
+  const entries = projectCodexTurns([
+    turn('first', []), turn('finish', []), turn('running', [], { status: 'inProgress' }),
+  ], { goalCompletions: { finish: completed, running: completed } })
+  assert.deepEqual(types(entries, 'turn/end').map(({ data }) => [data.codexTurnId, data.codexGoalCompletion]), [
+    ['first', undefined], ['finish', completed],
+  ])
 })
 
 test('压缩进行中使用原生生命周期，重开会话可看到完成状态', () => {

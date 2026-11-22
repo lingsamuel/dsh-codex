@@ -132,6 +132,7 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
       const node = findRenderedMessage(scope, target)
       if (!node) throw new Error(t('unavailable'))
       node.closest('[hidden="until-found"]')?.dispatchEvent(new Event('beforematch'))
+      node.querySelector('[data-codex-plan-toggle][aria-expanded="false"]')?.click()
       close()
       jumpTo(node, hit)
     })

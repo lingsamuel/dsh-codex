@@ -44,6 +44,7 @@ const copy = {
     'goal.replace': '替换目标', 'goal.confirmReplace': '将以输入栏正文替换当前目标。',
     'goal.resumeBudget': '目标的 token 预算已用完。可通过 /goal 设置新的预算。',
     'goal.resumeBlocked': 'Codex 未能继续目标，请查看当前状态。',
+    'goal.completed': '已在 {seconds}s 内达成目标',
   },
   en: {
     status: 'Session status', 'status.description': 'View session configuration and context usage',
@@ -75,6 +76,7 @@ const copy = {
     'goal.replace': 'Replace goal', 'goal.confirmReplace': 'The text in the composer will replace the current goal.',
     'goal.resumeBudget': 'The goal is out of tokens. Use /goal to set a new budget.',
     'goal.resumeBlocked': 'Codex could not resume this goal. Check its current status.',
+    'goal.completed': 'Goal achieved in {seconds}s',
   },
 }
 
@@ -104,7 +106,7 @@ function CommandDialog({ commandRequest, session, ...props }) {
 export function installCommands(ctx) {
   ctx.effect(() => ctx.locale.register(locale, copy))
   const t = ctx.locale.bind(locale)
-  installGoalBar(ctx, t)
+  installGoalBar(ctx, t, locale)
   installComposerModeLabel(ctx)
 
   ctx.inject(['commandUi', 'sessions', 'conversation', 'contextMenus', 'remoteAccess'], scope => {

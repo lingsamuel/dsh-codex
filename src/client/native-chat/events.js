@@ -95,7 +95,7 @@ function mergeCancelledToolCalls(items, cancelled) {
   return [...merged, ...recovered.slice(index)]
 }
 
-function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput) {
+function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown, goalInput, goalCompletion) {
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
@@ -108,11 +108,16 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
   const turnIdentity = { turn: number, codexTurnId: turn.id }
   emit('turn/start', startedAt, turnIdentity)
 
-  if (goalInput && !items.some(item => item.type === 'userMessage' && goalCommandObjective(item.content) === goalInput.objective)) {
-    items = [{
-      type: 'userMessage', id: `codex:goal:${turn.id}`, startedAtMs: goalInput.time ?? startedAt,
-      content: [textBlock(`/goal ${goalInput.objective}`)],
-    }, ...items]
+  let goalMessageId = goalInput?.messageId
+  if (goalInput && !goalMessageId) {
+    goalMessageId = items.find(item => item.type === 'userMessage' && goalCommandObjective(item.content) === goalInput.objective)?.id
+    if (!goalMessageId) {
+      goalMessageId = `codex:goal:${turn.id}`
+      items = [{
+        type: 'userMessage', id: goalMessageId, startedAtMs: goalInput.time ?? startedAt,
+        content: [textBlock(`/goal ${goalInput.objective}`)],
+      }, ...items]
+    }
   }
   let step = 0
   let activity = false
@@ -143,7 +148,8 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
     if (isUser) {
       if (!replies) {
         const content = projectUserContent(item.id, item.content, attachments)
-        const message = { id: item.id, role: 'user', content, source: { kind: 'user', ...(item.clientId && { rpcId: item.clientId }) } }
+        const message = { id: item.id, role: 'user', content, source: { kind: 'user', ...(item.clientId && { rpcId: item.clientId }),
+          ...(goalMessageId && item.id === goalMessageId && { codexGoal: true }) } }
         if (hasUserInput) {
           // Codex 的轮内追加已被正式接纳。DSH 用 next-step 的领取记录识别同一个用户气泡为插话。
           emit('agent/inbox/spliced', start, { target: 'next-step', start: 0, inserted: [message] })
@@ -201,6 +207,7 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd
     emit('turn/end', milliseconds(turn.completedAt) ?? lastTime, {
       ...turnIdentity,
       reason: turnEndReason(turn),
+      ...(goalCompletion && { codexGoalCompletion: goalCompletion }),
       ...(turn.error && { codexError: turn.error }),
     })
   }
@@ -219,12 +226,13 @@ export function projectCodexTurns(turns, {
   cancelledToolCalls,
   turnWorkingDirectories,
   goalInputs,
+  goalCompletions,
   renderMarkdown = renderChatMarkdown,
 } = {}) {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
   const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments,
-    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id]))
+    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown, goalInputs?.[turn.id], goalCompletions?.[turn.id]))
   const start = firstSeq ?? beforeSeq - events.length
   return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

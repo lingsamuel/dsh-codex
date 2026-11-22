@@ -2,6 +2,33 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionInput } from '../src/client/native-dsh/session-input.js'
 
+test('直接发送完整 /goal 命令走同一个原生目标提交', async t => {
+  const requests = []
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (!options?.body) return Response.json({ goal: null })
+    requests.push([url.pathname, JSON.parse(options.body)])
+    return Response.json({ goal: { objective: '整理结果', status: 'active' } })
+  })
+  const state = { pendingSubmissions: [] }
+  const subscribe = () => () => {}
+  const history = {
+    session: { getSnapshot: () => state, publishGoal(goal) { state.goal = goal } },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe },
+    queueStore: { getSnapshot: () => [], subscribe }, updateState: edit => edit(state),
+  }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history,
+    { getSnapshot: () => undefined, clear() {} })
+  const text = '/goal 整理结果'
+  const { requestId } = input.beginSubmission({ mode: 'queue', text, attachments: [] })
+  assert.deepEqual(state.pendingSubmissions, [])
+  assert.equal((await input.prompt([{ type: 'text', text }], 'queue', undefined, requestId)).ok, true)
+  assert.deepEqual(requests, [['/api/codex/command-action', { threadId: 'native', action: 'goal-create', objective: '整理结果' }]])
+  assert.equal(state.goal.status, 'active')
+})
+
 test('Goal 发送错误归属本次输入模式，退出后图片走普通发送', async t => {
   let draft = { budget: '' }
   let changed

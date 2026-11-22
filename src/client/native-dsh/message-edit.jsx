@@ -1,5 +1,5 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { Button, IconEditOutlineRegular, InlineEditor, Modal, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconEditOutlineRegular, IconGoalOutlineRegular, InlineEditor, Modal, Tooltip, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 import { writeThreadAction } from '../api.js'
@@ -12,22 +12,23 @@ const editLayout = { display: 'grid', gap: '8px', width: 'min(100%, 38rem)' }
 const editFooter = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }
 const editControls = { display: 'flex', alignItems: 'center', gap: '6px', marginInlineStart: 'auto' }
 const editWarning = { color: 'var(--dsw-alias-label-secondary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }
+const goalMarkerStyle = { display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary)' }
 const labels = {
   zh: { edit: '编辑消息', cancel: '取消', send: '发送', sending: '正在发送…',
     warning: '发送会替换这一轮及之后的对话记录。', unarchiveWarning: '发送会取消归档，并替换这一轮及之后的对话记录。',
     unarchiveAndSend: '取消归档并发送',
-    failed: '无法提交编辑', copy: '复制修改后的消息', copied: '已复制', close: '关闭' },
+    failed: '无法提交编辑', copy: '复制修改后的消息', copied: '已复制', close: '关闭', sentAsGoal: '作为目标发送' },
   en: { edit: 'Edit message', cancel: 'Cancel', send: 'Send', sending: 'Sending…',
     warning: 'Sending replaces this turn and all later conversation history.',
     unarchiveWarning: 'Sending unarchives this session and replaces this turn and all later conversation history.',
     unarchiveAndSend: 'Unarchive and send',
-    failed: 'Could not submit edit', copy: 'Copy revised message', copied: 'Copied', close: 'Close' },
+    failed: 'Could not submit edit', copy: 'Copy revised message', copied: 'Copied', close: 'Close', sentAsGoal: 'Sent as goal' },
 }
 
 function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, ...props }) {
   const { node, renderFactorySlot } = props
   const { archived, canAcceptDirectInput, historyMode, live, subagent } = useSyncExternalStore(session.subscribe, session.getSnapshot)
-  const source = !subagent && historyMode === 'paginated'
+  const source = node.kind === 'user' && !subagent && historyMode === 'paginated'
     ? session.editableInput(node.location.turn?.turn, node.data.seq) : undefined
   const editable = ['idle', 'notLoaded'].includes(live.status?.type) && canAcceptDirectInput !== false
   const anchor = useRef(null)
@@ -78,7 +79,19 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
   }
 
   function renderContent(name, input, ...args) {
-    if (name !== historyContent || !editing || !source) return renderFactorySlot(name, input, ...args)
+    if (name !== historyContent) return renderFactorySlot(name, input, ...args)
+    if (!editing || !source) {
+      if (!node.data.source?.codexGoal) return renderFactorySlot(name, input, ...args)
+      // 原生 ui-goal 只高亮已确认执行的范围。目标正文里的其他 /goal 保持原样。
+      const start = input.content.text.search(/\S/u)
+      const facts = { ...input.facts, commands: [{ start, end: start + 5, name: 'goal' }] }
+      return <>
+        {renderFactorySlot(name, { ...input, facts }, ...args)}
+        <Tooltip label={t('sentAsGoal')} side="bottom">
+          <span role="img" aria-label={t('sentAsGoal')} style={goalMarkerStyle}><IconGoalOutlineRegular size={14} aria-hidden /></span>
+        </Tooltip>
+      </>
+    }
     const originalWithAttachments = { ...input, content: { ...input.content, text: '', extraBlocks: [] } }
     return <>
       {renderFactorySlot(name, originalWithAttachments, ...args)}
@@ -126,11 +139,11 @@ export function installMessageEdit(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   const t = ctx.locale.bind(locale)
   ctx.inject(['sessions'], scope => {
-    scope.effect(() => {
+    for (const kind of ['user', 'steering']) scope.effect(() => {
       let native
       let restore
       function sync() {
-        const entry = scope.slots.entries(chatNode).find(entry => entry.options.key === 'user')
+        const entry = scope.slots.entries(chatNode).find(entry => entry.options.key === kind)
         if (entry === native) return
         restore?.()
         native = entry
@@ -142,7 +155,7 @@ export function installMessageEdit(ctx) {
           ...inject?.(id, ...args), editSession: scope.sessions.binding(id)?.session, editThreadId: id,
         })
         function UserMessage({ editSession: session, editThreadId: threadId, ...props }) {
-          if (!session) return <Component {...props} />
+          if (!session || (kind === 'steering' && !props.node.data.source?.codexGoal)) return <Component {...props} />
           return <EditableUserMessage {...props} Native={Component} session={session} threadId={threadId} tEdit={t}
             reportFailure={draft => failure.set(draft)} />
         }

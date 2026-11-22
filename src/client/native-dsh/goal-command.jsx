@@ -100,8 +100,20 @@ function GoalProgress({ Native, goalSession, useSession, commandT, ...props }) {
   </div>
 }
 
+function GoalCompletion({ turn, t }) {
+  const completion = turn.end?.data.codexGoalCompletion
+  if (!completion) return null
+  return <div data-codex-goal-completed="" style={{ display: 'flex', gap: 6, alignItems: 'center',
+    color: 'var(--dsw-alias-label-tertiary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }}>
+    <IconGoalOutlineRegular size={14} aria-hidden />
+    {t('goal.completed', { seconds: completion.timeUsedSeconds })}
+  </div>
+}
+
 /** 复用 ui-goal 注册的原生 GoalDock。状态和写操作直接来自当前 Codex 会话。 */
-export function installGoalBar(ctx, t) {
+export function installGoalBar(ctx, t, locale) {
+  const tail = 'conversation.chat.turnTail'
+  ctx.slots.inject(tail, () => ctx.slots.register({ name: tail, id: 'codex-goal-completion', locale }, GoalCompletion))
   ctx.inject(['sessions'], scope => adaptSlot(scope, 'conversation.input.dock', entry => entry.options.id === 'goal', (_, Native) => ({
     inject(sessionId) {
       const { session } = scope.sessions.binding(sessionId)

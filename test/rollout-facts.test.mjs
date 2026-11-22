@@ -19,15 +19,53 @@ test('恢复自动目标轮次的输入，并去重桌面端已经记录的目�
   await writeFile(path, goal('CLI 目标', 100) + start('auto', 'goal')
     + goal('CLI 目标', 100) + start('continuation', 'goal')
     + start('desktop', 'composer') + goal('桌面目标', 200)
-    + event('item_completed', { turn_id: 'desktop', item: { type: 'UserMessage',
+    + event('item_completed', { turn_id: 'desktop', item: { type: 'UserMessage', id: 'goal-message',
       content: [{ type: 'text', text: '/goal 桌面目标\n' }] } })
     + start('desktop-continuation', 'goal'))
   const facts = createRolloutFacts(path, AbortSignal.timeout(5000), 'thread')
   assert.deepEqual((await facts.read()).goalInputs, {
     auto: { objective: 'CLI 目标', time: Date.parse('2026-11-22T18:45:12.005Z') },
+    desktop: { objective: '桌面目标', time: Date.parse('2026-11-22T18:45:12.005Z'), messageId: 'goal-message' },
   })
   await appendFile(path, event('thread_rolled_back', { num_turns: 4 }))
   assert.deepEqual((await facts.read()).goalInputs, {})
+})
+
+test('从真实的目标工具回执恢复桌面端清除后的达成时间', async t => {
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'goal-completion-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const line = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const goal = { threadId: 'thread', objective: '写一段短文', createdAt: 100 }
+  const output = [{ type: 'input_text', text: JSON.stringify({
+    goal: { ...goal, status: 'complete', timeUsedSeconds: 18 }, remainingTokens: null,
+    completionBudgetReport: 'Goal achieved.',
+  }) }]
+  await writeFile(path, line('event_msg', { type: 'task_started', turn_id: 'finish' })
+    + line('event_msg', { type: 'thread_goal_updated', threadId: 'thread', goal: { ...goal, status: 'active' } })
+    + line('response_item', { type: 'custom_tool_call', name: 'exec', input: 'text(await tools.update_goal({status: "complete"}))', call_id: 'goal' })
+    + line('response_item', { type: 'custom_tool_call_output', call_id: 'goal', output })
+    + line('event_msg', { type: 'thread_goal_cleared', threadId: 'thread' })
+    + line('event_msg', { type: 'task_started', turn_id: 'other' })
+    + line('response_item', { type: 'custom_tool_call', name: 'exec', input: 'text(fakeOutput)', call_id: 'other' })
+    + line('response_item', { type: 'custom_tool_call_output', call_id: 'other', output }))
+  const facts = createRolloutFacts(path, AbortSignal.timeout(5000), 'thread')
+  assert.deepEqual((await facts.read()).goalCompletions, { finish: { timeUsedSeconds: 18 } })
+})
+
+test('历史中的整行 /goal 随该轮确认的原生目标创建结果标记', async t => {
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'goal-compose-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const line = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  await writeFile(path, line('event_msg', { type: 'task_started', turn_id: 'old' })
+    + line('event_msg', { type: 'item_completed', turn_id: 'old', item: { type: 'UserMessage', id: 'input',
+      content: [{ type: 'text', text: '/goal 原始说明' }] } })
+    + line('response_item', { type: 'custom_tool_call', name: 'exec', input: 'text(await tools.create_goal({objective:"分解目标"}))', call_id: 'goal' })
+    + line('response_item', { type: 'custom_tool_call_output', call_id: 'goal', output: [{ type: 'input_text',
+      text: JSON.stringify({ goal: { threadId: 'thread', status: 'active', objective: '分解目标', createdAt: 100 } }) }] }))
+  const facts = createRolloutFacts(path, AbortSignal.timeout(5000), 'thread')
+  assert.deepEqual((await facts.read()).goalInputs, { old: { messageId: 'input', objective: '原始说明' } })
 })
 
 test('计划模式优先使用当前线程的设置检查点，旧轮次和父会话不能覆盖它', async t => {

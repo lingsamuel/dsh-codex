@@ -9,6 +9,7 @@ import { installForkFeedback } from './native-dsh/fork-feedback.jsx'
 import { installTurnRevert } from './native-dsh/turn-revert.jsx'
 import { installMessageEdit } from './native-dsh/message-edit.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
+import { installPlanDocuments } from './native-dsh/plan-document.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
@@ -57,6 +58,7 @@ export function apply(ctx) {
   installMessageEdit(ctx)
   installModelPicker(ctx, controller.signal)
   installCommands(ctx)
+  installPlanDocuments(ctx)
   installBackgroundTerminals(ctx, catalog.backgroundTerminals)
   installReadReceipts(ctx, catalog)
 }
