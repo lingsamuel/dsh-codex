@@ -47,8 +47,9 @@ function CompactCommand({ command, onClose, session, useSession, t }) {
   const unavailable = useSession(state => turnUnavailable(state) ?? (state.blank ? 'blank' : undefined))
   const archived = useSession(state => state.archived)
   const { error, pending, submit } = useCommandAction(session, archived)
+  const disabled = Boolean(unavailable || pending)
   return <CommandModal {...{ command, onClose, t, error, pending, unavailable }} description={t('compact.detail')}
-    footer={<CommandButton action="compact.run" variant="primary" {...{ archived, t }} disabled={Boolean(unavailable || pending)}
+    footer={<CommandButton action="compact.run" variant="primary" {...{ archived, t, disabled }} data-modal-autofocus={disabled ? undefined : ''}
       onClick={() => submit({ action: 'compact' }, onClose)} />} />
 }
 
