@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { permissionOf } from '../shared/permissions.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
+const userCancelled = /^(?:aborted by user(?: after \d[\d.msµnh ]*)?\.?|Wall time: \d+(?:\.\d+)? seconds\r?\naborted by user)\s*$/i
 
 function normalizePlan(value) {
   if (!Array.isArray(value?.plan) || !value.plan.every(step => typeof step?.step === 'string' && statuses.has(step.status))) return
@@ -26,6 +27,7 @@ function displayPermission(recorded, turn) {
 export function createRolloutFacts(path, signal, threadId) {
   if (!path || !isAbsolute(path)) return undefined
   const pendingPlans = new Map()
+  const pendingToolCalls = new Map()
   let turns = []
   let offset = 0
   let line = ''
@@ -37,6 +39,7 @@ export function createRolloutFacts(path, signal, threadId) {
   let legacyPermission
   let followsOwner = false
   let permissionSequence = 0
+  let publishedCancelledTools = false
   let previous = '{}'
   let queue = Promise.resolve()
 
@@ -51,7 +54,7 @@ export function createRolloutFacts(path, signal, threadId) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context|custom_tool_call|exec_command|shell_command/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
@@ -62,11 +65,13 @@ export function createRolloutFacts(path, signal, threadId) {
     }
     if (record.type === 'event_msg') {
       if (value?.type === 'task_started' || value?.type === 'turn_started') {
-        turns.push({})
+        turns.push({ id: value.turn_id })
         pendingPlans.clear()
+        pendingToolCalls.clear()
       } else if (value?.type === 'thread_rolled_back' && Number.isSafeInteger(value.num_turns) && value.num_turns > 0) {
         turns.splice(Math.max(0, turns.length - value.num_turns))
         pendingPlans.clear()
+        pendingToolCalls.clear()
       } else if (value?.type === 'plan_update') {
         const plan = normalizePlan(value)
         if (plan) currentTurn().todos = plan
@@ -89,6 +94,20 @@ export function createRolloutFacts(path, signal, threadId) {
       return
     }
     if (record.type !== 'response_item' || !value?.call_id) return
+    const input = value.type === 'custom_tool_call' && value.name === 'exec' ? value.input
+      : value.type === 'function_call' && ['exec_command', 'shell_command'].includes(value.name) ? value.arguments : undefined
+    if (typeof input === 'string' && currentTurn().id) {
+      pendingToolCalls.set(value.call_id, { id: value.call_id, name: value.name, input, startedAtMs: Date.parse(record.timestamp) })
+    } else if (value.type === 'custom_tool_call_output' || value.type === 'function_call_output') {
+      const call = pendingToolCalls.get(value.call_id)
+      pendingToolCalls.delete(value.call_id)
+      if (call && typeof value.output === 'string' && userCancelled.test(value.output)) {
+        // 有些请求在执行前取消，Codex 只保留这对原始调用和返回，常规轮次没有工具项。
+        const turn = currentTurn()
+        turn.cancelledToolCalls ??= []
+        turn.cancelledToolCalls.push({ ...call, output: value.output, completedAtMs: Date.parse(record.timestamp) })
+      }
+    }
     if (value.type === 'function_call' && value.name === 'update_plan' && !value.namespace) {
       try {
         const plan = normalizePlan(JSON.parse(value.arguments))
@@ -118,6 +137,7 @@ export function createRolloutFacts(path, signal, threadId) {
         permissionSequence = 0
         turns = []
         pendingPlans.clear()
+        pendingToolCalls.clear()
         offset = 0
         line = ''
         decoder = new StringDecoder('utf8')
@@ -134,11 +154,14 @@ export function createRolloutFacts(path, signal, threadId) {
       const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
         ? turnPermission : legacyPermission
       const permission = displayPermission(ownedPermission ?? latestPermission, turnPermission)
+      const cancelledToolCalls = turns.flatMap(turn => turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])
+      publishedCancelledTools ||= cancelledToolCalls.length > 0
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
         settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
         ...(permission && { permission }),
+        ...(publishedCancelledTools && { cancelledToolCalls }),
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

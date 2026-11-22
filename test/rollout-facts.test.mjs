@@ -74,3 +74,36 @@ test('读取文件状态期间取消 rollout 扫描会安全结束', async t => 
   // 等待读流可能延后触发的 error 事件，由测试运行器捕获未处理异常。
   await setImmediate()
 })
+
+test('从原生记录回放已取消的工具调用，并沿原轮次回退', async t => {
+  const target = await mkdtemp(join(process.cwd(), '.runtime', 'cancelled-tool-'))
+  t.after(() => rm(target, { recursive: true, force: true }))
+  const path = join(target, 'rollout.jsonl')
+  const signal = new AbortController().signal
+  const input = 'const r=await tools.exec_command({cmd:"pwd",sandbox_permissions:"require_escalated"});text(r);'
+  const line = (type, payload, timestamp) => JSON.stringify({ type, payload, timestamp }) + '\n'
+  const rows = [
+    line('event_msg', { type: 'task_started', turn_id: 'turn-a' }),
+    line('response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'successful', input: 'other' }),
+    line('response_item', { type: 'custom_tool_call_output', call_id: 'successful', output: 'completed' }),
+    line('response_item', { type: 'custom_tool_call', name: 'exec', call_id: 'cancelled', input }, '2026-11-22T12:48:46.681Z'),
+    line('response_item', { type: 'custom_tool_call_output', call_id: 'cancelled', output: 'aborted by user after 8.9s' }, '2026-11-22T12:48:55.616Z'),
+  ]
+  await writeFile(path, rows.slice(0, -1).join(''))
+  const facts = createRolloutFacts(path, signal)
+  assert.equal(await facts.read(), null)
+  await appendFile(path, rows.at(-1))
+  assert.deepEqual((await facts.read()).cancelledToolCalls, [
+    { turnId: 'turn-a', id: 'cancelled', name: 'exec', input, output: 'aborted by user after 8.9s',
+      startedAtMs: Date.parse('2026-11-22T12:48:46.681Z'), completedAtMs: Date.parse('2026-11-22T12:48:55.616Z') },
+  ])
+  assert.equal(await facts.read(), null)
+  const directInput = JSON.stringify({ cmd: 'pwd' })
+  const directOutput = 'Wall time: 0.02 seconds\naborted by user'
+  await appendFile(path, line('response_item', { type: 'function_call', name: 'exec_command', call_id: 'direct', arguments: directInput })
+    + line('response_item', { type: 'function_call_output', call_id: 'direct', output: directOutput }))
+  const direct = (await facts.read()).cancelledToolCalls.find(call => call.id === 'direct')
+  assert.deepEqual({ turnId: direct?.turnId, input: direct?.input, output: direct?.output }, { turnId: 'turn-a', input: directInput, output: directOutput })
+  await appendFile(path, line('event_msg', { type: 'thread_rolled_back', num_turns: 1 }))
+  assert.deepEqual((await facts.read()).cancelledToolCalls, [])
+})

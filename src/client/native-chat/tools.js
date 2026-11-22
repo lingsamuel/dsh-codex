@@ -66,6 +66,8 @@ function agentWait(item) {
 export function projectTool(item) {
   if (item.type === 'collabAgentToolCall' && item.tool === 'wait') return agentWait(item)
   switch (item.type) {
+    case 'cancelledToolCall':
+      return { name: item.name, args: { input: item.input }, output: item.output, isError: true }
     case 'commandExecution':
       return command(item)
     case 'fileChange':

@@ -194,6 +194,38 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
   assert.equal(history.session.getSnapshot().running, false)
 })
 
+test('取消的原始调用能补入已载入的历史轮次，并随原生回退移除', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const turnId = 'cancelled-turn'
+  const input = 'const reply = await tools.exec_command({cmd:"pwd"}); text(reply);'
+  const output = 'aborted by user after 8.9s'
+  const cancelled = { turnId, id: 'raw-call', name: 'exec', input, output, startedAtMs: 100_016, completedAtMs: 100_025 }
+  const laterInTurn = { ...answer, id: 'adapter-comment', completedAtMs: 100_030 }
+  await emit({ type: 'snapshot', page: { data: [turn('later', 'completed', [answer]), turn(turnId, 'interrupted', [ask, laterInTurn])] },
+    mode: 'history', status: { type: 'idle' } })
+  const cancelledFrame = { type: 'rollout-facts', cancelledToolCalls: [cancelled] }
+  await emit(cancelledFrame)
+  await emit(cancelledFrame)
+  const entries = history.events.getSnapshot().entries
+  const results = entries.filter(({ event }) => event.type === 'tool/result')
+  assert.equal(results.length, 1)
+  assert.equal(results[0].event.data.message.content[0].text, output)
+  assert.equal(results[0].event.data.message.isError, true)
+  const laterEntry = entries.find(({ event }) => event.type === 'assistant/message' && event.data.message.id === laterInTurn.id)
+  assert.ok(results[0].event.seq < laterEntry.event.seq)
+  const call = entries.find(({ event }) => event.type === 'tool/call').event
+  assert.equal(JSON.parse(call.data.arguments).input, input)
+  assert.equal(call.data.turn, results[0].event.data.turn)
+  await source().onopen()
+  assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/result'), false)
+  await emit(cancelledFrame)
+  assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/result'), true)
+  await emit({ type: 'rollout-facts', cancelledToolCalls: [] })
+  assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/result'), false)
+})
+
 test('实时问题使用原生请求身份，原生确认完成后清理当前投影', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })

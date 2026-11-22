@@ -56,13 +56,40 @@ function turnEndReason({ status, error }) {
   return { kind: 'completed' }
 }
 
-function turnEvents(turn, number, source, createdAt, attachments) {
+function mergeCancelledToolCalls(items, cancelled) {
+  if (!cancelled?.length) return items
+  const pending = new Map(cancelled.map(call => [call.id, call]))
+  const native = items.map(item => {
+    const call = pending.get(item.id)
+    if (!call) return item
+    pending.delete(item.id)
+    if (item.type !== 'commandExecution' || item.status !== 'inProgress') return item
+    // 有启动记录却缺少原生完成事件时，沿用命令的身份和已收到的输出。
+    return { ...item, status: 'failed', completedAtMs: call.completedAtMs,
+      aggregatedOutput: [item.aggregatedOutput, call.output].filter(Boolean).join('\n') }
+  })
+  const timeOf = item => item.completedAtMs ?? item.startedAtMs ?? Infinity
+  const recovered = [...pending.values()]
+    .map(call => ({ ...call, type: 'cancelledToolCall', id: `codex:cancelled:${call.id}` }))
+    .sort((a, b) => timeOf(a) - timeOf(b))
+  // 保留原生条目的相对顺序，将补充记录插到其完成时间所在的位置。
+  let index = 0
+  const merged = []
+  for (const item of native) {
+    const time = timeOf(item)
+    while (index < recovered.length && Number.isFinite(time) && timeOf(recovered[index]) < time) merged.push(recovered[index++])
+    merged.push(item)
+  }
+  return [...merged, ...recovered.slice(index)]
+}
+
+function turnEvents(turn, number, source, createdAt, attachments, cancelled) {
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
   }
 
-  const items = turn.items
+  const items = mergeCancelledToolCalls(turn.items, cancelled)
   const firstTimedItem = items.find(item => item.startedAtMs != null || item.completedAtMs != null)
   const startedAt = milliseconds(turn.startedAt) ?? firstTimedItem?.startedAtMs
     ?? firstTimedItem?.completedAtMs ?? milliseconds(createdAt) ?? 0
@@ -162,10 +189,11 @@ export function projectCodexTurns(turns, {
   model = '',
   createdAt,
   attachments,
+  cancelledToolCalls,
 } = {}) {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
-  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments))
+  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments, cancelledToolCalls?.get(turn.id)))
   const start = firstSeq ?? beforeSeq - events.length
   return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

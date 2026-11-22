@@ -1,10 +1,12 @@
 import { Button, Modal, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useRef, useState } from 'react'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { useRef, useState, useSyncExternalStore } from 'react'
 import { writeApprovalDecision } from '../api.js'
 
 const composer = 'conversation.composer'
 const utilities = 'conversation.session.header.utilities'
 const detail = 'conversation.approval.detail'
+const factoryName = 'conversation.approval.card'
 const locale = 'codex.approval'
 const labels = {
   zh: {
@@ -15,7 +17,8 @@ const labels = {
     filesystem: '文件系统权限', networkAccess: '网络访问权限',
     read: '读取 {path}', write: '写入 {path}', deny: '拒绝访问 {path}', snapshotPending: '等待 Codex 提供文件变更详情。此时可以取消操作。',
     'change.add': '新增 {path}', 'change.delete': '删除 {path}', 'change.update': '修改 {path}', 'change.move': '移动 {path} → {destination}',
-    accept: '本次允许', 'accept.turn': '本轮允许', acceptForSession: '本会话允许', decline: '拒绝', cancel: '取消操作',
+    accept: '本次允许', 'accept.turn': '本轮允许', acceptForSession: '本会话允许', decline: '拒绝',
+    'decline.continue': '不执行并继续', cancel: '取消本轮并补充指令',
   },
   en: {
     open: 'View pending approvals', close: 'Close approvals', select: 'Select approval request', waiting: 'Waiting for approval',
@@ -25,11 +28,45 @@ const labels = {
     filesystem: 'File system permissions', networkAccess: 'Network access',
     read: 'Read {path}', write: 'Write {path}', deny: 'Deny access to {path}', snapshotPending: 'Waiting for Codex to provide file change details. You can cancel the operation now.',
     'change.add': 'Add {path}', 'change.delete': 'Delete {path}', 'change.update': 'Edit {path}', 'change.move': 'Move {path} → {destination}',
-    accept: 'Allow once', 'accept.turn': 'Allow for this turn', acceptForSession: 'Allow for this session', decline: 'Deny', cancel: 'Cancel operation',
+    accept: 'Allow once', 'accept.turn': 'Allow for this turn', acceptForSession: 'Allow for this session', decline: 'Deny',
+    'decline.continue': 'No, continue without running it', cancel: 'Cancel turn and give new instructions',
   },
 }
 const cardWidth = { width: '100%', maxWidth: 'var(--dsh-chat-content-width, 48rem)', marginInline: 'auto', boxSizing: 'border-box' }
 const actionRow = { ...cardWidth, display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, padding: '8px 16px' }
+
+function adaptNativeChoiceLabels(ctx) {
+  const available = createSnapshotStore(false)
+  ctx.effect(() => {
+    // DSH 的审批卡固定使用 Reject 和 Always allow 文案。按本次 Codex 请求标注真实决定范围。
+    const host = ctx.slots.hostFace?.()
+    if (!host) return
+    let current
+    let restore
+    function sync() {
+      const entry = host.factoryOf(factoryName)
+      if (entry === current) return
+      restore?.()
+      current = entry
+      restore = undefined
+      if (!entry?.component || !Object.getOwnPropertyDescriptor(entry, 'component')?.writable) {
+        available.set(false)
+        return
+      }
+      const Native = entry.component
+      function ApprovalChoices({ codexChoiceLabels, t, ...props }) {
+        return <Native {...props} t={(key, ...args) => codexChoiceLabels?.[key] ?? t(key, ...args)} />
+      }
+      entry.component = ApprovalChoices
+      restore = () => { if (entry.component === ApprovalChoices) entry.component = Native }
+      available.set(true)
+    }
+    const stop = host.subscribeFactory(factoryName, sync)
+    sync()
+    return () => { stop(); restore?.(); available.set(false) }
+  })
+  return available
+}
 
 function useApprovalRequest(useProjection, key) {
   return useProjection('codexApprovals', approvals => approvals?.find(request => request.key === key))
@@ -52,12 +89,12 @@ function ApprovalRequestDetail({ request, t }) {
   const target = request.networkApprovalContext
   const entries = [
     target && `${target.protocol}://${target.host}`,
-    request.command,
     request.cwd && t('workspace', { path: request.cwd }),
     request.grantRoot && t('root', { path: request.grantRoot }),
     permissions?.network?.enabled && t('networkAccess'),
   ].filter(Boolean)
   return <div style={{ display: 'grid', gap: 6, overflowWrap: 'anywhere' }}>
+    {request.command && <code style={{ whiteSpace: 'pre-wrap' }}>{request.command}</code>}
     {entries.map((entry, index) => <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{entry}</div>)}
     {paths.length > 0 && <details open><summary>{t('filesystem')}</summary>
       {paths.map((path, index) => <div key={index}>{path}</div>)}
@@ -92,14 +129,21 @@ function ApprovalFallback({ request, pending, t, children }) {
   </div>
 }
 
-function ApprovalCard({ request, renderFactorySlot, t }) {
+function ApprovalCard({ request, renderFactorySlot, nativeLabels, t }) {
   const responding = useRef(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
+  const hasNativeLabels = useSyncExternalStore(nativeLabels.subscribe, nativeLabels.getSnapshot)
   const { key, threadId, requestId, decisions, reason, kind } = request
   const allow = decisions.find(decision => decision === 'accept') ?? decisions.find(decision => decision === 'acceptForSession')
   const deny = decisions.find(decision => decision === 'decline')
-  const label = decision => t(decision === 'accept' && kind === 'permissions' ? 'accept.turn' : decision)
+    ?? (hasNativeLabels ? decisions.find(decision => decision === 'cancel') : undefined)
+  const sessionAllow = hasNativeLabels && allow === 'accept' && decisions.includes('acceptForSession') ? 'acceptForSession' : undefined
+  function label(decision) {
+    if (decision === 'accept' && kind === 'permissions') return t('accept.turn')
+    if (decision === 'decline' && kind !== 'permissions') return t('decline.continue')
+    return t(decision)
+  }
 
   async function decide(decision) {
     if (responding.current) return
@@ -118,28 +162,29 @@ function ApprovalCard({ request, renderFactorySlot, t }) {
 
   const buttons = choices => choices.map(decision => <Button key={decision} size="sm" variant="outline"
     disabled={pending} onClick={() => { void decide(decision).catch(() => {}) }}>{label(decision)}</Button>)
-  // DSH 卡片的拒绝按钮固定。仅有取消的请求必须显示为取消，避免混淆 Codex 的两种决定。
   const canRenderNativeCard = Boolean(allow && deny)
   const fallback = <ApprovalFallback request={request} pending={pending} t={t}>
-    {buttons(canRenderNativeCard ? [deny, allow] : decisions)}
+    {buttons(canRenderNativeCard ? [deny, allow, ...(sessionAllow ? [sessionAllow] : [])] : decisions)}
   </ApprovalFallback>
-  const otherDecisions = canRenderNativeCard ? decisions.filter(decision => decision !== allow && decision !== deny) : []
+  const otherDecisions = canRenderNativeCard ? decisions.filter(decision => ![allow, deny, sessionAllow].includes(decision)) : []
   return <section data-codex-approval={key}>
-    {canRenderNativeCard ? renderFactorySlot('conversation.approval.card', {
+    {canRenderNativeCard ? renderFactorySlot(factoryName, {
       requestKey: key, callId: key, title: t(kind), description: reason ?? undefined, allowLabel: label(allow),
       canAnswer: () => !responding.current, onAllow: () => decide(allow), onReject: () => decide(deny),
+      ...(sessionAllow && { onAlways: () => decide(sessionAllow) }),
+      ...(hasNativeLabels && { codexChoiceLabels: { reject: label(deny), allowAlways: label('acceptForSession') } }),
     }, { fallback }) : fallback}
     {otherDecisions.length > 0 && <div style={actionRow}>{buttons(otherDecisions)}</div>}
     {error && <p role="alert">{error}</p>}
   </section>
 }
 
-function ApprovalComposer({ matched, useProjection, renderFactorySlot, t }) {
+function ApprovalComposer({ matched, useProjection, renderFactorySlot, nativeLabels, t }) {
   const request = useApprovalRequest(useProjection, matched.key)
-  return request && <ApprovalCard key={request.key} {...{ request, renderFactorySlot, t }} />
+  return request && <ApprovalCard key={request.key} {...{ request, renderFactorySlot, nativeLabels, t }} />
 }
 
-function ApprovalUtilities({ useProjection, renderFactorySlot, t }) {
+function ApprovalUtilities({ useProjection, renderFactorySlot, nativeLabels, t }) {
   const requests = useProjection('codexApprovals') ?? []
   const [openKey, setOpenKey] = useState(null)
   const open = requests.find(request => request.key === openKey)
@@ -150,7 +195,7 @@ function ApprovalUtilities({ useProjection, renderFactorySlot, t }) {
       {requests.length > 1 && <select aria-label={t('select')} value={open.key} onChange={event => setOpenKey(event.target.value)}>
         {requests.map((request, index) => <option key={request.key} value={request.key}>{index + 1}. {t(request.kind)}</option>)}
       </select>}
-      <ApprovalCard key={open.key} request={open} {...{ renderFactorySlot, t }} />
+      <ApprovalCard key={open.key} request={open} {...{ renderFactorySlot, nativeLabels, t }} />
     </Modal>}
   </>
 }
@@ -158,6 +203,7 @@ function ApprovalUtilities({ useProjection, renderFactorySlot, t }) {
 /** 注册原生审批卡入口。真实请求与黄点分开，问答在输入栏优先，审批仍可从标题栏打开。 */
 export function installCodexApprovals(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
+  const nativeLabels = adaptNativeChoiceLabels(ctx)
   ctx.inject(['uiSession'], scope => {
     const publish = scope.uiSession.registerPendingInteraction(() => 0.5)
     const installed = new WeakSet()
@@ -187,8 +233,11 @@ export function installCodexApprovals(ctx) {
   })
   ctx.slots.inject(composer, () => ctx.slots.register({ name: composer, id: 'codex-approval', locale,
     select: ({ pendingInteraction }) => pendingInteraction?.codexApproval ? pendingInteraction : null,
+    inject: () => ({ nativeLabels }),
   }, ApprovalComposer))
-  ctx.slots.inject(utilities, () => ctx.slots.register({ name: utilities, id: 'codex-open-approval', order: 55, locale }, ApprovalUtilities))
+  ctx.slots.inject(utilities, () => ctx.slots.register({ name: utilities, id: 'codex-open-approval', order: 55, locale,
+    inject: () => ({ nativeLabels }),
+  }, ApprovalUtilities))
   // 原生聊天详情按 DSH 工具调用 ID 查找。Codex 请求在独立 Profile 使用自己的原生详情。
   ctx.slots.inject(detail, () => ctx.slots.register({ name: detail, id: 'codex-approval-detail', locale, priority: -1 }, NativeApprovalDetail))
 }

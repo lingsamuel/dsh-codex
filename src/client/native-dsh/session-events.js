@@ -56,6 +56,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   const transcript = createLiveTranscript()
   const attachments = new Map()
   let queueImages = new Map()
+  let cancelledToolCalls = new Map()
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
@@ -161,7 +162,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   }
 
   function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, ...options })
+    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, ...options })
   }
 
   async function addOlderPage(page) {
@@ -185,8 +186,11 @@ export function createCodexHistory(ctx, thread, catalog) {
     if (!next) return
     const changedItems = next.items.filter((item, index) => item !== previous?.items[index])
     await collectAttachments([{ items: changedItems }])
+    renderTurn(next)
+  }
 
-    const index = rows.findIndex(row => row.id === turn.id)
+  function renderTurn(next) {
+    const index = rows.findIndex(row => row.id === next.id)
     const existing = rows[index]?.entries
     const tail = rows.at(-1)?.entries
     const options = tail && {
@@ -210,6 +214,21 @@ export function createCodexHistory(ctx, thread, catalog) {
     for (const row of rows.slice(index + 1)) {
       row.entries = row.entries.map(entry => ({ ...entry, event: { ...entry.event, seq: entry.event.seq + overlap } }))
     }
+  }
+
+  function publishCancelledToolCalls(calls) {
+    if (!calls) return
+    const previous = cancelledToolCalls
+    cancelledToolCalls = Map.groupBy(calls, call => call.turnId)
+    let changed = false
+    for (const id of new Set([...previous.keys(), ...cancelledToolCalls.keys()])) {
+      if (JSON.stringify(previous.get(id)) === JSON.stringify(cancelledToolCalls.get(id))) continue
+      const turn = transcript.getTurn(id)
+      if (!turn) continue
+      renderTurn(turn)
+      changed = true
+    }
+    if (changed) publish()
   }
 
   async function loadPage(cursor, lifetime = signal) {
@@ -356,6 +375,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       if (frame.type === 'rollout-facts') {
         todos.set(frame.todos)
         contextPressure.set(frame.contextPressure)
+        publishCancelledToolCalls(frame.cancelledToolCalls)
         const recorded = frame.permission
         if (recorded) {
           const saved = JSON.stringify(recorded)
@@ -402,6 +422,8 @@ export function createCodexHistory(ctx, thread, catalog) {
 
   function changeMode(mode, lifetime) {
     return enqueue(async () => {
+      // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
+      if (mode === 'connecting') publishCancelledToolCalls([])
       if (mode === 'disconnected') {
         liveQuestions = []
         codexApprovals.set([])

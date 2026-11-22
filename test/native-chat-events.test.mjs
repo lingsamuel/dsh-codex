@@ -234,3 +234,19 @@ test('识别紧跟 Markdown 引用段落或列表的独立 Visualize 行', () =>
       `${paragraph}\n\n\`\`\`${visualizeFence}\n${reference}\n\`\`\``)
   }
 })
+
+test('与取消记录同 ID 的未完成命令保留原生命令，只补充取消结果', () => {
+  const call = { id: 'shell', name: 'exec_command', input: '{"cmd":"pwd"}', output: 'Wall time: 0.02 seconds\naborted by user', completedAtMs: 101 }
+  const finished = { ...call, id: 'finished' }
+  const turns = [{ id: 'turn', status: 'interrupted', items: [
+    { id: 'shell', type: 'commandExecution', command: 'pwd', cwd: '/workspace', status: 'inProgress' },
+    { id: 'finished', type: 'commandExecution', command: 'true', cwd: '/workspace', status: 'completed', aggregatedOutput: 'native result' },
+  ] }]
+  const entries = projectCodexTurns(turns, { cancelledToolCalls: new Map([['turn', [call, finished]]]) })
+  const results = entries.filter(({ event }) => event.type === 'tool/result')
+  assert.deepEqual(results.map(({ event }) => event.data.message.id), ['shell', 'finished'])
+  assert.match(results[0].event.data.message.content[0].text, /aborted by user/)
+  assert.equal(results[0].event.data.message.isError, true)
+  assert.match(results[1].event.data.message.content[0].text, /native result/)
+  assert.equal(JSON.parse(entries.find(({ event }) => event.type === 'tool/call').event.data.arguments).command, 'pwd')
+})
