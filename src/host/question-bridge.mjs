@@ -82,11 +82,11 @@ export function createQuestionBridge(socketPath, ownerSignal) {
       if (!state.waiting && !state.requests.size) release(state)
       return
     }
+    if (!isRequestId(id) || state.requests.has(id)) return
     if (method === 'mcpServer/elicitation/request') {
       publishRequest(state, id, 'mcp-requests', projectMcpElicitation(params))
       return
     }
-    if (!isRequestId(id) || state.requests.has(id)) return
     if (method === 'item/tool/requestUserInput') {
       const { questions } = params
       // DSH 的问答面板会在本地保存答复。要求保密的请求仍可在 Codex CLI 作答。

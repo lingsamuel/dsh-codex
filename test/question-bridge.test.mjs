@@ -237,10 +237,13 @@ test('MCP 表单、外部授权与不支持的请求保留原生身份并随 CLI
   assert.equal((await post(17, 'accept', content, 'stale')).status, 409)
   assert.equal((await post('url', 'accept', content)).status, 400)
   assert.equal((await post('unsupported', 'accept', {})).status, 400)
-  assert.equal((await post(17, 'accept', content)).status, 200)
-  assert.deepEqual(await native.response, { id: 17, result: { action: 'accept', content } })
+  const originalKey = pending.find(entry => entry.requestId === 17).key
+  client.send(JSON.stringify(elicitation(17, 'form', { requestedSchema })))
   native.resolved(client, 'url')
   await resolved
+  assert.equal(pending.find(entry => entry.requestId === 17).key, originalKey)
+  assert.equal((await post(17, 'accept', content, originalKey)).status, 200)
+  assert.deepEqual(await native.response, { id: 17, result: { action: 'accept', content } })
   assert.equal((await post('url', 'accept')).status, 409)
   const { promise: urlReady, resolve: urlSent } = Promise.withResolvers()
   const urlWatcher = bridge.observe(threadId, frame => {
