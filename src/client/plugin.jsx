@@ -19,6 +19,7 @@ import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
+import { installSidebarBrand } from './native-dsh/branding.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -28,6 +29,7 @@ export function apply(ctx) {
   ctx.effect(() => () => controller.abort())
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
+  installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog)
   installProjectWorkspaces(ctx, catalog.search)
