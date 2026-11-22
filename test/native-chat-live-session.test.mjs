@@ -47,6 +47,7 @@ test('stock window appends native tail changes, prepends older history, and keep
   const history = createCodexHistory({ effect(callback) { dispose = callback() } }, { id: 'thread' }, {
     setStatus: (...update) => received.push(update),
     setReadState: (...update) => reading.push(update),
+    seedReadState: (...update) => reading.push(update),
     applyUnread: update => reading.push(update),
   })
   const source = currentSource()
@@ -192,6 +193,19 @@ test('a reconnect across a page gap fills that gap without discarding the existi
   assert.deepEqual(final.entries.filter(entry => entry.event.type === 'turn/start').map(entry => entry.event.data.codexTurnId), ['first', 'second', 'third'])
   assert.strictEqual(final.entries[0], firstEvent)
   assert.equal(final.hasMore, false)
+})
+
+test('失败轮次的已读锚点是 DSH 原生错误消息而不是此前的提示词', async t => {
+  const currentSource = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const emit = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
+  const failed = { ...turn('failed', 'failed', [ask]), error: { message: 'native result failure' } }
+  const readState = { revision: 'failed-result', firstUnread: { type: 'turn', turnId: 'failed' } }
+  await emit({ type: 'snapshot', page: { data: [failed], nextCursor: null }, mode: 'live', readState })
+  const end = history.events.getSnapshot().entries.at(-1).event
+  assert.deepEqual(history.session.getSnapshot().reading, {
+    readState, target: { kind: 'turn-error', id: String(end.data.turn) },
+  })
 })
 
 test('an authoritative reconnect tail drops rolled-back turns and keeps earlier records', async t => {

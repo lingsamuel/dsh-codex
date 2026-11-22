@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../shared/pages.js'
-import { readPage } from './api.js'
+import { readPage, writeThreadAction } from './api.js'
 import { openLiveWatch } from './live-watch.js'
 import { subagentAddress } from './native-dsh/subagents.js'
 
@@ -21,8 +21,11 @@ export function createHistoryCatalog(signal) {
     childThreads: {},
     childCatalogs: {},
     unreadIds: [],
+    readStates: {},
     workspacePaths: {},
     selected: null,
+    readVisit: 0,
+    manualUnreadVisit: 0,
     busy: true,
     error: '',
   })
@@ -32,6 +35,7 @@ export function createHistoryCatalog(signal) {
   let verified = false
   let liveProjects
   let archivedThreads = []
+  let nextReadVisit = 0
   const observedStatuses = new Map()
   const observedReadStates = new Map()
   const searchThreads = new Map()
@@ -47,9 +51,12 @@ export function createHistoryCatalog(signal) {
       state.threads = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges).map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
+      state.readStates = Object.fromEntries(state.threads.flatMap(({ id, readState }) => {
+        const receipt = observedReadStates.get(id) ?? readState
+        return receipt ? [[id, receipt]] : []
+      }))
       if (!followsLocalReceipts) {
-        state.unreadIds = state.threads.filter(({ id, readState }) =>
-          (observedReadStates.get(id) ?? (readState?.firstUnread != null))).map(thread => thread.id)
+        state.unreadIds = Object.keys(state.readStates).filter(id => state.readStates[id].firstUnread != null)
       }
       state.workspacePaths = { ...workspacePaths, ...changedPaths }
       state.selected = state.threads.find(thread => thread.id === state.selected?.id) ?? state.selected
@@ -66,11 +73,25 @@ export function createHistoryCatalog(signal) {
       Object.assign(changedPaths, workspacePaths)
       store.update(state => {
         state.threads = applyChanges(mergePages(state.threads.filter(thread => !thread.archived), threads), threadChanges)
+        for (const { id, readState } of threads) {
+          if (readState && !state.readStates[id]) state.readStates[id] = readState
+        }
         Object.assign(state.workspacePaths, workspacePaths)
       })
     } catch {
       // 归档暂不可用时保留已加载的清单和普通会话。
     }
+  }
+
+  function setReadState(threadId, readState) {
+    if (!readState || observedReadStates.get(threadId)?.revision === readState.revision) return
+    observedReadStates.set(threadId, readState)
+    store.update(state => {
+      state.readStates[threadId] = readState
+      const unread = readState.firstUnread != null
+      if (unread && !state.unreadIds.includes(threadId)) state.unreadIds.push(threadId)
+      if (!unread) state.unreadIds = state.unreadIds.filter(id => id !== threadId)
+    })
   }
 
   function loadChildren(parentId, force = false) {
@@ -149,6 +170,27 @@ export function createHistoryCatalog(signal) {
   const catalog = {
     store,
     loadChildren,
+    setReadState,
+    seedReadState(threadId, readState) {
+      if (!store.getSnapshot().readStates[threadId]) setReadState(threadId, readState)
+    },
+    async writeReadState(threadId, action, expectedRevision) {
+      const start = store.getSnapshot().readStates[threadId]?.revision
+      if (action === 'unread' && store.getSnapshot().selected?.id === threadId) {
+        store.update(state => { state.manualUnreadVisit = state.readVisit })
+      }
+      function accept(receipt) {
+        // 响应可能比另一客户端的广播晚到。已有新版本时沿用原生事件顺序。
+        if (store.getSnapshot().readStates[threadId]?.revision === start) setReadState(threadId, receipt)
+      }
+      try {
+        const { readState } = await writeThreadAction({ threadId, action, expectedRevision }, signal)
+        accept(readState)
+      } catch (error) {
+        if (error.status === 409) accept(error.readState)
+        throw error
+      }
+    },
     async search(searchTerm, searchSignal) {
       const requestSignal = AbortSignal.any([signal, searchSignal])
       const { data, nextCursor, workspacePaths } = await readPage('search', { searchTerm }, requestSignal)
@@ -171,15 +213,6 @@ export function createHistoryCatalog(signal) {
         if (thread) thread.status = status
       })
     },
-    setReadState(threadId, readState) {
-      if (followsLocalReceipts) return
-      const unread = readState?.firstUnread != null
-      observedReadStates.set(threadId, unread)
-      store.update(state => {
-        if (unread && !state.unreadIds.includes(threadId)) state.unreadIds.push(threadId)
-        if (!unread) state.unreadIds = state.unreadIds.filter(id => id !== threadId)
-      })
-    },
     applyUnread({ replace, added, removed }) {
       followsLocalReceipts = true
       store.update(state => {
@@ -189,8 +222,11 @@ export function createHistoryCatalog(signal) {
         state.unreadIds = [...ids]
       })
     },
-    select(thread) {
-      store.update(state => { state.selected = thread })
+    select(thread, explicit = false) {
+      store.update(state => {
+        state.selected = thread
+        state.readVisit = thread && explicit ? ++nextReadVisit : 0
+      })
     },
   }
 
@@ -235,6 +271,7 @@ export function createHistoryCatalog(signal) {
         state.threads = applyChanges(state.threads, [[id, current]]).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
         Object.assign(state.workspacePaths, workspacePaths)
         if (current && state.selected?.id === id) state.selected = current
+        if (!current) delete state.readStates[id]
       })
       if (readState !== undefined) catalog.setReadState(id, readState)
     } else if (frame.type === 'projects') {

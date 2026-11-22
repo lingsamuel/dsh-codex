@@ -1,6 +1,7 @@
 import { Button, IconSearchOutlineRegular, Input, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage } from '../api.js'
+import { findRenderedMessage } from './message-anchor.js'
 
 const slot = 'conversation.session.header.utilities'
 const locale = 'codex.history.search'
@@ -58,10 +59,7 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
       signal.throwIfAborted()
       if (!target) throw new Error(t('unavailable'))
       const scope = button.current?.closest('[data-slot="conversation.content"]') ?? document
-      // DSH 会按节点种类和身份生成锚点。保持原生聊天组件和折叠行为。
-      const key = `${target.kind.length}:${target.kind}${target.id}`
-      const selector = `[data-chat-node-key="${CSS.escape(key)}"]`
-      const node = scope.querySelector(selector)
+      const node = findRenderedMessage(scope, target)
       if (!node) throw new Error(t('unavailable'))
       node.closest('[hidden="until-found"]')?.dispatchEvent(new Event('beforematch'))
       close()

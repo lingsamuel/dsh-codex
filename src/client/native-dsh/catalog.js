@@ -1,10 +1,9 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
+import { pinnedSectionId } from '../../shared/thread-sections.js'
 import { subagentAddress } from './subagents.js'
 
 const noRetention = {}
 const mainRetention = { mainView: 1 }
-// Codex 的内置 Pinned 分组使用固定身份。自建同名分组不等同于置顶。
-const pinnedSectionId = '01984de2-8f74-7c91-a3b2-5c5e937cf318'
 
 export function remoteFailure(message) {
   return { code: 'codex/history', message }

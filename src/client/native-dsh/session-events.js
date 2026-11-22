@@ -7,6 +7,7 @@ import { projectCodexTurns } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
+import { messageAnchor } from './message-anchor.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
@@ -95,6 +96,16 @@ export function createCodexHistory(ctx, thread, catalog) {
         current.openError = null
       }
     })
+  }
+
+  function publishReadingReceipt(readState) {
+    const row = rows.findLast(entry => entry.entries.at(-1)?.event.type === 'turn/end')
+    const end = row?.entries.at(-1)?.event
+    const newest = row?.entries.findLast(({ event }) => messageAnchor(event))?.event
+    // Codex 的失败结果也可能产生未读。错误行可见之前，旧提示词不能代表已看到结果。
+    const target = end?.data.reason.kind === 'error' ? { kind: 'turn-error', id: String(end.data.turn) }
+      : newest && messageAnchor(newest)
+    state.update(current => { current.reading = readState ? { readState, target } : undefined })
   }
 
   async function collectAttachments(turns) {
@@ -216,7 +227,8 @@ export function createCodexHistory(ctx, thread, catalog) {
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
-    if (readState !== undefined) catalog?.setReadState(thread.id, readState)
+    publishReadingReceipt(readState)
+    if (readState !== undefined) catalog?.seedReadState(thread.id, readState)
     markReady()
     void refreshOutline()
   }
@@ -238,6 +250,10 @@ export function createCodexHistory(ctx, thread, catalog) {
   function receive(frame) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
+      if (frame.type === 'reading-receipt') {
+        publishReadingReceipt(frame.readState)
+        return
+      }
       if (frame.type === 'unread') return catalog?.applyUnread(frame)
       if (frame.type === 'rollout-facts') {
         todos.set(frame.todos)
@@ -322,10 +338,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   async function findMessage({ turnId, itemId }, requestSignal) {
     const row = await loadTurn(turnId, requestSignal)
     for (const { event } of row?.entries ?? []) {
-      if (event.type === 'user/message' && event.data.id === itemId) return { kind: 'input-message', id: itemId }
-      if (event.type === 'assistant/message' && event.data.message.id === itemId) {
-        return { kind: 'assistant-step', id: `${event.data.turn}:${event.data.step}` }
-      }
+      if (event.type === 'user/message' && event.data.id === itemId) return messageAnchor(event)
+      if (event.type === 'assistant/message' && event.data.message.id === itemId) return messageAnchor(event)
     }
   }
 

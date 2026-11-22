@@ -2,6 +2,7 @@ import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
+import { createThreadActionRoute } from './thread-actions.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
 function optionalParams(query, keys) {
@@ -22,7 +23,7 @@ function requiredParam(query, key, message) {
   return value
 }
 
-/** 将只读入口注册在 DSH 的受保护 API 下。 */
+/** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
 export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const route = (path, read) => ({
@@ -43,6 +44,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
+    createThreadActionRoute(socketPath, ownerSignal),
     createWatchRoute(socketPath, ownerSignal),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),

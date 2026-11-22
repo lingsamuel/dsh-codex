@@ -2,9 +2,10 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { observe, projectCatalog, remoteFailure } from './catalog.js'
 import { createCodexHistory } from './session-events.js'
 import { subagentAddress } from './subagents.js'
+import { writeThreadAction } from '../api.js'
 
 const searchResultLimit = 20
-const unsupported = '当前页面仅支持浏览 Codex 历史。'
+const unsupported = '此操作暂未开放，请使用 Codex CLI。'
 
 async function rejectWrite() {
   throw new Error(unsupported)
@@ -12,12 +13,26 @@ async function rejectWrite() {
 
 function readonlyBinding(ctx, thread, catalog) {
   const history = createCodexHistory(ctx, thread, catalog)
+  const interactionUnavailable = async () => ({ ok: false, error: remoteFailure(unsupported) })
   return {
     ctx,
     sessionId: thread.id,
     eventSource: history.events,
     ready: history.ready,
-    session: history.session,
+    session: {
+      ...history.session,
+      prompt: interactionUnavailable,
+      cancel: interactionUnavailable,
+      updateQueue: interactionUnavailable,
+      async rename(title) {
+        try {
+          await writeThreadAction({ threadId: thread.id, action: 'rename', name: title })
+          return { ok: true, value: { title } }
+        } catch (error) {
+          return { ok: false, error: remoteFailure(error.message) }
+        }
+      },
+    },
   }
 }
 
@@ -77,7 +92,7 @@ export function provideCodexControllers(ctx, catalog) {
         state.referenceCount++
         state.retainedBy[source] = (state.retainedBy[source] ?? 0) + 1
       })
-      if (source === 'mainView') catalog.select(thread)
+      if (source === 'mainView') catalog.select(thread, initialization !== 'opening')
       let released = false
       function release() {
         if (released) return
@@ -99,7 +114,15 @@ export function provideCodexControllers(ctx, catalog) {
     },
     create: rejectWrite,
     fork: rejectWrite,
-    using: async () => ({ ok: false, error: remoteFailure(unsupported) }),
+    async using(target, options, operation) {
+      const reference = sessions.retain(target, options)
+      try {
+        await reference.ready
+        return await operation(reference)
+      } finally {
+        reference.release()
+      }
+    },
   }
   const workspaces = {
     list: observe(projected, state => state.workspaces),
@@ -110,8 +133,8 @@ export function provideCodexControllers(ctx, catalog) {
     insertBefore: rejectWrite,
     archiveSession: rejectWrite,
     unarchiveSession: rejectWrite,
-    pinSession: rejectWrite,
-    unpinSession: rejectWrite,
+    pinSession: threadId => writeThreadAction({ threadId, action: 'pin', pinned: true }),
+    unpinSession: threadId => writeThreadAction({ threadId, action: 'pin', pinned: false }),
   }
 
   ctx.provide('sessions', sessions)

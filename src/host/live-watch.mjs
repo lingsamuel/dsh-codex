@@ -40,6 +40,8 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let reading = false
           let dirty = false
           let tail
+          let pendingReadState
+          let receiptSequence = 0
           let rolloutFacts
           let connection
           let catalogReady = false
@@ -59,9 +61,14 @@ export function createWatchRoute(socketPath, ownerSignal) {
               if (signal.aborted) return
               dirty = false
               reading = true
+              const readState = pendingReadState
+              const receipt = receiptSequence
+              pendingReadState = undefined
               try {
                 await Promise.all([tail.readChanges().then(updates => {
                   for (const update of updates) send({ type: 'change', ...update })
+                  // Codex 在保存新结果后才广播回执。在读取并发出该历史后暴露此版本。
+                  if (readState !== undefined && receipt === receiptSequence) send({ type: 'reading-receipt', readState })
                 }), sendFacts()])
               } catch (error) {
                 connection.close(error)
@@ -91,9 +98,17 @@ export function createWatchRoute(socketPath, ownerSignal) {
             if (message.params?.threadId !== threadId) return
             const goal = goalMethods.has(message.method)
             if (!catalogMethods.has(message.method) && !goal) return
-            if (!tail) early.push(message)
-            else send({ type: 'notification', notification: message })
-            if (message.method !== 'thread/readState/changed' && !goal) wake()
+            if (!tail) { early.push(message); return }
+            if (message.method === 'thread/readState/changed') {
+              receiptSequence++
+              pendingReadState = undefined
+              const { readState } = message.params
+              if (readState?.firstUnread == null) send({ type: 'reading-receipt', readState })
+              else { pendingReadState = readState; wake() }
+              return
+            }
+            send({ type: 'notification', notification: message })
+            if (!goal) wake()
           }
 
           async function follow() {
@@ -126,7 +141,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
               })
               tail = createHistoryTail(connection.request, thread, page)
               send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode, mode: watching ? 'live' : 'history' })
-              for (const message of early) send({ type: 'notification', notification: message })
+              for (const message of early) notify(message)
               early.length = 0
               void sendFacts()
               if (dirty) wake()

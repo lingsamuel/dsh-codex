@@ -7,9 +7,10 @@ import WebSocket from 'ws'
 const run = promisify(execFile)
 
 export class CodexRpcError extends Error {
-  constructor({ message, code }) {
+  constructor({ message, code, data }) {
     super(message)
     this.code = code
+    this.data = data
   }
 }
 
@@ -23,7 +24,7 @@ export async function findCodexSocket(signal) {
   return daemon.socketPath
 }
 
-/** 在同一连接上接收只读 RPC 回复与 daemon 广播，退出时取消尚未完成的请求。 */
+/** 接收原生 RPC 回复与 daemon 广播，退出时取消尚未完成的请求。 */
 export async function openCodexReader(socketPath, signal, onNotification = () => {}) {
   const setup = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
   const endpoint = socketPath || await findCodexSocket(setup)
@@ -104,7 +105,7 @@ export async function openCodexReader(socketPath, signal, onNotification = () =>
   }
 }
 
-/** 同一批只读请求共用一次握手，批次完成或取消后释放连接。 */
+/** 同一批请求共用一次握手，批次完成或取消后释放连接。 */
 export async function withCodexReader(socketPath, requestSignal, read, timeoutMs = 15_000) {
   const timeout = AbortSignal.timeout(timeoutMs)
   const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout

@@ -44,8 +44,8 @@ async function fakeCodex(t, methods) {
     await rm(directory, { recursive: true, force: true })
   })
   const routes = createHistoryRoutes(socketPath)
-  const get = path => routes.find(route => path.split('?')[0] === route.path)
-    .fetch(new Request(`http://localhost${path}`))
+  const get = (path, options) => routes.find(route => path.split('?')[0] === route.path)
+    .fetch(new Request(`http://localhost${path}`, options))
   return {
     get, messages, clientClosed, socketPath, directory,
     broadcast(message) {
@@ -53,6 +53,36 @@ async function fakeCodex(t, methods) {
     },
   }
 }
+
+test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', async t => {
+  const latest = { revision: 'new', firstUnread: { type: 'turn', turnId: 'second' } }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/readState/update': params => {
+      assert.deepEqual(params, { threadId: 'native-thread', expectedRevision: 'visible', operation: { type: 'read' } })
+      return { error: { code: -32600, message: 'read state changed', data: { reason: 'readStateConflict', readState: latest } } }
+    },
+    'thread/name/set': params => {
+      assert.deepEqual(params, { threadId: 'native-thread', name: '新标题' })
+      return { result: {} }
+    },
+    'thread/section/move': params => {
+      assert.deepEqual(params, { threadId: 'native-thread', sectionId: '01984de2-8f74-7c91-a3b2-5c5e937cf318' })
+      return { result: {} }
+    },
+  })
+  const post = (action, value) => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: 'native-thread', action, ...value }),
+  })
+  const conflict = await post('read', { expectedRevision: 'visible' })
+  assert.equal(conflict.status, 409)
+  assert.deepEqual((await conflict.json()).readState, latest)
+  assert.equal((await post('rename', { name: '新标题' })).status, 200)
+  assert.equal((await post('pin', { pinned: true })).status, 200)
+  assert.equal((await post('thread/resume')).status, 400)
+  assert.deepEqual(messages.map(message => message.method).filter(method => !/^initialize/.test(method)),
+    ['thread/readState/update', 'thread/name/set', 'thread/section/move'])
+})
 
 test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t => {
   const thread = { id: 'original-thread', cwd: '/projects/example', updatedAt: 1234, projectId: null }
@@ -361,6 +391,28 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
   assert.deepEqual(await read(), { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
   assert.deepEqual(fixture.messages.map(message => message.method).sort(),
     ['initialize', 'initialized', 'config/read'].sort())
+  await reader.cancel()
+})
+
+test('新回执在它对应的历史增量之后才进入会话阅读面', { timeout: 5000 }, async t => {
+  const threadId = 'observed'
+  const receipt = { revision: 'new', firstUnread: { type: 'turn', turnId: 'turn' } }
+  let turn = { id: 'turn', status: 'inProgress', items: [] }
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: [turn] } }),
+  })
+  const response = await fixture.get(`/api/codex/watch?threadId=${threadId}`)
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal((await read()).type, 'snapshot')
+  turn = { ...turn, status: 'completed', items: [{ id: 'answer', type: 'agentMessage', text: '最新回复' }] }
+  fixture.broadcast({ method: 'thread/readState/changed', params: { threadId, readState: receipt } })
+  const change = await read()
+  assert.equal(change.type, 'change')
+  assert.equal(change.items[0].id, 'answer')
+  assert.deepEqual(await read(), { type: 'reading-receipt', readState: receipt })
   await reader.cancel()
 })
 
