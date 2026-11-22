@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { Button, IconFolderOpenOutlineRegular, IconTrashOutlineRegular, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useState } from 'react'
+import { Button, IconTrashOutlineRegular, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useLayoutEffect, useRef, useState } from 'react'
 
 const locale = 'codex.archive'
 const row = 'sidebar.workspaces.session.row.action'
@@ -8,32 +8,54 @@ const menu = 'sidebar.workspaces.session.menu.item'
 const overlay = 'shell.overlay'
 const labels = {
   zh: {
-    open: '查看归档会话', delete: '永久删除', title: '永久删除会话', cancel: '取消', close: '关闭',
+    archived: '已归档', delete: '永久删除', title: '永久删除会话', cancel: '取消', close: '关闭',
     description: '将永久删除「{title}」及其子代理会话的历史。此操作无法撤销，工作区文件会保留。',
     pending: '正在删除会话…',
   },
   en: {
-    open: 'View archived session', delete: 'Permanently delete', title: 'Permanently delete session', cancel: 'Cancel', close: 'Close',
+    archived: 'Archived', delete: 'Permanently delete', title: 'Permanently delete session', cancel: 'Cancel', close: 'Close',
     description: 'The history for “{title}” and its subagent conversations will be permanently deleted. This action cannot be undone. Workspace files will be kept.',
     pending: 'Deleting session…',
   },
 }
 
-function ArchiveRowAction({ useWorkspaces, sessionId, open, t }) {
+function ArchivedRowNavigation({ useWorkspaces, sessionId, open, t }) {
   const archived = useWorkspaces(state => state.archivedSessionIds.includes(sessionId))
-  if (!archived) return null
-  return <Button size="sm" variant="toolbar" aria-label={t('open')} title={t('open')}
-    icon={<IconFolderOpenOutlineRegular size={14} />} onClick={() => open(sessionId)} />
-}
+  const anchor = useRef(null)
+  const description = t('archived')
+  useLayoutEffect(() => {
+    if (!archived) return
+    const row = anchor.current?.closest('[data-row-key^="session:"]')
+    if (!row) return
+    const originalDescription = row.getAttribute('aria-description')
+    row.setAttribute('aria-description', description)
 
-function ArchiveMenuAction({ useWorkspaces, useMenuOpenState, sessionId, open, t }) {
-  const archived = useWorkspaces(state => state.archivedSessionIds.includes(sessionId))
-  const [, setOpen] = useMenuOpenState()
-  if (!archived) return null
-  return <MenuItemButton icon={<IconFolderOpenOutlineRegular size={14} />} onSelect={() => {
-    setOpen(false)
-    open(sessionId)
-  }}>{t('open')}</MenuItemButton>
+    function activate(event) {
+      if (event.defaultPrevented) return
+      // DSH 的行回调会拒绝归档会话。直接用同一个主视图导航打开历史。
+      event.preventDefault()
+      event.stopPropagation()
+      open(sessionId)
+    }
+    function activateClick(event) {
+      if (!event.target.closest?.('button, a, [role="button"]')) activate(event)
+    }
+    function activateKey(event) {
+      if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      activate(event)
+    }
+    row.addEventListener('click', activateClick)
+    row.addEventListener('keydown', activateKey)
+    return () => {
+      row.removeEventListener('click', activateClick)
+      row.removeEventListener('keydown', activateKey)
+      if (row.getAttribute('aria-description') !== description) return
+      if (originalDescription === null) row.removeAttribute('aria-description')
+      else row.setAttribute('aria-description', originalDescription)
+    }
+  }, [archived, description, open, sessionId])
+  return archived && <span hidden ref={anchor} />
 }
 
 function preserveArchivedNavigation(navigation, workspaces) {
@@ -107,12 +129,11 @@ export function installArchiveView(ctx, deleteSession) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.inject(['uiWorkspace', 'workspaces'], scope => {
     scope.effect(() => preserveArchivedNavigation(scope.uiWorkspace, scope.workspaces.list))
-    for (const [name, View] of [[row, ArchiveRowAction], [menu, ArchiveMenuAction]]) {
-      scope.slots.inject(name, () => scope.slots.register({
-        name, id: 'codex-view-archive', order: 50, locale,
-        inject: () => ({ open: id => scope.uiWorkspace.openSession(id) }),
-      }, View))
-    }
+    const open = id => scope.uiWorkspace.openSession(id)
+    scope.slots.inject(row, () => scope.slots.register({
+      name: row, id: 'codex-archived-row-navigation', locale,
+      inject: () => ({ open }),
+    }, ArchivedRowNavigation))
   })
   ctx.slots.inject(menu, () => ctx.slots.register({
     name: menu, id: 'codex-delete-session', order: 500, locale,
