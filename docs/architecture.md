@@ -24,7 +24,7 @@ DSH 的会话搜索调用 Codex `thread/search`，在内存清单补上此前未
 
 会话详情按需读取 `thread/read` 与 `thread/goal/get`。目标事件更新已打开的详情，当前模型配置不回填到历史轮次。已加载的会话同时通过 `thread/backgroundTerminals/list` 读取原生后台终端。
 
-DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。
+DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近输入 token 与模型窗口容量，并在只读会话详情中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。
 
 浏览器通过 DSH 的同源 API 访问 Host，继续使用 DSH 默认的访问令牌和 Cookie。独立 Profile 使用项目本地目录，与日常 DSH 服务并行运行。项目和聊天历史由 Codex 持有。首次运行时 Host 先读取 Codex 的状态库清单，再在后台补齐尚未收进清单的旧会话。列表缓存保存在项目的运行目录，包含原生 ID、路径、标题、时间和 Codex 列表提供的预览。重启时可以先展示清单，再从原来的 Codex 端点刷新。完整消息和工具记录在打开会话时按需读取。
 

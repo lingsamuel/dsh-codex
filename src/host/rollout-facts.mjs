@@ -5,7 +5,7 @@ import { StringDecoder } from 'node:string_decoder'
 const statuses = new Set(['pending', 'in_progress', 'completed'])
 
 function normalizePlan(value) {
-  if (!Array.isArray(value?.plan) || !value.plan.every(step => typeof step.step === 'string' && statuses.has(step.status))) return
+  if (!Array.isArray(value?.plan) || !value.plan.every(step => typeof step?.step === 'string' && statuses.has(step.status))) return
   return value.plan.map(({ step, status }) => ({ content: step, status }))
 }
 
@@ -27,7 +27,7 @@ export function createRolloutFacts(path, signal) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
@@ -41,6 +41,13 @@ export function createRolloutFacts(path, signal) {
       } else if (value?.type === 'plan_update') {
         const plan = normalizePlan(value)
         if (plan) currentTurn().todos = plan
+      } else if (value?.type === 'token_count') {
+        const pressureTokens = value.info?.last_token_usage?.input_tokens
+        const contextWindow = value.info?.model_context_window
+        if (Number.isSafeInteger(pressureTokens) && pressureTokens >= 0 && Number.isSafeInteger(contextWindow) && contextWindow > 0) {
+          // DSH 的原生表按最近一次输入统计，累计用量不是上下文大小。
+          currentTurn().contextPressure = { pressureTokens, contextWindow }
+        }
       }
       return
     }
@@ -79,7 +86,10 @@ export function createRolloutFacts(path, signal) {
           for (const text of lines) consume(text)
         }
       }
-      const facts = { todos: turns.findLast(turn => turn.todos !== undefined)?.todos }
+      const facts = {
+        todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
+        contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
+      }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null
       previous = serialized

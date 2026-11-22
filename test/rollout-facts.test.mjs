@@ -29,3 +29,21 @@ test('只投影已确认的结构化计划，跟随追加并回放 Codex 回退'
   await appendFile(path, event('thread_rolled_back', { num_turns: 1 }))
   assert.deepEqual(await reader.read(), first)
 })
+
+test('上下文表采用原生单次请求输入和窗口容量', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'context-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const frame = info => JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info } }) + '\n'
+  await writeFile(path, frame({
+    last_token_usage: { input_tokens: 3000, total_tokens: 3500 },
+    total_token_usage: { input_tokens: 90000 }, model_context_window: 10000,
+  }))
+  const reader = createRolloutFacts(path, new AbortController().signal)
+  assert.deepEqual((await reader.read()).contextPressure, { pressureTokens: 3000, contextWindow: 10000 })
+  await appendFile(path, frame(null))
+  assert.equal(await reader.read(), null)
+  await appendFile(path, frame({ last_token_usage: { input_tokens: 5000 }, model_context_window: 20000 }))
+  assert.deepEqual((await reader.read()).contextPressure, { pressureTokens: 5000, contextWindow: 20000 })
+})

@@ -1,4 +1,4 @@
-import { Button, IconInfoOutlineRegular, Modal, PathLabel } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconInfoOutlineRegular, Modal, PathLabel, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage } from '../api.js'
 
@@ -7,10 +7,10 @@ const locale = 'codex.session.info'
 const copy = {
   zh: { title: 'Codex 会话详情', close: '关闭', loading: '正在读取…', model: '模型', effort: '推理强度', goal: '目标',
     used: '已使用 token', budget: 'token 预算', empty: '此会话没有可显示的详情。', active: '进行中', paused: '暂停',
-    blocked: '受阻', usageLimited: '达到用量限制', budgetLimited: '达到预算', complete: '已完成', terminals: '后台终端' },
+    blocked: '受阻', usageLimited: '达到用量限制', budgetLimited: '达到预算', complete: '已完成', terminals: '后台终端', context: '上下文占用' },
   en: { title: 'Codex session details', close: 'Close', loading: 'Loading…', model: 'Model', effort: 'Reasoning effort', goal: 'Goal',
     used: 'Tokens used', budget: 'Token budget', empty: 'No details are available for this session.', active: 'Active', paused: 'Paused',
-    blocked: 'Blocked', usageLimited: 'Usage limited', budgetLimited: 'Budget limited', complete: 'Complete', terminals: 'Background terminals' },
+    blocked: 'Blocked', usageLimited: 'Usage limited', budgetLimited: 'Budget limited', complete: 'Complete', terminals: 'Background terminals', context: 'Context usage' },
 }
 
 function Goal({ goal, t }) {
@@ -25,12 +25,13 @@ function Goal({ goal, t }) {
   </section>
 }
 
-function SessionInfo({ sessionId, useSession, t }) {
+function SessionInfo({ sessionId, useSession, useProjection, t }) {
   const [open, setOpen] = useState(false)
   const [info, setInfo] = useState(null)
   const [error, setError] = useState('')
   const liveGoal = useSession(state => state.goal)
   const goalRevision = useSession(state => state.goalRevision)
+  const usage = useProjection('contextPressure')
   const revisionAtOpen = useRef(0)
   useEffect(() => {
     if (!open) return
@@ -55,9 +56,13 @@ function SessionInfo({ sessionId, useSession, t }) {
     <Modal open={open} title={t('title')} closeLabel={t('close')} onClose={() => setOpen(false)}>
       {error && <p role="alert">{error}</p>}
       {!info && !error && <p role="status">{t('loading')}</p>}
-      {(info?.model || info?.reasoningEffort) && <dl>
-        {info.model && <><dt>{t('model')}</dt><dd>{info.model}</dd></>}
-        {info.reasoningEffort && <><dt>{t('effort')}</dt><dd>{info.reasoningEffort}</dd></>}
+      {(info?.model || info?.reasoningEffort || usage) && <dl>
+        {info?.model && <><dt>{t('model')}</dt><dd>{info.model}</dd></>}
+        {info?.reasoningEffort && <><dt>{t('effort')}</dt><dd>{info.reasoningEffort}</dd></>}
+        {usage && <><dt>{t('context')}</dt><dd>
+          <Pill>{Math.min(100, Math.round(usage.pressureTokens / usage.contextWindow * 100))}%</Pill>
+          {' '}{usage.pressureTokens.toLocaleString()} / {usage.contextWindow.toLocaleString()} tokens
+        </dd></>}
       </dl>}
       {goal && <Goal goal={goal} t={t} />}
       {info?.terminals?.length > 0 && <section>
@@ -66,7 +71,7 @@ function SessionInfo({ sessionId, useSession, t }) {
           <code>{terminal.command}</code>{terminal.cwd && <PathLabel path={terminal.cwd} />}
         </li>)}</ul>
       </section>}
-      {info && !info.model && !info.reasoningEffort && !goal && !info.terminals?.length && <p>{t('empty')}</p>}
+      {info && !info.model && !info.reasoningEffort && !usage && !goal && !info.terminals?.length && <p>{t('empty')}</p>}
     </Modal>
   </>
 }

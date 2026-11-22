@@ -50,7 +50,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   const attachments = new Map()
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
-  const projections = new Map([['turnOutline', outline], ['todos', todos]])
+  const contextPressure = createSnapshotStore(undefined)
+  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -237,6 +238,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       if (frame.type === 'unread') return catalog?.applyUnread(frame)
       if (frame.type === 'rollout-facts') {
         todos.set(frame.todos)
+        contextPressure.set(frame.contextPressure)
         return
       }
       if (frame.type === 'change') {
