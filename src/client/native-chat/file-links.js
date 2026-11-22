@@ -1,3 +1,4 @@
+import { isAbsoluteWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import { parse, postprocess, preprocess } from 'micromark'
 
 const destinationTypes = new Set(['resourceDestinationString', 'definitionDestinationString'])
@@ -8,7 +9,9 @@ const scheme = /^[a-z][a-z\d+.-]*:/i
 const opaqueLink = /^(?:about|blob|data|javascript|mailto|sms|tel|xmpp):/i
 
 function fileDestination(destination) {
-  let path = destination
+  // Codex 历史里的前导零宽空格会让绝对路径被误判为相对路径。
+  const unmarked = destination.replace(/^\u200b+/, '')
+  let path = !unmarked.startsWith('//') && isAbsoluteWorkspacePath(unmarked) ? unmarked : destination
   if (/^file:\//i.test(path)) {
     try {
       const url = new URL(path)
@@ -53,7 +56,7 @@ export function scopeTurnFile(path, cwd, markdown = false) {
 
 /** 只改 Markdown 解析器识别出的目标位置，让 DSH 自己渲染、打开文件和定位行号。 */
 export function projectFileLinks(markdown, cwd) {
-  if (!cwd && !/(?:file:\/|sandbox:\/|:\d|#\d|#L\d+C)/i.test(markdown)) return markdown
+  if (!cwd && !/(?:file:\/|sandbox:\/|:\d|#\d|#L\d+C|\u200b)/i.test(markdown)) return markdown
   const events = postprocess(parse().document().write(preprocess()(markdown, undefined, true)))
   const pieces = []
   let offset = 0

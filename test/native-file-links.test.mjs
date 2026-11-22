@@ -33,3 +33,11 @@ test('原生轮次目录固定相对文件引用，同时保留跳转、外部�
   const markdown = '[文件](src/name%20one.ts:3) [文档](README.md) [跳转](#detail) [外部](https://example.test/file) [绝对](/already/absolute.txt)'
   assert.equal(projectFileLinks(markdown, '/main checkout'), '[文件](/main%20checkout/src/name%20one.ts#L3) [文档](/main%20checkout/README.md) [跳转](#detail) [外部](https://example.test/file) [绝对](/already/absolute.txt)')
 })
+
+test('历史 Markdown 兼容本地绝对路径前的零宽空格', () => {
+  const source = '[截图](\u200b/home/user/desktop.png) ![预览][image] [源码](\u200bC:/repo/a.ts:42)\n\n[image]: \u200b/home/user/narrow\u200b.png'
+  const expected = '[截图](/home/user/desktop.png) ![预览][image] [源码](C:/repo/a.ts#L42)\n\n[image]: /home/user/narrow\u200b.png'
+  assert.equal(projectFileLinks(source, '/other checkout'), expected)
+  assert.equal(projectFileLinks('[截图](\u200b/home/user/desktop.png)'), '[截图](/home/user/desktop.png)')
+  assert.equal(projectFileLinks('[相对路径](\u200bname.png)', '/repo'), '[相对路径](/repo/\u200bname.png)')
+})
