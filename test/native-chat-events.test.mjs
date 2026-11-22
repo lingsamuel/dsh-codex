@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { build } from 'esbuild'
+import { codexSubagentActivity } from '../src/client/native-chat/subagent-activity.js'
 import { codexTurnChanges } from '../src/client/native-chat/turn-changes.js'
 import { visualizeFence } from '../src/client/native-chat/visualize.js'
 
@@ -222,6 +225,37 @@ test('Codex 协作等待进入 DSH 原生等待工具行，保留目标、结果
   assert.equal(failure.isError, true)
   assert.equal(JSON.parse(failure.content[0].text).timedOut, false)
   assert.equal(mcp.content[0].text, 'done')
+})
+
+test('只有子智能体活动的工作过程也能使用 DSH 原生轮次折叠', async () => {
+  const projector = '@deepseek-ai/dsh-client-ui-chat/src/client/conversation-nodes/turn-process-presentation.ts'
+  const { outputFiles: [bundle] } = await build({
+    entryPoints: [fileURLToPath(import.meta.resolve(projector))],
+    bundle: true, write: false, format: 'esm', platform: 'node',
+  })
+  const { ChatTurnProcessProjector } = await import(`data:text/javascript;base64,${Buffer.from(bundle.contents).toString('base64')}`)
+  const entries = projectCodexTurns([turn('delegation', [
+    { id: 'started', type: 'subAgentActivity', kind: 'started', agentPath: '/root/review', agentThreadId: 'child' },
+    { id: 'completed', type: 'subAgentActivity', kind: 'completed', agentPath: '/root/review', agentThreadId: 'child' },
+    { id: 'answer', type: 'agentMessage', phase: 'final_answer', text: '检查结束。' },
+  ])])
+  const [start] = types(entries, 'turn/start')
+  const [answer] = types(entries, 'assistant/message')
+  const location = { kind: 'turn', turn: { turn: start.data.turn, status: 'closed', start } }
+  const control = { key: 'control', kind: 'turn-process', location, data: {
+    controlAnchorSeq: answer.seq, processStartSeq: start.seq, answerAnchorSeq: answer.seq, answerStep: answer.data.step,
+  } }
+  const activities = entries.flatMap(({ event }) => {
+    const match = codexSubagentActivity.match(event)
+    return match ? [codexSubagentActivity.buildViewNode({ ...match, key: match.id, start: { event, location }, state: event.data })] : []
+  })
+  const nodes = new Map([control, ...activities].map(node => [node.key, node]))
+  const keys = [...nodes.keys()]
+  const presentation = new ChatTurnProcessProjector()
+  presentation.replace(keys, { getTurn: () => keys }, nodes)
+
+  assert.equal(presentation.get(control).hasNonReplyProcess, true)
+  assert.equal(presentation.get(control).hasExternalProcess, true)
 })
 
 test('older pages prepend without changing previously published sequence or turn identities', () => {

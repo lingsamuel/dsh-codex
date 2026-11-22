@@ -3,7 +3,7 @@ export const subagentActivityKinds = ['started', 'completed', 'interrupted']
 
 const kind = 'codex-subagent-activity'
 
-/** 活动保持在原生条目的位置，并在轮次的过程折叠时继续可见。 */
+/** 活动保持在原生条目的位置，随 DSH 工作过程收起和展开。 */
 export const codexSubagentActivity = {
   kind,
   target: 'chat',
@@ -20,7 +20,7 @@ export const codexSubagentActivity = {
     if (!start) return null
     return {
       key, id, kind, target: 'chat', anchorSeq: start.event.seq, location: start.location,
-      visibility: 'visible', groupTree: 'turn', data: state,
+      visibility: 'visible', groupTree: 'process', data: state,
     }
   },
 }
