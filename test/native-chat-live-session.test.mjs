@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
+import { projectCodexTurns } from '../src/client/native-chat/events.js'
 
 const storeModule = `data:text/javascript,${encodeURIComponent(`
   export function createSnapshotStore(initial) {
@@ -733,6 +734,84 @@ test('stock window appends native tail changes, prepends older history, and keep
   assert.equal(history.session.getSnapshot().live.lastTurnStatus, 'completed')
   dispose()
   assert.equal(source.closed, true)
+})
+
+test('长轮次逐条接收工具结果时只转换新增条目', async t => {
+  const source = mockTransport(t)
+  const stringify = JSON.stringify
+  let projected = 0
+  let compared = 0
+  t.mock.method(JSON, 'stringify', (value, ...args) => {
+    if (value?.auditToolOrdinal !== undefined) projected++
+    if (value?.type === 'event') compared++
+    return stringify(value, ...args)
+  })
+
+  const measurements = []
+  for (const count of [100, 200, 400]) {
+    const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+    const emit = frame => source().onmessage({ data: stringify(frame) })
+    const head = turn('head', 'inProgress', [ask])
+    const older = turn('older', 'completed', [{ ...answer, id: 'earlier-answer' }])
+    await emit({ type: 'snapshot', page: { data: [head, older], nextCursor: null }, mode: 'live' })
+    const initial = events.getSnapshot()
+    projected = 0
+    compared = 0
+    for (let index = 0; index < count; index++) {
+      await emit({ type: 'change', turn: { id: head.id }, items: [{
+        type: 'dynamicToolCall', id: `tool-${index}`, status: 'completed', tool: 'test-tool',
+        arguments: { auditToolOrdinal: index }, output: `output-${index}`,
+      }] })
+    }
+    const current = events.getSnapshot()
+    assert.equal(current.change.kind, 'append')
+    assert.deepEqual(current.change.entries.map(entry => entry.event.type), ['tool/call', 'tool/result'])
+    assert.equal(initial.entries.at(-1).event.type, 'user/message')
+    assert.equal(current.entries.length, initial.entries.length + count * 2)
+    assert.strictEqual(current.entries[0], initial.entries[0])
+    assert.equal(current.entries.at(-1).event.data.message.content[0].text, `output-${count - 1}`)
+    measurements.push({ count, projected, compared })
+  }
+  t.diagnostic(JSON.stringify(measurements))
+  for (const { count, projected, compared } of measurements) {
+    assert.equal(projected, count, '工具参数只在首次转换该条目时序列化')
+    assert.equal(compared, 0, '纯追加不需要序列化历史事件来比较内容')
+  }
+})
+
+test('增量改写时间、目标提示和压缩完成后的事件与整轮回放一致', async t => {
+  const source = mockTransport(t)
+  const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const id = 'active-turn'
+  const compaction = { id: 'compaction', type: 'contextCompaction' }
+  const command = { id: 'cmd', type: 'commandExecution', command: 'pwd', status: 'inProgress', startedAtMs: 120_000 }
+  const goalInputs = { [id]: { objective: '构建报告', time: 99_999 } }
+  const goal = { ...ask, id: 'goal-message', content: [{ type: 'text', text: '/goal 构建报告' }] }
+  const change = (items, metadata) => emit({ type: 'change', turn: { id, ...metadata }, items })
+  await emit({ type: 'snapshot', mode: 'live', page: { data: [{ id, status: 'inProgress', items: [ask] }] } })
+  const first = events.getSnapshot().entries[0].event
+  function assertReplay(items, metadata) {
+    const expected = projectCodexTurns([{ id, status: 'inProgress', items, ...metadata }], {
+      firstSeq: first.seq, beforeTurn: first.data.turn + 1, goalInputs,
+    })
+    assert.deepEqual(events.getSnapshot().entries, expected)
+  }
+  await emit({ type: 'rollout-facts', goalInputs })
+  await change([compaction, command])
+  assertReplay([ask, compaction, command])
+
+  const completed = { ...command, status: 'completed', completedAtMs: 121_000, exitCode: 0, aggregatedOutput: '/work' }
+  await change([completed, goal, answer])
+  assertReplay([ask, compaction, completed, goal, answer])
+  const corrected = { ...answer, text: '修订后的回复' }
+  await change([corrected])
+  assertReplay([ask, compaction, completed, goal, corrected])
+
+  const end = { status: 'completed', completedAt: 130 }
+  await change([], end)
+  assertReplay([ask, compaction, completed, goal, corrected], end)
+  assert.equal(events.getSnapshot().change.kind, 'replace')
 })
 
 test('实时活动与历史回放共享子智能体状态，重复条目保留原顺序和事件身份', async t => {

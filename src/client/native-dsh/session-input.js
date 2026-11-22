@@ -55,22 +55,24 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     submission.onRetire?.(settlement)
   }
 
-  function observedSettlement(requestId) {
-    const echo = events.getSnapshot().entries.find(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
+  function observedSettlement(requestId, entries = events.getSnapshot().entries) {
+    const echo = entries.find(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
     if (echo) return { reason: 'observed', attachments: echo.event.data.content.flatMap(part => part.type === 'image' ? [part.attachment] : []) }
     if (queueStore.getSnapshot().some(item => item.clientUserMessageId === requestId)) return observedSubmission
   }
 
-  function observeSubmissions() {
+  function observeSubmissions(entries) {
     for (const requestId of submissions.keys()) {
-      const settlement = observedSettlement(requestId)
+      const settlement = observedSettlement(requestId, entries)
       if (settlement) retire(requestId, settlement)
     }
   }
 
   ctx.effect(() => {
-    const stopEvents = events.subscribe(observeSubmissions)
-    const stopQueue = queueStore.subscribe(observeSubmissions)
+    const stopEvents = events.subscribe(() => {
+      if (submissions.size) observeSubmissions(events.getSnapshot().change.entries)
+    })
+    const stopQueue = queueStore.subscribe(() => observeSubmissions([]))
     const stopGoal = goalDraft?.subscribe(() => {
       if (!goalDraft.getSnapshot() && session.getSnapshot().goalError) {
         updateState(state => { state.goalError = null })

@@ -13,13 +13,13 @@ function itemIsOlder(previous, item) {
     || (isSettled(previous.status) && item.status === 'inProgress')
 }
 
-/** 按原生 ID 增量合并已记录的轮次和条目，返回发生变化的轮次。 */
+/** 按原生 ID 合并会话持有的轮次。条目数组随更新复用，变更结果保留被替换的条目及其最早位置。 */
 export function createLiveTranscript() {
   const byId = new Map()
 
   function reconcile(turn, updates = turn.items ?? []) {
     const record = byId.get(turn.id)
-    const { items: previousItems = [], ...previous } = record?.turn ?? {}
+    const { items = [], ...previous } = record?.turn ?? {}
     const { items: _snapshotItems, ...metadata } = turn
     const next = { status: 'inProgress', ...previous, ...metadata }
     if (isSettled(previous.status) && next.status === 'inProgress') next.status = previous.status
@@ -28,26 +28,23 @@ export function createLiveTranscript() {
     }
 
     const ids = record?.ids ?? new Map()
-    let items = previousItems
+    const changes = new Map()
+    let firstChanged = Infinity
     for (const update of updates) {
       const item = nativeItem(update)
-      const index = ids.get(item.id)
-      if (index !== undefined) {
-        const current = items[index]
-        if (itemIsOlder(current, item) || JSON.stringify(current) === JSON.stringify(item)) continue
-        if (items === previousItems) items = previousItems.slice()
-        items[index] = item
-      } else {
-        if (items === previousItems) items = previousItems.slice()
-        ids.set(item.id, items.length)
-        items.push(item)
-      }
+      const index = ids.get(item.id) ?? items.length
+      const current = items[index]
+      if (current && (itemIsOlder(current, item) || JSON.stringify(current) === JSON.stringify(item))) continue
+      if (!changes.has(index)) changes.set(index, current)
+      firstChanged = Math.min(firstChanged, index)
+      ids.set(item.id, index)
+      items[index] = item
     }
-    if (record && items === previousItems && JSON.stringify(next) === JSON.stringify(previous)) return
+    if (record && !changes.size && JSON.stringify(next) === JSON.stringify(previous)) return
 
-    const snapshot = { ...next, items }
-    byId.set(turn.id, { turn: snapshot, ids })
-    return snapshot
+    const merged = { ...next, items }
+    byId.set(turn.id, { turn: merged, ids })
+    return { turn: merged, firstChanged, changes: [...changes].map(([index, previous]) => ({ item: items[index], previous })) }
   }
 
   return { reconcile, getTurn: id => byId.get(id)?.turn, forgetTurn: id => byId.delete(id) }
