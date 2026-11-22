@@ -44,9 +44,16 @@ function assistantBlock(item) {
   const nativeText = item.review ?? item.text
   const body = item.type === 'agentMessage' && nativeText ? projectVisualizeReferences(nativeText) : nativeText
   const text = body?.trim() ? projectFileLinks(body) : undefined
-  const questions = item.type === 'agentMessage' && item.questions?.length ? questionMarkdown(item.questions) : undefined
-  if (!questions) return text && textBlock(text)
-  return textBlock(text ? `${text}\n\n${questions}` : questions)
+  const questions = item.type === 'agentMessage' ? item.questions : undefined
+  if (!questions?.length) return text && textBlock(text)
+
+  // Codex 异步提问会把同一份题面和选项预先写入正文；独立正文和只含结构化题目的旧记录仍需补齐题面。
+  const nativeQuestionText = questions.map(({ title, options }) =>
+    [title, ...(options ?? []).map(option => `- ${option}`)].join('\n')).join('\n\n')
+  if (text && nativeText.trim() === nativeQuestionText.trim()) return textBlock(text)
+
+  const markdown = questionMarkdown(questions)
+  return textBlock(text ? `${text}\n\n${markdown}` : markdown)
 }
 
 function turnEndReason({ status, error }) {

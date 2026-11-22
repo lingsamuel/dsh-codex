@@ -437,13 +437,17 @@ test('异步问答随当前轮次的原生条目弹出，即使没有等待状�
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
   const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
   const status = { type: 'active', activeFlags: [] }
-  const asyncItem = { id: 'ask-options', type: 'agentMessage', phase: 'final_answer', text: '',
+  const asyncItem = { id: 'ask-options', type: 'agentMessage', phase: 'final_answer', delivery: 'async',
+    text: 'Choose an environment\n- Staging\n- Production\n\nAny notes?',
     questions: [{ title: 'Choose an environment', options: ['Staging', 'Production'] }, { title: 'Any notes?', options: null }],
   }
   const displayed = () => history.session.projections.faceOf('codexQuestions').getSnapshot()
   await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'live', status })
   assert.deepEqual(displayed(), [])
   await emit({ type: 'change', turn: { id: 'current', status: 'inProgress' }, items: [asyncItem] })
+  const transcript = history.events.getSnapshot().entries.map(({ event }) => event)
+    .filter(event => event.type === 'assistant/message')
+  assert.deepEqual(transcript.map(({ data }) => data.message.content), [[{ type: 'text', text: asyncItem.text }]])
   const [request] = displayed()
   assert.equal(request?.kind, 'async')
   assert.equal(request.turnId, 'current')
