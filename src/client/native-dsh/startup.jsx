@@ -1,19 +1,40 @@
 import { useSyncExternalStore } from 'react'
 import { adaptSlot } from './slot-adapter.js'
 
-/** 延续 DSH 渲染器交接时的启动画面，首次会话就绪后交给原生布局。 */
+const locale = 'codex.startup'
+const copy = {
+  zh: { loading: '正在载入会话…' },
+  en: { loading: 'Loading session…' },
+}
+
+/** 插件启动结束后，沿用 DSH 样式显示首次会话的载入状态。 */
 export function installStartupPage(ctx, startupReady) {
   const boot = document.querySelector('#root > [data-dsh-boot]')
-  if (!boot) return
+  const card = boot?.firstElementChild?.cloneNode(true)
+  const spinner = card?.querySelector('[data-dsh-boot-spinner]')
+  const hint = spinner?.nextElementSibling
+  if (!hint) return
+
+  // 会话读取没有进度百分比，转圈沿用 DSH 的默认弧长。
+  spinner.style.removeProperty('--dsh-boot-arc')
+  ctx.effect(() => ctx.locale.register(locale, copy))
+  const t = ctx.locale.bind(locale)
+  const subscribe = listener => ctx.locale.subscribe(listener)
+
+  function SessionLoadingPage() {
+    const label = useSyncExternalStore(subscribe, () => t('loading'))
+    return <div className={boot.className} role="status" ref={element => {
+      if (!element) return
+      hint.textContent = label
+      if (card.parentElement !== element) element.append(card)
+    }} />
+  }
 
   ctx.inject(['uiWorkspace', 'layout'], scope => adaptSlot(scope, 'root', entry => Boolean(entry.children?.main), (inject, Layout) => ({
     inject,
     component: function StartupLayout(props) {
       const ready = useSyncExternalStore(startupReady.subscribe, startupReady.getSnapshot)
-      // DSH 交接时也从同一启动节点读取内容。保留它的字标、转圈样式和主题。
-      if (!ready) return <div className={boot.className} data-dsh-boot="" role="status"
-        dangerouslySetInnerHTML={{ __html: boot.innerHTML }} />
-      return <Layout {...props} />
+      return ready ? <Layout {...props} /> : <SessionLoadingPage />
     },
   })))
 }
