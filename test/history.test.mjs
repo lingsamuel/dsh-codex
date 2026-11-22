@@ -1513,6 +1513,46 @@ test('侧栏独立接收会话与项目增量，无需打开任何会话', { tim
   await reader.cancel()
 })
 
+test('原生卸载只移除已读不到的空白草稿，保留仍可读取的历史', { timeout: 5000 }, async t => {
+  const draft = { id: 'unloaded-draft', source: 'vscode', historyMode: 'paginated', status: { type: 'idle' }, preview: '' }
+  const saved = { id: 'unloaded-saved', historyMode: 'paginated', status: { type: 'notLoaded' }, preview: '已写入的消息' }
+  let draftLoaded = true
+  const fixture = await fakeCodex(t, {
+    'config/read': () => ({ result: { config: {} } }),
+    'project/list': () => ({ result: { data: [] } }),
+    'thread/list': () => ({ result: { data: [saved] } }),
+    'thread/loaded/list': () => ({ result: { data: draftLoaded ? [draft.id] : [] } }),
+    'thread/read': ({ threadId }) => {
+      if (threadId === saved.id) return { result: { thread: saved } }
+      if (draftLoaded) return { result: { thread: draft } }
+      return { error: { code: -32600, message: `thread not loaded: ${threadId}` } }
+    },
+  })
+  const response = await fixture.get('/api/codex/watch?scope=catalog')
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  try {
+    assert.deepEqual(await read(), { type: 'catalog-ready' })
+    const snapshot = await (await fixture.get('/api/codex/catalog?complete=1&fresh=1')).json()
+    assert.deepEqual(snapshot.threads.find(thread => thread.id === draft.id), { ...draft, blank: true })
+
+    draftLoaded = false
+    const unloading = threadId => ({
+      method: 'thread/status/changed', params: { threadId, status: { type: 'notLoaded' } },
+    })
+    fixture.broadcast(unloading(draft.id))
+    fixture.broadcast({ method: 'thread/closed', params: { threadId: draft.id } })
+    assert.deepEqual(await read(), { type: 'thread', id: draft.id, thread: null })
+
+    const notification = unloading(saved.id)
+    fixture.broadcast(notification)
+    assert.deepEqual(await read(), { type: 'notification', notification, thread: saved, workspacePaths: {} })
+    assert.equal(fixture.messages.some(({ method }) => method === 'thread/resume'), false)
+  } finally {
+    await reader.cancel()
+  }
+})
+
 test('首轮结束后通过原生会话摘要更新侧栏预览', { timeout: 5000 }, async t => {
   const status = { type: 'idle' }
   const thread = { id: 'new', name: null, preview: '原生首条消息', status }
