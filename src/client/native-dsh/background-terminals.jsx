@@ -15,6 +15,7 @@ const labels = {
 }
 
 const visuallyHidden = { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)' }
+const runningIndicatorColor = 'var(--dsw-alias-state-business-primary)'
 
 function RunningCount({ sessionId, useBackgroundTerminals, t }) {
   const count = useBackgroundTerminals(state => state.get(sessionId)?.length ?? 0)
@@ -23,17 +24,17 @@ function RunningCount({ sessionId, useBackgroundTerminals, t }) {
   </span>
 }
 
-function SidebarTerminalIcon({ sessionId, useBackgroundTerminals, t }) {
+function SidebarIndicator({ sessionId, useBackgroundTerminals, t }) {
   const count = useBackgroundTerminals(state => state.get(sessionId)?.length ?? 0)
-  return count > 0 && <span style={{ display: 'inline-flex' }}>
-    <IconCodeOutlineRegular size={14} aria-hidden />
+  return count > 0 && <span style={{ display: 'inline-flex', width: 14, justifyContent: 'center' }}>
+    <span aria-hidden style={{ width: 6, height: 6, borderRadius: '50%', background: runningIndicatorColor }} />
     <span style={visuallyHidden}>{t('running', { count })}</span>
   </span>
 }
 
 function PanelIndicator({ sessionId, panelShown, useBackgroundTerminals, t }) {
   const count = useBackgroundTerminals(state => state.get(sessionId)?.length ?? 0)
-  return !panelShown && count > 0 && <span style={{ background: 'var(--dsw-alias-state-business-primary)' }}>
+  return !panelShown && count > 0 && <span style={{ background: runningIndicatorColor }}>
     <span style={visuallyHidden}>{t('running', { count })}</span>
   </span>
 }
@@ -91,7 +92,7 @@ export function installBackgroundTerminals(ctx, backgroundTerminals) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   const t = ctx.locale.bind(locale)
   const slots = [
-    ['sidebar.session.row.trailing', SidebarTerminalIcon],
+    ['sidebar.session.row.trailing', SidebarIndicator],
     ['sidebar.session.row.hover', RunningCount],
     ['conversation.session.panel.indicator', PanelIndicator, { order: 20 }],
     ['conversation.session.panel.section', BackgroundTerminalSection, { order: 300, label: () => t('title') }],
