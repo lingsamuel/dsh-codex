@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { basename, isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, withCodexReader } from './app-server.mjs'
@@ -345,6 +345,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       const fields = await request.json().catch(() => null)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId } = fields ?? {}
+      let worktreeRecovery
       try {
         if (action === 'project') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
@@ -379,7 +380,16 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           if (mode === 'steer' && expectedTurnId !== undefined) required(expectedTurnId, '当前轮次 ID 无效。')
           return json(await submit(threadId, async () => {
             const start = worktree && await worktreeStart(threadId, worktree, signal)
-            if (start?.accepted) return start.accepted
+            if (start) {
+              worktreeRecovery = start.accepted ? { ...start.native, thread: start.accepted.thread } : start.native
+              const digest = createHash('sha256').update(JSON.stringify(parts)).digest('hex')
+              // 提交 ID 绑定上一次可能已送达的正文与附件。原生明确拒绝时仍可编辑后重试。
+              if ((start.accepted || start.uncertain) && start.inputDigest !== digest) {
+                throw worktreeConflict('worktree-input-changed', '草稿已编辑。请打开目标会话检查原消息，再在其中发送修改后的内容。')
+              }
+              if (start.accepted) return start.accepted
+              start.inputDigest = digest
+            }
             const destination = start?.native.thread.id ?? threadId
             const params = { threadId: destination, input: parts, clientUserMessageId }
             const run = () => withCodexReader(socketPath, signal, async rpc => {
@@ -428,9 +438,11 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason
-          return json({ error: error.message, ...(reason && { reason }) }, reason ? 409
+          const recovery = reason === 'worktree-delivery-unconfirmed' || reason === 'worktree-input-changed'
+          return json({ error: error.message, ...(reason && { reason }), ...(recovery && { worktreeRecovery }) }, reason ? 409
             : error.code === -32600 || error.code === -32602 ? 400 : 502)
         }
+        if (worktreeRecovery) return json({ error: '无法确认工作树消息的投递结果。可重试原消息或打开目标会话检查。', worktreeRecovery }, 503)
         return json({ error: '无法连接 Codex App Server。' }, 503)
       }
     },

@@ -118,6 +118,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     },
     async prompt(content, mode, signal, requestId = crypto.randomUUID()) {
       const submission = submissions.get(requestId)
+      const worktree = submission?.worktree
+      const { kind, id, path, baseRef } = worktree ?? {}
       const expectedTurnId = submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
       const selection = submission ? submission.model : modelDraft.getSnapshot()
       const profileId = submission ? submission.permission : permissionDraft?.getSnapshot()
@@ -135,11 +137,12 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           throw new Error('当前仅支持发送文本和图片。')
         })
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
-          expectedTurnId, modelDraft: selection, permissionDraft: profileId, worktree: submission?.worktree,
+          expectedTurnId, modelDraft: selection, permissionDraft: profileId,
+          ...(worktree && { worktree: { kind, id, path, baseRef } }),
           ...(unarchive && { unarchive: true }) }, signal)
-        if (submission?.worktree && result.thread) {
+        if (worktree && result.thread) {
           // 原生目标是新会话。先让 DSH 清除已送达的原草稿，再切换显示会话。
-          worktreeDraft.clear(submission.worktree)
+          worktreeDraft.clear(worktree)
           retire(requestId, observedSubmission)
           openWorktree(result)
         } else acceptSubmittedSettings(selection, profileId, before, result)
@@ -154,6 +157,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           return accepted
         }
         retire(requestId, failedSubmission)
+        if (worktree && error.worktreeRecovery && worktreeDraft.getSnapshot() === worktree) {
+          worktreeDraft.set({ ...worktree, recovery: error.worktreeRecovery })
+        }
         return operationFailure('send', error)
       }
     },

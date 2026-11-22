@@ -5,7 +5,7 @@ import { readPage, writeWorktreeAction } from '../api.js'
 const locale = 'codex.worktrees'
 const labels = {
   zh: {
-    title: '工作目录', local: '本地目录', worktree: '工作树', new: '新建工作树', existing: '已有工作树',
+    title: '工作目录', local: '本地目录', worktree: '工作树', new: '新建工作树', existing: '已有工作树', recover: '打开目标会话',
     loading: '正在读取 Git 工作树…', noRepository: '此目录没有 Git 工作树。',
     base: '基准分支', target: '工作树目录', begin: '发送首条消息时启动所选工作树会话。',
     switch: '切换工作目录', select: '使用此目录', cancel: '取消',
@@ -13,7 +13,7 @@ const labels = {
     background: '请先结束后台进程，再切换工作目录。',
   },
   en: {
-    title: 'Working directory', local: 'Local directory', worktree: 'Worktree', new: 'New worktree', existing: 'Existing worktree',
+    title: 'Working directory', local: 'Local directory', worktree: 'Worktree', new: 'New worktree', existing: 'Existing worktree', recover: 'Open target session',
     loading: 'Reading Git worktrees…', noRepository: 'This directory has no Git worktrees.',
     base: 'Base branch', target: 'Worktree directory', begin: 'The first message starts the session in the selected worktree.',
     switch: 'Switch working directory', select: 'Use directory', cancel: 'Cancel',
@@ -108,7 +108,7 @@ function WorktreeDialog({ thread, draft, choice, idleBlock, setDraft, publishThr
 }
 
 function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory,
-  useBackgroundTerminals, setDraft, publishThread, t }) {
+  useBackgroundTerminals, setDraft, publishThread, openWorktree, t }) {
   const [open, setOpen] = useState(false)
   const choice = useWorktreeDraft(value => value)
   const thread = useCodexHistory(snapshot => snapshot.threads.find(value => value.id === sessionId))
@@ -122,6 +122,8 @@ function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktr
   const label = draft ? choice?.kind ?? 'local' : 'switch'
   return <>
     <Button size="sm" variant="toolbar" title={thread.cwd} disabled={draft && active} onClick={() => setOpen(true)}>{t(label)}</Button>
+    {draft && choice?.recovery && <Button size="sm" variant="toolbar" disabled={active}
+      title={choice.recovery.thread.cwd} onClick={() => openWorktree(choice.recovery, false)}>{t('recover')}</Button>}
     {open && <WorktreeDialog key={thread.cwd} {...{ thread, draft, choice, setDraft, publishThread, t }}
       idleBlock={draft ? undefined : idleBlock} close={() => setOpen(false)} />}
   </>
@@ -135,8 +137,8 @@ export function installWorktrees(ctx, catalog) {
       ctx.slots.inject(name, () => ctx.slots.register({
         name, id: 'codex-worktrees', order: 30, locale,
         inject: sessionId => {
-          const { worktreeDraft } = scope.sessions.binding(sessionId).session
-          return { draft, setDraft: worktreeDraft.set, hooks: { worktreeDraft, backgroundTerminals: catalog.backgroundTerminals },
+          const { worktreeDraft, openWorktree } = scope.sessions.binding(sessionId).session
+          return { draft, openWorktree, setDraft: worktreeDraft.set, hooks: { worktreeDraft, backgroundTerminals: catalog.backgroundTerminals },
             publishThread: ({ thread, workspacePaths }) => catalog.acceptThread(thread, workspacePaths),
           }
         },
