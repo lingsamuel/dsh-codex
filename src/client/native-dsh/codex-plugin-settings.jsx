@@ -1,5 +1,6 @@
 import { Button, Input, PathLabel } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
+import { pluginRequestSource, pluginUninstallId } from '../../shared/codex-plugin-source.js'
 import { externalWebUrl } from '../../shared/external-url.js'
 import { readPage, writeCodexCapability } from '../api.js'
 
@@ -9,7 +10,7 @@ const labels = {
     title: 'Codex 插件', installed: '已安装', available: '可发现的插件', disabled: '已停用', refresh: '刷新', loading: '正在读取插件…',
     empty: 'Codex 当前未返回插件。', search: '搜索插件', noResults: '没有匹配的插件。', back: '返回插件列表',
     install: '安装', uninstall: '卸载', cancel: '取消', 'confirm.install': '使用 Codex 安装 {name}？',
-    'confirm.uninstall': '从 Codex 卸载 {name}？', unavailable: 'Codex 当前未开放安装。',
+    'confirm.uninstall': '从 Codex 卸载 {name}？', unavailable: 'Codex 当前未开放此操作。',
     apps: 'App', connected: '已连接', authorize: '打开授权页面', authUnknown: '授权状态未知', authRequired: '需要授权',
     skills: '技能', servers: 'MCP 服务', capabilities: '能力',
   },
@@ -17,7 +18,7 @@ const labels = {
     title: 'Codex Plugins', installed: 'Installed', available: 'Available plugins', disabled: 'Disabled', refresh: 'Refresh',
     loading: 'Reading plugins…', empty: 'Codex returned no plugins.', search: 'Search plugins', noResults: 'No matching plugins.',
     back: 'Back to plugins', install: 'Install', uninstall: 'Uninstall', cancel: 'Cancel', 'confirm.install': 'Install {name} with Codex?',
-    'confirm.uninstall': 'Uninstall {name} from Codex?', unavailable: 'Installation is currently unavailable in Codex.',
+    'confirm.uninstall': 'Uninstall {name} from Codex?', unavailable: 'This action is currently unavailable in Codex.',
     apps: 'Apps', connected: 'Connected', authorize: 'Open authorization page', authUnknown: 'Unknown authorization status', authRequired: 'Authorization required',
     skills: 'Skills', servers: 'MCP servers', capabilities: 'Capabilities',
   },
@@ -35,7 +36,7 @@ function entriesOf({ catalog, installed }) {
       const marketplace = market?.displayName ?? name
       for (const plugin of plugins) {
         const key = JSON.stringify([path ?? name, plugin.id])
-        const source = { pluginName: plugin.name, ...(path ? { marketplacePath: path } : { remoteMarketplaceName: name }) }
+        const source = pluginRequestSource({ path, name }, plugin)
         entries.set(key, { key, plugin, marketplace, source })
       }
     }
@@ -61,7 +62,7 @@ function PluginList({ inventory, search, changeSearch, choose, t }) {
         <strong>{t(isInstalled ? 'installed' : 'available')}</strong>
         {matches.map(({ key, plugin, marketplace, source }) => <div key={key} style={row}>
           <div style={{ display: 'grid', justifyItems: 'start', gap: 4 }}>
-            <Button variant="outline" size="sm" onClick={() => choose(source)}>{pluginName(plugin)}</Button>
+            <Button variant="outline" size="sm" disabled={!source} onClick={() => choose(source)}>{pluginName(plugin)}</Button>
             <small>{marketplace}{plugin.installed && !plugin.enabled && ` · ${t('disabled')}`}</small>
             {plugin.interface?.shortDescription && <div>{plugin.interface.shortDescription}</div>}
           </div>
@@ -107,6 +108,8 @@ function PluginDetail({ result, installResult, busy, change, rememberLink, t }) 
   const name = pluginName(summary)
   const available = summary.availability !== 'DISABLED_BY_ADMIN' && summary.installPolicy !== 'NOT_AVAILABLE'
   const action = summary.installed ? 'uninstall' : 'install'
+  const uninstallId = pluginUninstallId(summary)
+  const canChange = summary.installed ? Boolean(uninstallId) : available
   return <div style={column}>
     <header style={row}><strong>{name}</strong>
       {summary.installed && <span>{t(summary.enabled ? 'installed' : 'disabled')}</span>}
@@ -122,10 +125,11 @@ function PluginDetail({ result, installResult, busy, change, rememberLink, t }) 
       <span>{t(`confirm.${action}`, { name })}</span>
       <div style={{ display: 'flex', gap: 8 }}>
         <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(null)}>{t('cancel')}</Button>
-        <Button variant="primary" size="sm" disabled={busy} onClick={() => { setConfirm(null); void change(action, summary.id) }}>{t(action)}</Button>
+        <Button variant="primary" size="sm" disabled={busy || !canChange}
+          onClick={() => { setConfirm(null); void change(action, uninstallId) }}>{t(action)}</Button>
       </div>
     </div> : <div>
-      {summary.installed || available
+      {canChange
         ? <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(action)}>{t(action)}</Button>
         : <p>{t('unavailable')}</p>}
     </div>}
