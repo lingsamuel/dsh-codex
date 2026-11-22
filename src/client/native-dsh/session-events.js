@@ -6,6 +6,7 @@ import { readInlineCodexAttachments } from '../native-chat/attachments.js'
 import { projectCodexTurns } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
+import { subagentAddress } from './subagents.js'
 
 function pageBounds(entry) {
   return entry && { beforeSeq: entry.event.seq, beforeTurn: entry.event.data.turn }
@@ -15,12 +16,13 @@ function pageBounds(entry) {
 export function createCodexHistory(ctx, thread, catalog) {
   const controller = new AbortController()
   const { signal } = controller
+  const address = subagentAddress(thread)
   const state = createSnapshotStore({
     sessionId: thread.id,
     historyMode: thread.historyMode,
     pendingSubmissions: [],
     running: false,
-    subagent: null,
+    subagent: address ? { address } : null,
     removed: false,
     openState: 'loading',
     openError: null,

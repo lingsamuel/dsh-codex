@@ -41,6 +41,13 @@ export async function readArchivedCatalog(socketPath, signal) {
   return { threads, workspacePaths }
 }
 
+/** 只查原生父线程的直接子代理，嵌套分支由调用方按需展开。 */
+export function readChildThreads(parentThreadId, socketPath, signal) {
+  return withCodexReader(socketPath, signal, request => readThreads(request, {
+    parentThreadId, sourceKinds: ['subAgent'], useStateDbOnly: true,
+  }))
+}
+
 async function loadCatalog(socketPath, signal, complete) {
   const { projects, threads } = await withCodexReader(socketPath, signal, async request => {
     const projects = await collectPages(params => readProjectPage(request, params))

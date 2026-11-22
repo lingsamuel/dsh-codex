@@ -2,6 +2,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../shared/pages.js'
 import { readPage } from './api.js'
 import { openLiveWatch } from './live-watch.js'
+import { subagentAddress } from './native-dsh/subagents.js'
 
 function applyChanges(entries, changes) {
   const byId = new Map(entries.map(entry => [entry.id, entry]))
@@ -17,6 +18,8 @@ export function createHistoryCatalog(signal) {
   const store = createSnapshotStore({
     projects: [],
     threads: [],
+    childThreads: {},
+    childCatalogs: {},
     unreadIds: [],
     workspacePaths: {},
     selected: null,
@@ -32,6 +35,8 @@ export function createHistoryCatalog(signal) {
   const searchThreads = new Map()
   const threadChanges = new Map()
   const projectChanges = new Map()
+  const childReads = new Map()
+  const childChanges = new Map()
   const changedPaths = {}
   let followsLocalReceipts = false
 
@@ -67,6 +72,35 @@ export function createHistoryCatalog(signal) {
     }
   }
 
+  function loadChildren(parentId, force = false) {
+    if (childReads.has(parentId)) return childReads.get(parentId)
+    if (!force && store.getSnapshot().childCatalogs[parentId]?.state === 'idle') return Promise.resolve()
+    store.update(state => {
+      state.childCatalogs[parentId] = { state: 'loading', ids: state.childCatalogs[parentId]?.ids ?? [] }
+    })
+    const read = readPage('children', { threadId: parentId }, signal).then(entries => {
+      signal.throwIfAborted()
+      store.update(state => {
+        const matching = [...childChanges].filter(([id, thread]) =>
+          subagentAddress(thread)?.parentSessionId === parentId || (!thread && entries.some(child => child.id === id)))
+        const children = applyChanges(entries, matching)
+        for (const thread of children) state.childThreads[thread.id] = {
+          ...thread, status: observedStatuses.get(thread.id) ?? thread.status,
+          parentThreadId: parentId,
+        }
+        state.childCatalogs[parentId] = { state: 'idle', ids: children.map(thread => thread.id) }
+      })
+    }).catch(error => {
+      if (signal.aborted) return
+      store.update(state => {
+        state.childCatalogs[parentId].state = 'error'
+        state.childCatalogs[parentId].error = { code: 'codex/history', message: error.message }
+      })
+    }).finally(() => childReads.delete(parentId))
+    childReads.set(parentId, read)
+    return read
+  }
+
   async function refresh(fresh = false) {
     if (signal.aborted) return
     if (refreshing) {
@@ -81,6 +115,8 @@ export function createHistoryCatalog(signal) {
         searchThreads.clear()
         publish(await readPage('catalog', { complete: 1, fresh: 1 }, signal))
         await loadArchived()
+        const selected = store.getSnapshot().selected
+        if (selected) void loadChildren(selected.id, true)
         return
       }
       // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
@@ -101,6 +137,7 @@ export function createHistoryCatalog(signal) {
 
   const catalog = {
     store,
+    loadChildren,
     async search(searchTerm, searchSignal) {
       const requestSignal = AbortSignal.any([signal, searchSignal])
       const { data, nextCursor, workspacePaths } = await readPage('search', { searchTerm }, requestSignal)
@@ -119,7 +156,7 @@ export function createHistoryCatalog(signal) {
     setStatus(threadId, status) {
       observedStatuses.set(threadId, status)
       store.update(state => {
-        const thread = state.threads.find(item => item.id === threadId)
+        const thread = state.childThreads[threadId] ?? state.threads.find(item => item.id === threadId)
         if (thread) thread.status = status
       })
     },
@@ -159,6 +196,23 @@ export function createHistoryCatalog(signal) {
       const { id, thread, readState, workspacePaths } = frame
       const status = observedStatuses.get(id) ?? thread?.status
       const current = thread && { ...thread, status }
+      const parent = subagentAddress(thread ?? store.getSnapshot().childThreads[id])?.parentSessionId
+      if (parent) {
+        childChanges.set(id, current)
+        store.update(state => {
+          const branch = state.childCatalogs[parent]
+          if (!branch) return
+          if (current) {
+            state.childThreads[id] = current
+            if (!branch.ids.includes(id)) branch.ids.push(id)
+          } else {
+            delete state.childThreads[id]
+            branch.ids = branch.ids.filter(childId => childId !== id)
+          }
+        })
+        return
+      }
+      if (thread?.ephemeral) return
       threadChanges.set(id, current)
       if (!current) {
         searchThreads.delete(id)

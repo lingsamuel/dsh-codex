@@ -49,3 +49,16 @@ test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
   assert.deepEqual(workspaces.archivedSessionIds, ['archived'])
   assert.deepEqual(sessions.ids, ['native-pin', 'custom-group', 'archived'])
 })
+
+test('子代理可供原生子会话树读取，同时保留父工作区的根会话清单', () => {
+  const root = { id: 'root', cwd: '/repo' }
+  const child = { id: 'child', cwd: '/repo', createdAt: 100, agentNickname: 'Scout', status: { type: 'active' } }
+  const { sessions, workspaces } = projectCatalog({ projects: [], workspacePaths: {}, threads: [root], selected: child,
+    childThreads: { child }, childCatalogs: { root: { state: 'idle', ids: ['child'] } },
+  })
+  assert.deepEqual(sessions.projectionsBySession.root.values.subagentCatalog, [{ id: 'child', label: 'Scout', createdAt: 100_000, mode: 'unknown' }])
+  assert.equal(sessions.byId.child.running, true)
+  assert.deepEqual(sessions.byId.child.retainedBy, { mainView: 1 })
+  assert.deepEqual(workspaces.items[0].sessionIds, ['root'])
+  assert.deepEqual(sessions.ids, ['root'])
+})

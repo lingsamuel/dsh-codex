@@ -1,6 +1,7 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { observe, projectCatalog, remoteFailure } from './catalog.js'
 import { createCodexHistory } from './session-events.js'
+import { subagentAddress } from './subagents.js'
 
 const searchResultLimit = 20
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
@@ -52,7 +53,8 @@ export function provideCodexControllers(ctx, catalog) {
     scopeOf: scope => scope[scopeId],
     sessionOf: scope => bindings.get(scope[scopeId])?.binding.session,
     retainInfo,
-    subagentAddress: () => undefined,
+    subagentAddress: id => subagentAddress(catalog.store.getSnapshot().childThreads[id]),
+    refreshProjections: id => catalog.loadChildren(id, true),
     searchResultLimit,
     async search(query, signal) {
       try {
@@ -61,14 +63,17 @@ export function provideCodexControllers(ctx, catalog) {
         return { ok: false, error: remoteFailure(error.message) }
       }
     },
-    retain(id, { source }) {
-      const thread = catalog.store.getSnapshot().threads.find(item => item.id === id)
+    retain(target, { source }) {
+      const id = typeof target === 'string' ? target : target.childSessionId
+      const { threads, childThreads } = catalog.store.getSnapshot()
+      const thread = childThreads[id] ?? threads.find(item => item.id === id)
       if (!thread) throw new Error(`找不到 Codex 会话 ${id}`)
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
         record = { binding: readonlyBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog), fiber }
         bindings.set(id, record)
+        if (!thread.archived) void catalog.loadChildren(id)
       }
       const { binding } = record
       const observer = retainInfo(id)

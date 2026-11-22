@@ -1,6 +1,5 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
 
-const emptyProjections = {}
 const noRetention = {}
 const mainRetention = { mainView: 1 }
 // Codex 的内置 Pinned 分组使用固定身份。自建同名分组不等同于置顶。
@@ -29,10 +28,10 @@ function workspaceTimes(group) {
 }
 
 /** 把 Codex 目录和会话投影成 DSH 客户端列表的内存快照。 */
-export function projectCatalog({ projects, threads, selected, workspacePaths, busy, error }) {
+export function projectCatalog({ projects, threads, selected, workspacePaths, busy, error, childThreads = {}, childCatalogs = {} }) {
   const phase = busy || error ? 'pending' : 'ready'
   const ids = threads.map(thread => thread.id)
-  const byId = Object.fromEntries(threads.map(thread => {
+  const byId = Object.fromEntries([...threads, ...Object.values(childThreads)].map(thread => {
     const title = threadTitle(thread)
     return [thread.id, {
       id: thread.id,
@@ -44,6 +43,13 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
       blank: false,
       updatedAt: unixMillis(thread.updatedAt),
     }]
+  }))
+  const projectionsBySession = Object.fromEntries(Object.entries(childCatalogs).map(([id, value]) => {
+    const subagentCatalog = value.ids.map(childId => {
+      const thread = childThreads[childId]
+      return { id: childId, label: thread.agentNickname || thread.agentRole || thread.name, createdAt: unixMillis(thread.createdAt), mode: 'unknown' }
+    })
+    return [id, { state: value.state, error: value.error, values: { subagentCatalog } }]
   }))
   const items = groupThreads(threads, projects, workspacePaths).flatMap(([key, group]) => {
     const path = group.roots[0]
@@ -57,7 +63,7 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
     }]
   })
   return {
-    sessions: { ids, byId, phase, projectionsBySession: emptyProjections },
+    sessions: { ids, byId, phase, projectionsBySession },
     workspaces: {
       items,
       archivedSessionIds: threads.filter(thread => thread.archived).map(thread => thread.id),
