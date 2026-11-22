@@ -341,6 +341,7 @@ export function createCodexHistory(ctx, thread, catalog) {
         return
       }
       if (frame.type === 'change') {
+        if (frame.onlyIfLoaded && !transcript.getTurn(frame.turn.id)) return
         await updateTurn(frame.turn, frame.items)
         publish()
         publishState()

@@ -21,7 +21,7 @@ test('分页历史跟随只读取尾部增量，同一轮次结束时不重发�
   })
   const first = await tail.readChanges()
   assert.equal(requests[0].params.itemsView, 'notLoaded')
-  assert.deepEqual(requests[1].params.cursor, { type: 'item', itemId: 'old-item' })
+  assert.deepEqual(requests.find(({ params }) => params.turnId === 'active').params.cursor, { type: 'item', itemId: 'old-item' })
   assert.equal(first.length, 1)
   assert.equal(first[0].turn.id, 'active')
   assert.deepEqual(first[0].items.map(item => item.id), ['new-item'])
@@ -41,4 +41,30 @@ test('原生历史头部回退时重新同步，不把已撤回轮次留在增�
     backwardsCursor: 'removed-anchor',
   })
   assert.equal(await tail.readChanges(), null)
+})
+
+test('较早轮次结束后保存的子智能体活动仍会推送到原轮次', async () => {
+  const started = { id: 'spawn', type: 'subAgentActivity', kind: 'started', agentThreadId: 'child', agentPath: '/root/review' }
+  const completed = { ...started, id: 'done', kind: 'completed' }
+  const latest = { id: 'latest', status: 'completed', items: [{ id: 'latest-reply' }] }
+  const earlier = { id: 'earlier', status: 'completed', items: [started] }
+  let saved = false
+  const request = async (method, { turnId, cursor, sortDirection }) => {
+    if (method === 'thread/turns/list') return { data: [{ ...latest, items: [] }] }
+    const done = { turnId: earlier.id, item: completed, completedAtMs: 300 }
+    if (!turnId && sortDirection === 'desc') return saved
+      ? { data: [done], backwardsCursor: 'after-done' }
+      : { data: [{ turnId: latest.id, item: latest.items[0] }], backwardsCursor: 'after-reply' }
+    if (!turnId && cursor === 'after-reply' && saved) return { data: [done] }
+    if (turnId === earlier.id && saved) return { data: [done] }
+    return { data: [] }
+  }
+  const tail = createHistoryTail(request, { id: 'root', historyMode: 'paginated' }, { data: [latest, earlier] }, 'after-reply')
+  assert.deepEqual(await tail.readChanges(), [])
+  saved = true
+  const changes = await tail.readChanges()
+  assert.deepEqual(changes.map(({ turn, items }) => [turn.id, turn.status, items.map(item => item.id)]), [
+    ['earlier', 'completed', ['done']],
+  ])
+  assert.deepEqual(await tail.readChanges(), [])
 })

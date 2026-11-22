@@ -40,6 +40,13 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions 
       recordActivity()
       return receive(JSON.parse(event.data))
     }
+    connection.addEventListener('history-checkpoint', event => {
+      if (source !== connection) return
+      // 浏览器自动重连会附带 Last-Event-ID。主动重建也要沿用同一个游标。
+      if (event.lastEventId) url.searchParams.set('itemCursor', event.lastEventId)
+      else url.searchParams.delete('itemCursor')
+      recordActivity()
+    })
     connection.addEventListener('heartbeat', recordActivity)
     recordActivity()
   }

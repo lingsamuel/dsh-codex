@@ -2,6 +2,7 @@ import { mergePages } from '../shared/pages.js'
 import { CodexRpcError, findCodexSocket, readCodexPages, withCodexReader } from './app-server.mjs'
 import { catalogCachePath, readCatalogCache, saveCatalogCache } from './catalog-cache.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
+import { subagentParentThreadId } from '../shared/codex-subagents.js'
 
 export async function readProjectPage(request, params) {
   try {
@@ -47,13 +48,22 @@ export async function readArchivedCatalog(socketPath, signal) {
 }
 
 /** 只查原生父线程的直接子代理，嵌套分支由调用方按需展开。 */
-export function readChildThreads(parentThreadId, socketPath, signal, archived = false) {
-  return withCodexReader(socketPath, signal, async request => {
-    const threads = await readThreads(request, {
-      parentThreadId, sourceKinds: ['subAgent'], useStateDbOnly: true, ...(archived && { archived: true }),
-    })
-    return archived ? threads.map(thread => ({ ...thread, archived: true })) : threads
+export async function readChildThreads(request, parentThreadId, archived = false) {
+  const threads = await readThreads(request, {
+    parentThreadId, sourceKinds: ['subAgent'], useStateDbOnly: true, ...(archived && { archived: true }),
   })
+  return archived ? threads.map(thread => ({ ...thread, archived: true })) : threads
+}
+
+/** 精确读取子会话时以原生归档列表补齐 thread/read 未返回的归档标记。 */
+export async function readThreadSummary(request, threadId) {
+  const result = await request('thread/read', { threadId })
+  const parentThreadId = subagentParentThreadId(result.thread)
+  if (!parentThreadId) return result
+  const archived = await readChildThreads(request, parentThreadId, true)
+  return archived.some(thread => thread.id === threadId)
+    ? { ...result, thread: { ...result.thread, archived: true } }
+    : result
 }
 
 /** 为尚未发送消息的已加载线程标记草稿，供目录清单和实时事件共用。 */

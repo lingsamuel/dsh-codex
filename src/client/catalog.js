@@ -142,6 +142,34 @@ export function createHistoryCatalog(signal) {
     return read
   }
 
+  /** 活动可能引用其他分支的子线程。按原生 ID 补齐未展开的父级，供面包屑使用。 */
+  async function resolveSubagent(threadId, viewSignal) {
+    const requestSignal = AbortSignal.any([signal, viewSignal])
+    const missing = new Map()
+    let id = threadId
+    while (id && !missing.has(id)) {
+      const { childThreads, threads } = store.getSnapshot()
+      if (childThreads[id] || threads.some(thread => thread.id === id)) break
+      const { thread } = await readPage('thread-summary', { threadId: id }, requestSignal)
+      const address = subagentAddress(thread)
+      if (!address) break
+      missing.set(id, thread)
+      id = address.parentSessionId
+    }
+    requestSignal.throwIfAborted()
+    if (missing.size) {
+      store.update(state => {
+        for (const [id, thread] of missing) {
+          // 读取期间目录可能已收到更新或删除，优先使用原生广播。
+          if (threadChanges.get(id) === null) continue
+          const current = childChanges.has(id) ? childChanges.get(id) : thread
+          if (current) state.childThreads[id] ??= withThreadStatus(current, observedStatuses.get(id) ?? current.status)
+        }
+      })
+    }
+    return subagentAddress(store.getSnapshot().childThreads[threadId])
+  }
+
   async function refresh(fresh = false) {
     if (signal.aborted) return
     if (refreshing) {
@@ -188,6 +216,7 @@ export function createHistoryCatalog(signal) {
   const catalog = {
     store,
     loadChildren,
+    resolveSubagent,
     setReadState,
     acceptThread(thread, workspacePaths) {
       receive({ type: 'thread', id: thread.id, thread, workspacePaths })
@@ -291,13 +320,13 @@ export function createHistoryCatalog(signal) {
         childChanges.set(id, current)
         store.update(state => {
           const branch = state.childCatalogs[parent]
-          if (!branch) return
+          if (!branch && !state.childThreads[id]) return
           if (current) {
             state.childThreads[id] = current
-            if (!branch.ids.includes(id)) branch.ids.push(id)
+            if (branch && !branch.ids.includes(id)) branch.ids.push(id)
           } else {
             delete state.childThreads[id]
-            branch.ids = branch.ids.filter(childId => childId !== id)
+            if (branch) branch.ids = branch.ids.filter(childId => childId !== id)
           }
         })
         return

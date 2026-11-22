@@ -1,7 +1,7 @@
 import { openCodexReader } from './app-server.mjs'
 import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
-import { createHistoryTail, readThreadTurns } from './live-history.mjs'
+import { createHistoryTail, readItemTailCursor, readThreadTurns } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
 import { watchNativeUnread } from './unread-watch.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
@@ -27,6 +27,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
       const observeQueue = params.get('queue') === '1'
       const observeQuestions = !catalog && params.get('questions') === '1'
       if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
+      const resumeCursor = threadId && (request.headers.get('Last-Event-ID') || params.get('itemCursor'))
       const abort = new AbortController()
       const signal = AbortSignal.any([request.signal, abort.signal, ...(ownerSignal ? [ownerSignal] : [])])
       let cancelled = false
@@ -55,8 +56,17 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
           let catalogReady = false
           let catalogQueue = Promise.resolve()
           let mode
+          let sentCursor = resumeCursor || ''
           const early = []
           const questionObserver = observeQuestions ? questions?.observe(threadId, send, signal) : undefined
+
+          function checkpoint(cursor = '') {
+            cursor ??= ''
+            if (cursor === sentCursor || signal.aborted || cancelled) return
+            // SSE 断线后使用该 ID 请求续读，必须在这一批历史条目发完后确认进度。
+            sentCursor = cursor
+            writer.enqueue(encoder.encode(`id: ${cursor}\nevent: history-checkpoint\ndata: {}\n\n`))
+          }
 
           async function sendFacts() {
             const facts = await rolloutFacts?.read()
@@ -91,6 +101,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
                   await sendSnapshot(reading, true)
                 } else {
                   for (const update of updates) send({ type: 'change', ...update })
+                  checkpoint(tail.itemCursor())
                   if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
                     // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
                     const result = await connection.request('thread/read', { threadId }).catch(() => null)
@@ -159,14 +170,18 @@ export function createWatchRoute(socketPath, ownerSignal, questions) {
           }
 
           async function sendSnapshot({ thread, readState }, replace = false) {
+            const itemCursor = thread.historyMode === 'paginated' ? await readItemTailCursor(connection.request, threadId) : undefined
             const page = await readThreadTurns(connection.request, {
               threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
             })
-            tail = createHistoryTail(connection.request, thread, page)
+            const fromCursor = !replace && itemCursor && resumeCursor ? resumeCursor : itemCursor
+            tail = createHistoryTail(connection.request, thread, page, fromCursor)
             awaitingPreview = !thread.name && !thread.preview
             send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
               mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
+            if (fromCursor === itemCursor) checkpoint(itemCursor)
+            else wake()
             questionObserver?.update(thread.status)
           }
 

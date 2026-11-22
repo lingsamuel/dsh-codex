@@ -2,6 +2,7 @@ import { inlineAttachmentId } from './attachments.js'
 import { projectQuestionReply, projectTool } from './tools.js'
 import { projectFileLinks } from './file-links.js'
 import { projectVisualizeReferences } from './visualize.js'
+import { subagentActivityEvent, subagentActivityKinds } from './subagent-activity.js'
 import { questionReplies } from '../../shared/question-replies.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
@@ -74,6 +75,8 @@ function turnEvents(turn, number, source, createdAt, attachments) {
   let lastTime = startedAt
   const coordinates = () => ({ turn: number, step })
   for (const item of items) {
+    const isSubagentActivity = item.type === 'subAgentActivity'
+    if (isSubagentActivity && !subagentActivityKinds.includes(item.kind)) continue
     const isUser = item.type === 'userMessage'
     const replies = isUser ? questionReplies(item.content) : undefined
     const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
@@ -107,6 +110,11 @@ function turnEvents(turn, number, source, createdAt, attachments) {
       hasUserInput = true
     }
     activity = true
+    if (isSubagentActivity) {
+      const { id, kind, agentThreadId, agentPath } = item
+      emit(subagentActivityEvent, end, { ...coordinates(), id, kind, agentThreadId, agentPath })
+      continue
+    }
     if (isAssistant) {
       emit('assistant/message', end, {
         ...coordinates(),

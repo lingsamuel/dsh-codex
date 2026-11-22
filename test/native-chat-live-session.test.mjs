@@ -19,12 +19,14 @@ const hook = registerHooks({
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
 const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
+const { createHistoryCatalog } = await import('../src/client/catalog.js')
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
 
 function mockTransport(t) {
-  const original = { document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
+  const original = { window: globalThis.window, document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
   let source
+  globalThis.window = new EventTarget()
   globalThis.document = { baseURI: 'http://127.0.0.1:3190/' }
   globalThis.EventSource = class extends EventTarget {
     constructor(url) { super(); source = this; this.url = url }
@@ -222,6 +224,71 @@ test('stock window appends native tail changes, prepends older history, and keep
   assert.equal(history.session.getSnapshot().live.lastTurnStatus, 'completed')
   dispose()
   assert.equal(source.closed, true)
+})
+
+test('实时活动与历史回放共享子智能体状态，重复条目保留原顺序和事件身份', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'root' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const active = { type: 'active', activeFlags: [] }
+  const started = { id: 'spawn', type: 'subAgentActivity', kind: 'started', agentPath: '/root/review',
+    agentThreadId: 'child', completedAtMs: 100_100 }
+  const interrupted = { ...started, id: 'interruption', kind: 'interrupted', completedAtMs: 100_200 }
+  const completed = { ...started, id: 'completion', kind: 'completed', agentPath: '/root/reviewer', completedAtMs: 100_300 }
+  const activities = () => history.events.getSnapshot().entries.map(({ event }) => event)
+    .filter(event => event.type === 'codex/subagent-activity')
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask, started])] }, status: active, mode: 'live' })
+  assert.deepEqual(activities().map(event => event.data.kind), ['started'])
+  await emit({ type: 'change', turn: { id: 'current', status: 'inProgress' }, items: [
+    { ...started, id: 'interacted', kind: 'interacted' }, interrupted, completed,
+  ] })
+  const streamed = activities()
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'completed', [
+    ask, started, { ...started, id: 'interacted', kind: 'interacted' }, interrupted, completed, answer,
+  ])] }, status: { type: 'idle' }, mode: 'live' })
+  assert.deepEqual(activities().map(({ time, data }) => [data.kind, data.agentThreadId, data.agentPath, time]), [
+    ['started', 'child', '/root/review', 100_100],
+    ['interrupted', 'child', '/root/review', 100_200],
+    ['completed', 'child', '/root/reviewer', 100_300],
+  ])
+  assert.strictEqual(activities().at(-1), streamed.at(-1))
+  assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/call'), false)
+})
+
+test('从活动打开的未展开子会话仍跟随原生目录更新与删除', async t => {
+  const source = mockTransport(t)
+  const root = { id: 'root' }
+  const parent = { id: 'parent', parentThreadId: root.id }
+  const child = { id: 'child', parentThreadId: parent.id }
+  const threads = new Map([parent, child].map(thread => [thread.id, thread]))
+  globalThis.fetch = async url => {
+    if (url.pathname.endsWith('/catalog')) return Response.json({ projects: [], threads: [root], workspacePaths: {}, complete: true })
+    if (url.pathname.endsWith('/archived')) return Response.json({ threads: [], workspacePaths: {} })
+    assert.equal(url.pathname, '/api/codex/thread-summary')
+    const thread = threads.get(url.searchParams.get('threadId'))
+    return thread ? Response.json({ thread }) : Response.json({ error: '会话已删除' }, { status: 400 })
+  }
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const catalog = createHistoryCatalog(lifetime.signal)
+  await new Promise(resolve => {
+    const stop = catalog.store.subscribe(() => {
+      if (catalog.store.getSnapshot().busy) return
+      stop()
+      resolve()
+    })
+  })
+  assert.deepEqual(await catalog.resolveSubagent(child.id, lifetime.signal), {
+    childSessionId: child.id, parentSessionId: parent.id, mode: 'unknown',
+  })
+  assert.equal(catalog.store.getSnapshot().childCatalogs[parent.id], undefined)
+  const emit = thread => source().onmessage({ data: JSON.stringify({ type: 'thread', id: child.id, thread }) })
+  await emit({ ...child, name: '原生会话已改名' })
+  assert.equal(catalog.store.getSnapshot().childThreads[child.id].name, '原生会话已改名')
+  threads.delete(child.id)
+  await emit(null)
+  assert.equal(catalog.store.getSnapshot().childThreads[child.id], undefined)
+  await assert.rejects(catalog.resolveSubagent(child.id, lifetime.signal), /会话已删除/)
 })
 
 test('one initial history request keeps the view usable when SSE cannot open', async t => {

@@ -1,5 +1,5 @@
 import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
-import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage } from './catalog.mjs'
+import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage, readThreadSummary } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
@@ -59,7 +59,14 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     createWatchRoute(socketPath, ownerSignal, questions),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
-    route('children', (query, signal) => readChildThreads(requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'), socketPath, signal, query.get('archived') === '1')),
+    route('children', (query, signal) => {
+      const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
+      return withCodexReader(socketPath, signal, request => readChildThreads(request, threadId, query.get('archived') === '1'))
+    }),
+    route('thread-summary', (query, signal) => {
+      const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
+      return withCodexReader(socketPath, signal, request => readThreadSummary(request, threadId))
+    }),
     route('models', (_, signal) => withCodexReader(socketPath, signal, readModelCatalog)),
     route('thread-info', (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')

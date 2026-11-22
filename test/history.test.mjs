@@ -532,6 +532,25 @@ test('按父线程读取 Codex 子代理，不走全局清单', async t => {
   assert.deepEqual(await response.json(), [child])
 })
 
+test('按原生 ID 查找归档子会话时保留归档标记', async t => {
+  const thread = { id: 'archived-child', source: { subAgent: { thread_spawn: { parent_thread_id: 'native-parent' } } } }
+  const { get } = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => {
+      assert.equal(threadId, thread.id)
+      return { result: { thread } }
+    },
+    'thread/list': ({ parentThreadId, sourceKinds, archived }) => {
+      assert.equal(parentThreadId, 'native-parent')
+      assert.deepEqual(sourceKinds, ['subAgent'])
+      assert.equal(archived, true)
+      return { result: { data: [thread] } }
+    },
+  })
+  const response = await get(`/api/codex/thread-summary?threadId=${thread.id}`)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { thread: { ...thread, archived: true } })
+})
+
 test('正文搜索使用 Codex 返回的会话、片段和游标', async t => {
   const thread = { id: 'older-thread', cwd: '/projects/older' }
   const result = { data: [{ thread, snippet: '正文里的命中' }], nextCursor: 'more' }
@@ -800,6 +819,28 @@ test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线
   assert.equal(fixture.messages[0].params.clientInfo.name, 'codex_app_server_daemon')
   await reader.cancel()
   await fixture.clientClosed
+})
+
+test('SSE 重连沿用先前的条目游标，回放初始快照之外的较早活动', { timeout: 5000 }, async t => {
+  const threadId = 'root'
+  const latest = { id: 'latest', status: 'completed', items: [] }
+  const late = { id: 'done', type: 'subAgentActivity', kind: 'completed', agentThreadId: 'child', agentPath: '/root/review' }
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, historyMode: 'paginated' } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: [latest] } }),
+    'thread/items/list': ({ sortDirection, cursor }) => ({
+      result: sortDirection === 'desc' ? { data: [], backwardsCursor: 'after-activity' }
+        : { data: cursor === 'before-disconnect' ? [{ turnId: 'older', item: late }] : [] },
+    }),
+  })
+  const response = await fixture.get(`/api/codex/watch?threadId=${threadId}`, { headers: { 'Last-Event-ID': 'before-disconnect' } })
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const read = async () => new TextDecoder().decode((await reader.read()).value)
+  assert.equal(JSON.parse((await read()).slice(6)).type, 'snapshot')
+  assert.deepEqual(JSON.parse((await read()).slice(6)), { type: 'change', turn: { id: 'older' }, items: [late], onlyIfLoaded: true })
+  assert.match(await read(), /^id: after-activity\nevent: history-checkpoint/)
 })
 
 test('原生未读只推送变化，其他会话的已读更新无需刷新对话或清单', { timeout: 5000 }, async t => {

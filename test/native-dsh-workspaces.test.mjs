@@ -92,7 +92,10 @@ test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
 
 test('子代理可供原生子会话树读取，同时保留父工作区的根会话清单', () => {
   const root = { id: 'root', cwd: '/repo' }
-  const child = { id: 'child', parentThreadId: root.id, cwd: '/repo', createdAt: 100, agentNickname: 'Scout', status: { type: 'active' } }
+  const child = {
+    id: 'child', parentThreadId: root.id, cwd: '/repo', createdAt: 100, agentNickname: 'Scout', status: { type: 'active' },
+    source: { subAgent: { thread_spawn: { parent_thread_id: root.id, agent_path: '/root/check' } } },
+  }
   const grandchild = {
     id: 'grandchild', cwd: '/repo', createdAt: 110, agentRole: 'Reviewer',
     source: { subAgent: { thread_spawn: { parent_thread_id: child.id } } },
@@ -101,7 +104,7 @@ test('子代理可供原生子会话树读取，同时保留父工作区的根�
     childThreads: { child, grandchild },
     childCatalogs: { root: { state: 'idle', ids: [child.id] }, child: { state: 'idle', ids: [grandchild.id] } },
   })
-  assert.deepEqual(sessions.projectionsBySession.root.values.subagentCatalog, [{ id: 'child', label: 'Scout', createdAt: 100_000, mode: 'unknown' }])
+  assert.deepEqual(sessions.projectionsBySession.root.values.subagentCatalog, [{ id: 'child', label: '/root/check', createdAt: 100_000, mode: 'unknown' }])
   assert.deepEqual(sessions.projectionsBySession.child.values.subagentCatalog, [{ id: 'grandchild', label: 'Reviewer', createdAt: 110_000, mode: 'unknown' }])
   assert.equal(sessions.byId.grandchild.origin, 'subagent')
   assert.equal(sessions.byId[sessions.byId.grandchild.parentId].id, child.id)

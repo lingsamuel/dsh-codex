@@ -1,6 +1,6 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
 import { pinnedSectionId } from '../../shared/thread-sections.js'
-import { subagentAddress } from './subagents.js'
+import { subagentAddress, subagentPath } from './subagents.js'
 
 const noRetention = {}
 const mainRetention = { mainView: 1 }
@@ -47,9 +47,9 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
   const phase = busy || error ? 'pending' : 'ready'
   const ids = threads.map(thread => thread.id)
   const byId = Object.fromEntries([...threads, ...Object.values(childThreads)].map(thread => {
-    const title = threadTitle(thread)
     // DSH 面包屑沿摘要中的直接父级逐级向上查找。
     const address = subagentAddress(thread)
+    const title = (address && subagentPath(thread)) || threadTitle(thread)
     return [thread.id, {
       id: thread.id,
       title,
@@ -65,7 +65,8 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
   const projectionsBySession = Object.fromEntries(Object.entries(childCatalogs).map(([id, value]) => {
     const subagentCatalog = value.ids.map(childId => {
       const thread = childThreads[childId]
-      return { id: childId, label: thread.agentNickname || thread.agentRole || thread.name, createdAt: unixMillis(thread.createdAt), mode: 'unknown' }
+      const label = subagentPath(thread) || thread.agentNickname || thread.agentRole || thread.name
+      return { id: childId, label, createdAt: unixMillis(thread.createdAt), mode: 'unknown' }
     })
     return [id, { state: value.state, error: value.error, values: { subagentCatalog } }]
   }))
