@@ -1,5 +1,8 @@
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useState } from 'react'
+import {
+  Button, IconBranchOutlineRegular, IconCheckOutlineRegular, IconChevronDownOutlineRegular,
+  IconFolderCloseRegular, Menu, Modal, PathLabel,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useRef, useState } from 'react'
 import { readPage, writeWorktreeAction } from '../api.js'
 
 const locale = 'codex.worktrees'
@@ -7,7 +10,7 @@ const labels = {
   zh: {
     title: '工作目录', local: '本地目录', worktree: '工作树', new: '新建工作树', existing: '已有工作树', recover: '打开目标会话',
     loading: '正在读取 Git 工作树…', noRepository: '此目录没有 Git 工作树。',
-    base: '基准分支', target: '工作树目录', begin: '发送首条消息时启动所选工作树会话。',
+    base: '基准分支', back: '返回工作目录',
     switch: '切换工作目录', select: '使用此目录', cancel: '取消',
     active: '请先结束当前轮次，再切换工作目录。', queue: '请先发送或移除待发消息，再切换工作目录。',
     background: '请先结束后台进程，再切换工作目录。',
@@ -15,45 +18,19 @@ const labels = {
   en: {
     title: 'Working directory', local: 'Local directory', worktree: 'Worktree', new: 'New worktree', existing: 'Existing worktree', recover: 'Open target session',
     loading: 'Reading Git worktrees…', noRepository: 'This directory has no Git worktrees.',
-    base: 'Base branch', target: 'Worktree directory', begin: 'The first message starts the session in the selected worktree.',
+    base: 'Base branch', back: 'Back to working directories',
     switch: 'Switch working directory', select: 'Use directory', cancel: 'Cancel',
     active: 'Finish the active turn before switching directories.', queue: 'Send or remove queued messages before switching directories.',
     background: 'Stop background processes before switching directories.',
   },
 }
-const fieldStyle = { display: 'grid', gap: 4 }
-const selectStyle = { maxWidth: '100%', font: 'inherit', color: 'inherit', background: 'var(--dsw-specific-input-major)' }
+const menuPathStyle = { maxWidth: 'min(64vw, 18rem)' }
 
-function WorktreeDialog({ thread, draft, choice, idleBlock, setDraft, publishThread, close, t }) {
-  const [choices, setChoices] = useState(undefined)
-  const [kind, setKind] = useState(choice?.kind ?? 'local')
-  const [path, setPath] = useState(choice?.path ?? '')
-  const [baseRef, setBaseRef] = useState(choice?.baseRef ?? '')
+function SwitchDirectory({ thread, path, idleBlock, publishThread, close, t }) {
   const [error, setError] = useState('')
   const [switching, setSwitching] = useState(false)
-  useEffect(() => {
-    const controller = new AbortController()
-    readPage('worktrees', { cwd: thread.cwd }, controller.signal).then(value => {
-      if (controller.signal.aborted) return
-      setChoices(value)
-      setBaseRef(current => value?.branches.some(({ ref }) => current === ref) ? current : value?.baseRef ?? '')
-      setPath(current => draft && value?.worktrees.some(tree => current === tree.path) ? current
-        : (draft ? value?.worktrees[0]?.path : [value?.local, ...value?.worktrees ?? []]
-          .find(tree => tree && tree.path !== thread.cwd)?.path) ?? '')
-    }, failure => {
-      if (!controller.signal.aborted) setError(failure.message)
-    })
-    return () => controller.abort()
-  }, [draft, thread.cwd])
 
   async function confirm() {
-    if (draft) {
-      const fields = kind === 'new' ? { baseRef } : { path }
-      const same = kind === choice?.kind && (kind === 'new' ? baseRef === choice.baseRef : path === choice.path)
-      if (!same) setDraft(kind === 'local' ? undefined : { kind, ...fields, id: crypto.randomUUID() })
-      close()
-      return
-    }
     setSwitching(true)
     setError('')
     try {
@@ -66,50 +43,116 @@ function WorktreeDialog({ thread, draft, choice, idleBlock, setDraft, publishThr
     }
   }
 
-  const checkouts = !choices ? [] : draft ? choices.worktrees : [choices.local, ...choices.worktrees].filter(Boolean)
-  const ready = choices && !switching && (draft ? kind === 'local' || (kind === 'new' ? baseRef : path)
-    : path && path !== thread.cwd && !idleBlock)
-  return <Modal open title={t(draft ? 'title' : 'switch')} onClose={() => { if (!switching) close() }} closeLabel={t('cancel')}
+  return <Modal open title={t('switch')} onClose={() => { if (!switching) close() }} closeLabel={t('cancel')}
     footer={<>
       <Button variant="outline" disabled={switching} onClick={close}>{t('cancel')}</Button>
-      <Button variant="primary" disabled={!ready} onClick={confirm}>{t('select')}</Button>
+      <Button variant="primary" disabled={switching || Boolean(idleBlock)} onClick={confirm}>{t('select')}</Button>
     </>}>
-    {choices === undefined && !error && <p role="status">{t('loading')}</p>}
-    {choices === null && <p>{t('noRepository')}</p>}
-    {choices && <div style={{ display: 'grid', gap: 12 }}>
-      {draft && <label style={fieldStyle}>
-        {t('title')}
-        <select value={kind} onChange={event => setKind(event.target.value)} style={selectStyle}>
-          <option value="local">{t('local')}</option>
-          <option value="new" disabled={!choices.branches.length}>{t('new')}</option>
-          <option value="existing" disabled={!checkouts.length}>{t('existing')}</option>
-        </select>
-      </label>}
-      {draft && kind === 'new' && <label style={fieldStyle}>
-        {t('base')}
-        <select value={baseRef} onChange={event => setBaseRef(event.target.value)} style={selectStyle}>
-          {choices.branches.map(({ ref, label }) => <option key={ref} value={ref}>{label}</option>)}
-        </select>
-      </label>}
-      {(!draft || kind === 'existing') && <label style={fieldStyle}>
-        {t('target')}
-        <select value={path} onChange={event => setPath(event.target.value)} style={selectStyle} disabled={switching}>
-          {!checkouts.some(tree => tree.path === path) && <option value="" disabled>{t('target')}</option>}
-          {checkouts.map(tree => <option key={tree.path} value={tree.path} disabled={tree.path === thread.cwd}>
-            {t(tree === choices.local ? 'local' : 'worktree')} · {tree.path}
-          </option>)}
-        </select>
-      </label>}
-      {draft && kind !== 'local' && <p>{t('begin')}</p>}
-    </div>}
+    <div style={{ overflowWrap: 'anywhere' }}>{path}</div>
     {idleBlock && <p role="status">{t(idleBlock)}</p>}
     {error && <p role="alert">{error}</p>}
   </Modal>
 }
 
+function directoryLabel(path, label) {
+  return <>
+    {label}
+    <PathLabel path={path} style={menuPathStyle} />
+  </>
+}
+
+function WorktreePicker({ thread, draft, choice, idleBlock, setDraft, publishThread, disabled, t }) {
+  const [open, setOpen] = useState(false)
+  const [choices, setChoices] = useState(undefined)
+  const [error, setError] = useState('')
+  const [destination, setDestination] = useState(null)
+  const trigger = useRef(null)
+  useEffect(() => {
+    if (!open) return
+    const controller = new AbortController()
+    const { signal } = controller
+    readPage('worktrees', { cwd: thread.cwd }, signal).then(value => {
+      if (!signal.aborted) setChoices(value)
+    }, failure => {
+      if (!signal.aborted) setError(failure.message)
+    })
+    return () => controller.abort()
+  }, [open, thread.cwd])
+
+  const local = { id: 'local', icon: <IconFolderCloseRegular size={14} />, label: directoryLabel(thread.cwd, t('local')) }
+  const entries = draft ? [local] : []
+  if (choices) {
+    const worktrees = choices.worktrees.map(tree => ({
+      id: tree.path,
+      label: directoryLabel(tree.path, draft ? null : t('worktree')),
+      icon: draft && choice?.path === tree.path ? <IconCheckOutlineRegular size={14} /> : <IconBranchOutlineRegular size={14} />,
+      disabled: tree.path === thread.cwd || (!draft && Boolean(idleBlock)),
+    }))
+    if (draft) {
+      const branches = choices.branches.map(({ ref, label }) => ({
+        id: ref, label,
+        icon: choice?.baseRef === ref ? <IconCheckOutlineRegular size={14} /> : <IconBranchOutlineRegular size={14} />,
+      }))
+      entries.push({
+        id: 'new', label: t('new'), icon: <IconBranchOutlineRegular size={14} />, disabled: branches.length === 0,
+        submenu: [{ type: 'label', id: 'base', text: t('base') }, ...branches],
+      }, {
+        id: 'existing', label: t('existing'), icon: <IconBranchOutlineRegular size={14} />,
+        disabled: !worktrees.some(tree => !tree.disabled), submenu: worktrees,
+      })
+    } else {
+      if (choices.local) entries.push({
+        ...local, id: choices.local.path, label: directoryLabel(choices.local.path, t('local')),
+        disabled: choices.local.path === thread.cwd || Boolean(idleBlock),
+      })
+      entries.push(...worktrees)
+    }
+  }
+  const status = error || (choices === undefined ? t('loading') : choices === null ? t('noRepository') : '')
+  if (status) entries.push({ type: 'label', id: 'status', text: status })
+  if (idleBlock) entries.unshift({ type: 'label', id: 'blocked', text: t(idleBlock) })
+
+  function select(id) {
+    setOpen(false)
+    if (!draft) {
+      if (!idleBlock) {
+        // 菜单项随弹窗打开而卸载，让原生弹窗记住仍在页面上的返回焦点。
+        trigger.current?.focus({ preventScroll: true })
+        setDestination(id)
+      }
+      return
+    }
+    if (id === 'local') {
+      if (choice) setDraft(undefined)
+    } else if (choices?.branches.some(branch => branch.ref === id)) {
+      if (choice?.baseRef !== id) setDraft({ kind: 'new', baseRef: id, id: crypto.randomUUID() })
+    } else if (choice?.path !== id) {
+      setDraft({ kind: 'existing', path: id, id: crypto.randomUUID() })
+    }
+  }
+
+  const label = t(draft ? choice?.kind ?? 'local' : 'switch')
+  return <>
+    <Menu open={open} portal autoFocus dense maxVisibleRows={8} side={draft ? 'top' : 'bottom'} align={draft ? 'start' : 'end'}
+      items={entries} selectedId={draft ? choice?.kind ?? 'local' : thread.cwd} submenuBackLabel={t('back')}
+      onClose={() => setOpen(false)} onSelect={select}
+      anchor={<Button ref={trigger} size="sm" variant="ghost" aria-haspopup="menu" aria-expanded={open}
+        title={draft ? choice?.path ?? choice?.baseRef ?? thread.cwd : thread.cwd} disabled={disabled} onClick={() => {
+          if (!open) {
+            setChoices(undefined)
+            setError('')
+          }
+          setOpen(!open)
+        }}>
+        {label}<IconChevronDownOutlineRegular size={12} aria-hidden="true" />
+      </Button>} />
+    {destination && <SwitchDirectory {...{ thread, idleBlock, publishThread, t }}
+      path={destination} close={() => setDestination(null)} />}
+  </>
+}
+
 function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory,
   useBackgroundTerminals, setDraft, publishThread, openWorktree, t }) {
-  const [open, setOpen] = useState(false)
   const choice = useWorktreeDraft(value => value)
   const thread = useCodexHistory(snapshot => snapshot.threads.find(value => value.id === sessionId))
   const blank = useSession(state => state.blank)
@@ -119,13 +162,11 @@ function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktr
   const background = useBackgroundTerminals(value => Boolean(value.get(sessionId)?.length))
   if (!thread?.cwd || !canChange || Boolean(blank) !== draft) return null
   const idleBlock = active ? 'active' : queued ? 'queue' : background ? 'background' : undefined
-  const label = draft ? choice?.kind ?? 'local' : 'switch'
   return <>
-    <Button size="sm" variant="toolbar" title={thread.cwd} disabled={draft && active} onClick={() => setOpen(true)}>{t(label)}</Button>
-    {draft && choice?.recovery && <Button size="sm" variant="toolbar" disabled={active}
+    <WorktreePicker key={thread.cwd} {...{ thread, draft, choice, setDraft, publishThread, t }}
+      idleBlock={draft ? undefined : idleBlock} disabled={draft && active} />
+    {draft && choice?.recovery && <Button size="sm" variant="ghost" disabled={active}
       title={choice.recovery.thread.cwd} onClick={() => openWorktree(choice.recovery, false)}>{t('recover')}</Button>}
-    {open && <WorktreeDialog key={thread.cwd} {...{ thread, draft, choice, setDraft, publishThread, t }}
-      idleBlock={draft ? undefined : idleBlock} close={() => setOpen(false)} />}
   </>
 }
 
