@@ -82,9 +82,21 @@ function itemTime(item) {
   return item.completedAtMs ?? item.startedAtMs ?? Infinity
 }
 
+function applyCancellation(item, match) {
+  if (!match || item.type !== 'commandExecution' || item.status !== 'inProgress') return item
+  // 有启动记录却缺少原生完成事件时，沿用命令的身份和已收到的输出。
+  if (match.native !== item) {
+    match.native = item
+    match.completed = { ...item, status: 'failed', completedAtMs: match.call.completedAtMs,
+      aggregatedOutput: [item.aggregatedOutput, match.call.output].filter(Boolean).join('\n') }
+  }
+  return match.completed
+}
+
 function mergeCancelledToolCalls(items, cancelled, firstChanged, previous) {
   let state = previous
   let nativeFrom = 0
+  let hadTailRecovery = false
   if (state?.calls !== cancelled) {
     const unmatched = new Map(cancelled.map(call => [call.id, call]))
     const matched = new Map()
@@ -98,9 +110,10 @@ function mergeCancelledToolCalls(items, cancelled, firstChanged, previous) {
       .map(call => ({ call, item: { ...call, type: 'cancelledToolCall', id: `codex:cancelled:${call.id}` } }))
       .sort((a, b) => itemTime(a.item) - itemTime(b.item))
     const pending = new Map(recovered.map(tool => [tool.call.id, tool]))
-    state = { calls: cancelled, matched, pending, recovered, recoveredThrough: [], items: [] }
+    state = { calls: cancelled, matched, pending, recovered, recoveredThrough: [], items: [], untimedTail: 0 }
   } else {
-    const { matched, pending, recoveredThrough } = state
+    const { matched, pending, recoveredThrough, untimedTail } = state
+    hadTailRecovery = state.recovered.length > (recoveredThrough[untimedTail - 1] ?? 0)
     nativeFrom = Math.min(firstChanged, recoveredThrough.length, items.length)
     if (pending.size) {
       const pendingCount = pending.size
@@ -118,7 +131,26 @@ function mergeCancelledToolCalls(items, cancelled, firstChanged, previous) {
   }
 
   const { matched, recovered, recoveredThrough, items: merged } = state
-  // 每个原生条目记下已经插入的补录数量。暂留在尾部的补录可能被新条目推后。
+  let untimedTail = items.length
+  if (recovered.length) {
+    const knownTail = state.untimedTail
+    // 没有更晚的可靠时间时，剩余补录在最后一个时间锚点之后、无时间的尾部之前。保留轮首用户输入。
+    const keepAnchor = knownTail <= nativeFrom
+    const scanFrom = keepAnchor ? nativeFrom : 0
+    untimedTail = keepAnchor ? knownTail : 0
+    for (let i = items.length - 1; i >= scanFrom; i--) {
+      const item = applyCancellation(items[i], matched.get(i))
+      if (!Number.isFinite(itemTime(item)) && !(i === 0 && item.type === 'userMessage')) continue
+      untimedTail = i + 1
+      break
+    }
+    // 真实的时间锚点变化才会影响旧的无时间区间。普通追加继续使用已发布的顺序。
+    if (untimedTail < knownTail || (untimedTail > knownTail && hadTailRecovery)) {
+      nativeFrom = Math.min(nativeFrom, untimedTail, knownTail)
+    }
+  }
+  state.untimedTail = untimedTail
+  // 每个原生条目记下已经插入的补录数量，恢复时直接跳过稳定前缀。
   let recoveredIndex = recoveredThrough[nativeFrom - 1] ?? 0
   let index = nativeFrom + recoveredIndex
   let changedAt = index
@@ -132,19 +164,10 @@ function mergeCancelledToolCalls(items, cancelled, firstChanged, previous) {
     append(tool.item)
   }
   for (let nativeIndex = nativeFrom; nativeIndex < items.length; nativeIndex++) {
-    let item = items[nativeIndex]
-    const match = matched.get(nativeIndex)
-    if (match && item.type === 'commandExecution' && item.status === 'inProgress') {
-      // 有启动记录却缺少原生完成事件时，沿用命令的身份和已收到的输出。
-      if (match.native !== item) {
-        match.native = item
-        match.completed = { ...item, status: 'failed', completedAtMs: match.call.completedAtMs,
-          aggregatedOutput: [item.aggregatedOutput, match.call.output].filter(Boolean).join('\n') }
-      }
-      item = match.completed
-    }
+    const item = applyCancellation(items[nativeIndex], matched.get(nativeIndex))
     const time = itemTime(item)
-    while (recoveredIndex < recovered.length && Number.isFinite(time) && itemTime(recovered[recoveredIndex].item) < time) {
+    while (recoveredIndex < recovered.length && (nativeIndex === untimedTail
+      || (Number.isFinite(time) && itemTime(recovered[recoveredIndex].item) < time))) {
       insertRecovered(nativeIndex)
     }
     append(item)

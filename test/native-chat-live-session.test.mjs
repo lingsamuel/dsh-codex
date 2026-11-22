@@ -2,11 +2,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
-import { transformSync } from 'esbuild'
+import { fileURLToPath } from 'node:url'
+import { build, transformSync } from 'esbuild'
 import { projectCodexTurns } from '../src/client/native-chat/events.js'
 import { fileAttachmentInput } from '../src/shared/file-attachments.js'
 
 const storeModule = `data:text/javascript,${encodeURIComponent(`
+  export function notifySubscribers(listeners) { for (const notify of [...listeners]) notify() }
   export function createSnapshotStore(initial) {
     let value = initial
     const listeners = new Set()
@@ -872,8 +874,8 @@ test('长轮次逐条接收工具结果时只转换新增条目', async t => {
 
   const measurements = []
   const cases = [100, 200, 400].map(count => ({ count, withCancellation: false }))
-  cases.push({ count: 400, withCancellation: true }, { count: 400, withCancellation: true, trailing: true })
-  for (const { count, withCancellation, trailing = false } of cases) {
+  cases.push({ count: 400, withCancellation: true }, { count: 400, withCancellation: true, untimed: true })
+  for (const { count, withCancellation, untimed = false } of cases) {
     const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
     const emit = frame => source().onmessage({ data: stringify(frame) })
     const head = turn('head', 'inProgress', [ask])
@@ -890,28 +892,86 @@ test('长轮次逐条接收工具结果时只转换新增条目', async t => {
       await emit({ type: 'change', turn: { id: head.id }, items: [{
         type: 'dynamicToolCall', id: `tool-${index}`, status: 'completed', tool: 'test-tool',
         arguments: { auditToolOrdinal: index }, output: `output-${index}`,
-        ...(withCancellation && !trailing && { completedAtMs: 100_030 + index }),
+        ...(withCancellation && !untimed && { completedAtMs: 100_030 + index }),
       }] })
     }
     const current = events.getSnapshot()
-    assert.equal(current.change.kind, trailing ? 'replace' : 'append')
+    assert.equal(current.change.kind, 'append')
     assert.equal(initial.entries.at(-1).event.type, withCancellation ? 'tool/result' : 'user/message')
-    if (trailing) {
-      assert.equal(current.entries.at(-1).event.data.message.id, 'codex:cancelled:cancelled')
-    } else {
-      assert.deepEqual(current.change.entries.map(entry => entry.event.type), ['tool/call', 'tool/result'])
-      assert.strictEqual(current.entries[initial.entries.length - 1], initial.entries.at(-1))
-    }
+    assert.deepEqual(current.change.entries.map(entry => entry.event.type), ['tool/call', 'tool/result'])
+    assert.strictEqual(current.entries[initial.entries.length - 1], initial.entries.at(-1))
     assert.equal(current.entries.length, initial.entries.length + count * 2)
     assert.strictEqual(current.entries[0], initial.entries[0])
-    assert.equal(current.entries.at(trailing ? -3 : -1).event.data.message.content[0].text, `output-${count - 1}`)
-    measurements.push({ count, withCancellation, trailing, projected, compared })
+    assert.equal(current.entries.at(-1).event.data.message.content[0].text, `output-${count - 1}`)
+    measurements.push({ count, withCancellation, untimed, projected, compared })
   }
   t.diagnostic(JSON.stringify(measurements))
-  for (const { count, trailing, projected, compared } of measurements) {
+  for (const { count, projected, compared } of measurements) {
     assert.equal(projected, count, '原生工具参数只在首次转换该条目时序列化')
-    if (trailing) assert.ok(compared <= count * 4, '补录移位只需要比较受影响的事件')
-    else assert.equal(compared, 0, '纯追加不需要序列化历史事件来比较内容')
+    assert.equal(compared, 0, '纯追加不需要序列化历史事件来比较内容')
+  }
+})
+
+test('取消补录后的无时间戳条目增量进入实际 DSH 组装器', async t => {
+  const root = '@deepseek-ai/dsh-client-ui-conversation/src/client/conversation'
+  const assembly = fileURLToPath(import.meta.resolve(`${root}/assembly.ts`))
+  const assembler = fileURLToPath(import.meta.resolve(`${root}/assembler.ts`))
+  // 加载依赖包的原生组装器和绑定，复用测试的快照 Store，无需启动浏览器。
+  const { outputFiles } = await build({
+    stdin: { contents: `export { UiConversation } from ${JSON.stringify(assembly)};
+      export { ConversationNodeAssembler } from ${JSON.stringify(assembler)};
+      export { Context } from '@deepseek-ai/cordis'`, resolveDir: process.cwd() },
+    bundle: true, write: false, format: 'esm', platform: 'node',
+    plugins: [{ name: 'snapshot-store', setup(builder) {
+      builder.onResolve({ filter: /^@deepseek-ai\/dsh-client-store$/ }, () => ({ path: storeModule, external: true }))
+    } }],
+  })
+  const { Context, UiConversation, ConversationNodeAssembler } = await import(
+    `data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString('base64')}`)
+  const source = mockTransport(t)
+  const { replaceWindow, append } = ConversationNodeAssembler.prototype
+  let replayed = 0
+  let appended = 0
+  t.mock.method(ConversationNodeAssembler.prototype, 'replaceWindow', function(entries, hasMore) {
+    replayed += entries.length
+    return replaceWindow.call(this, entries, hasMore)
+  })
+  t.mock.method(ConversationNodeAssembler.prototype, 'append', function(entry) {
+    appended++
+    return append.call(this, entry)
+  })
+
+  const measurements = []
+  for (const timed of [false, true]) {
+    for (const count of [100, 200, 400]) {
+      const ctx = new Context()
+      const sessionId = 'thread'
+      const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: sessionId })
+      const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+      const head = turn('current', 'inProgress', [ask])
+      const cancelled = { turnId: head.id, id: 'cancelled', name: 'exec', input: 'pwd', output: 'aborted by user', completedAtMs: 100_020 }
+      await emit({ type: 'snapshot', page: { data: [head] }, mode: 'live' })
+      await emit({ type: 'rollout-facts', cancelledToolCalls: [cancelled] })
+      const initial = events.getSnapshot().entries
+      const owner = { ctx, sessionId, eventSource: events }
+      const retained = createSnapshotStore({ retainedFacets: { conversation: 1 } })
+      t.after(() => retained.set({}))
+      const conversation = new UiConversation(ctx, { binding: () => owner, retainInfo: () => retained })
+      const binding = conversation.binding(sessionId)
+      assert.equal(binding.openTurn.getSnapshot(), initial[0].event.data.turn)
+      replayed = 0
+      appended = 0
+      for (let index = 0; index < count; index++) {
+        await emit({ type: 'change', turn: { id: head.id }, items: [{ id: `tool-${index}`, type: 'dynamicToolCall',
+          status: 'completed', output: `${index}`, ...(timed && { completedAtMs: 100_030 + index }) }] })
+      }
+      measurements.push({ timed, count, replayed, appended })
+    }
+  }
+  t.diagnostic(JSON.stringify(measurements))
+  for (const { timed, count, replayed, appended } of measurements) {
+    assert.equal(replayed, 0, `${count} 条工具结果（时间戳 ${timed}）无需重放已加载窗口`)
+    assert.equal(appended, count * 2)
   }
 })
 
@@ -933,13 +993,19 @@ test('取消补录随条目时间移动，并在同 ID 的原生命令到达时�
   await emit({ type: 'snapshot', page: { data: [turn(turnId, 'inProgress', [ask, anchor])] }, mode: 'live' })
   await emit({ type: 'rollout-facts', cancelledToolCalls: [trailing, cancelled, unchanged] })
   assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'codex:cancelled:early', 'anchor', 'codex:cancelled:late'])
-  const [, early, anchored] = results()
+  const [, early, anchored, late] = results()
 
   await change(untimed)
-  assert.equal(snapshot().change.kind, 'replace')
-  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'codex:cancelled:early', 'anchor', 'untimed', 'codex:cancelled:late'])
+  assert.equal(snapshot().change.kind, 'append')
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'codex:cancelled:early', 'anchor', 'codex:cancelled:late', 'untimed'])
   assert.strictEqual(results()[1], early)
   assert.strictEqual(results()[2], anchored)
+  assert.strictEqual(results()[3], late)
+  const first = snapshot().entries[0].event
+  assert.deepEqual(snapshot().entries, projectCodexTurns([turn(turnId, 'inProgress', [ask, anchor, untimed])], {
+    firstSeq: first.seq, beforeTurn: first.data.turn + 1,
+    cancelledToolCalls: new Map([[turnId, [trailing, cancelled, unchanged]]]),
+  }))
 
   const command = { id: cancelled.id, type: 'commandExecution', command: 'pwd', status: 'inProgress', aggregatedOutput: '/workspace' }
   await change(command)
