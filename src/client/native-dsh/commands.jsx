@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import {
-  IconCodeOutlineRegular, IconEditOutlineRegular, IconFlatListOutlineRegular, IconGoalOutlineRegular,
+  IconCodeOutlineRegular, IconDownloadOutlineRegular, IconEditOutlineRegular, IconFlatListOutlineRegular, IconGoalOutlineRegular,
   IconInfoOutlineRegular, IconPlanOutlineRegular, IconSearchOutlineRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useSyncExternalStore } from 'react'
@@ -19,6 +19,9 @@ const copy = {
     review: '审查改动', 'review.description': '在当前会话中发起代码审查',
     plan: '计划模式', 'plan.description': '查看并设置后续轮次的协作模式',
     ps: '后台终端', 'ps.description': '列出当前会话的后台终端',
+    export: '导出会话', 'export.description': '将已保存的会话导出为 Markdown',
+    'export.copy': '复制 Markdown', 'export.download': '下载 Markdown', 'export.copied': '已复制 Markdown。',
+    'export.copyFailed': '无法写入剪贴板，可以下载 Markdown。',
     rename: '重命名', 'rename.description': '重命名当前会话',
     close: '关闭', loading: '正在读取…', model: '模型', effort: '推理强度', session: '会话 ID', cwd: '工作目录',
     context: '上下文占用', used: '已使用 token', budget: 'token 预算', noGoal: '此会话没有目标。',
@@ -53,6 +56,9 @@ const copy = {
     review: 'Review changes', 'review.description': 'Start a code review in the current session',
     plan: 'Plan mode', 'plan.description': 'View and set the collaboration mode for future turns',
     ps: 'Background terminals', 'ps.description': 'List background terminals for the current session',
+    export: 'Export session', 'export.description': 'Export the saved conversation as Markdown',
+    'export.copy': 'Copy Markdown', 'export.download': 'Download Markdown', 'export.copied': 'Markdown copied.',
+    'export.copyFailed': 'Could not write to the clipboard. Download the Markdown instead.',
     rename: 'Rename', 'rename.description': 'Rename the current session',
     close: 'Close', loading: 'Loading…', model: 'Model', effort: 'Reasoning effort', session: 'Session ID', cwd: 'Working directory',
     context: 'Context usage', used: 'Tokens used', budget: 'Token budget', noGoal: 'This session has no goal.',
@@ -133,6 +139,7 @@ export function installCommands(ctx) {
       { name: 'review', icon: IconSearchOutlineRegular },
       { name: 'plan', icon: IconPlanOutlineRegular },
       { name: 'ps', icon: IconCodeOutlineRegular },
+      { name: 'export', icon: IconDownloadOutlineRegular },
       {
         name: 'rename', icon: IconEditOutlineRegular,
         available: session => available(session) && Boolean(rename()),
@@ -148,6 +155,16 @@ export function installCommands(ctx) {
         ui: { kind: 'action', run },
       }))
     }
+    scope.inject(['contextMenus'], menu => {
+      menu.effect(() => menu.contextMenus.register({
+        id: 'codex.export', target: 'sessionHeader', order: 100,
+        observe: () => [menu.locale],
+        resolve: ({ sessionId }) => controlsFor(sessionId) ? [{
+          id: 'export', label: t('export'),
+          run: () => { controlsFor(sessionId)?.commandRequest.set({ command: 'export' }) },
+        }] : [],
+      }))
+    })
     scope.slots.inject(overlay, () => scope.slots.register({
       name: overlay, id: 'codex-command-details', order: 30, locale,
       inject: sessionId => ({ controls: controlsFor(sessionId) }),

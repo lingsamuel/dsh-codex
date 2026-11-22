@@ -3,6 +3,7 @@ import { createHistoryRoutes } from './history.mjs'
 import { readCodex } from './app-server.mjs'
 import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs'
 import { createFileReferenceRoute } from './file-references.mjs'
+import { createSessionExportRoute } from './session-export.mjs'
 
 export const name = 'dsh-chatgpt'
 export const inject = ['connection', 'loader']
@@ -24,6 +25,13 @@ export async function apply(ctx) {
   for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory)) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
+  const [{ formatCodexMarkdown }, { formatSessionMarkdown }] = await Promise.all([
+    import('../../dist/session-markdown.mjs'),
+    ctx.loader.import('@deepseek-ai/dsh-session-log-export'),
+  ])
+  const exportSession = createSessionExportRoute(process.env.DSH_CHATGPT_SOCKET, owner.signal,
+    (thread, turns) => formatCodexMarkdown(thread, turns, formatSessionMarkdown))
+  ctx.effect(() => ctx.connection.fetch.register(exportSession))
   const { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_MAX_RESULTS, DEFAULT_FILE_SEARCH_MAX_ENTRIES,
     DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } = await import('../../dist/file-reference-search.mjs')
   const searchConfig = { maxResults: DEFAULT_FILE_SEARCH_MAX_RESULTS, maxEntries: DEFAULT_FILE_SEARCH_MAX_ENTRIES,

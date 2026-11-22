@@ -10,6 +10,7 @@
   "files": [
     "dist/client.js",
     "dist/file-reference-search.mjs",
+    "dist/session-markdown.mjs",
     "manual/",
     "profile/cordis.patch.yml",
     "src/host/",

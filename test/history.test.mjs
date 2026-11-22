@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
@@ -64,6 +65,39 @@ function postCommand(get, action, fields) {
     body: JSON.stringify({ threadId: 'main', action, ...fields }),
   })
 }
+
+test('Markdown 导出用原生分页读取归档会话的全部已保存内容', async t => {
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'archive', name: '仓库整理', archived: true, status: { type: 'notLoaded' } } } }),
+    'thread/turns/list': ({ cursor }) => ({ result: cursor ? {
+      data: [{ id: 'older', status: 'completed', items: [
+        { type: 'userMessage', id: 'question', content: [{ type: 'text', text: '最早的问题' }, { type: 'image', url: 'data:image/png;base64,AA==' }] },
+        { type: 'commandExecution', id: 'command', command: 'git status', status: 'completed', aggregatedOutput: 'working tree clean' },
+      ] }], nextCursor: null,
+    } : {
+      data: [{ id: 'newer', status: 'inProgress', items: [{ type: 'agentMessage', id: 'answer', text: '最近的回复\n\n```js\nconst x = 1\n```' }] }],
+      nextCursor: 'older-page',
+    } }),
+  })
+  const { createSessionExportRoute } = await import('../src/host/session-export.mjs')
+  const { formatCodexMarkdown } = await import('../src/host/session-markdown.mjs')
+  const requireDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
+  const { formatSessionMarkdown } = await import(requireDsh.resolve('@deepseek-ai/dsh-session-log-export'))
+  const route = createSessionExportRoute(socketPath, undefined,
+    (thread, turns) => formatCodexMarkdown(thread, turns, formatSessionMarkdown))
+  const response = await route.fetch(new Request('http://localhost/api/codex/session-export?threadId=archive'))
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'text/markdown; charset=utf-8')
+  const markdown = await response.text()
+  assert.match(markdown, /^# 仓库整理\n/)
+  assert.match(markdown, /最早的问题[\s\S]+图片附件[\s\S]+git status[\s\S]+working tree clean[\s\S]+最近的回复/)
+  assert.match(markdown, /```js\nconst x = 1\n```/)
+  assert.doesNotMatch(markdown, /base64/)
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
+    ['thread/read', 'thread/turns/list', 'thread/turns/list'])
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/turns/list').map(({ params }) => params.cursor),
+    [undefined, 'older-page'])
+})
 
 test('网页命令仅在冷会话队列为空时恢复并压缩上下文', async t => {
   const thread = { id: 'main', status: { type: 'notLoaded' } }
