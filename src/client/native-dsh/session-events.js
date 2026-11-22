@@ -34,7 +34,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     sessionId: thread.id,
     historyMode: thread.historyMode,
     archived: Boolean(thread.archived),
-    canAcceptDirectInput: thread.canAcceptDirectInput,
+    canAcceptDirectInput: address ? address.mode === 'continuable' : thread.canAcceptDirectInput,
     pendingSubmissions: [],
     running: false,
     subagent: address ? { address } : null,
@@ -147,7 +147,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (mode !== undefined) current.live.mode = mode
       if (status !== undefined) current.live.status = status
       if (historyMode !== undefined) current.historyMode = historyMode
-      if (canAcceptDirectInput !== undefined) current.canAcceptDirectInput = canAcceptDirectInput
+      if (canAcceptDirectInput !== undefined) {
+        const nextAddress = subagentAddress(thread, canAcceptDirectInput)
+        current.canAcceptDirectInput = nextAddress ? nextAddress.mode === 'continuable' : canAcceptDirectInput
+        if (nextAddress && current.subagent.address.mode !== nextAddress.mode) current.subagent.address = nextAddress
+      }
       if (archived !== undefined) current.archived = Boolean(archived)
       current.live.lastTurnStatus = lastTurn?.status
       current.live.activeTurnId = lastTurn?.status === 'inProgress' ? lastTurn.id : undefined
@@ -534,7 +538,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
 
   function receive(frame, lifetime) {
     return enqueue(async () => {
-      if (frame.type === 'snapshot') return receiveSnapshot(frame, lifetime)
+      if (frame.type === 'snapshot') return receiveSnapshot({ ...frame, canAcceptDirectInput: frame.canAcceptDirectInput ?? null }, lifetime)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
       if (frame.type === 'questions' && watchingInteractions) {
         liveQuestions = frame.requests
@@ -780,10 +784,18 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   const visibleCatalog = catalog?.store
+  let catalogCapability = thread.canAcceptDirectInput ?? null
   let watch
   function syncWatch() {
     if (signal.aborted) return
     const snapshot = visibleCatalog?.getSnapshot()
+    const child = snapshot?.childThreads?.[thread.id]
+    const capability = child?.canAcceptDirectInput ?? null
+    if (child && capability !== catalogCapability) {
+      // 目录收到加载或卸载通知后会重新读取原生摘要，当前视图复用同一份能力值。
+      catalogCapability = capability
+      publishState({ canAcceptDirectInput: capability })
+    }
     const connected = !retention || Boolean(retention.getSnapshot().connectionCount)
     const selected = connected && (!visibleCatalog || snapshot?.selected?.id === thread.id)
     if (Boolean(watch) === connected && selected === watchingInteractions) return

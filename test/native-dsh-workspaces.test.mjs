@@ -103,18 +103,24 @@ test('子代理可供原生子会话树读取，同时保留父工作区的根�
   const root = { id: 'root', cwd: '/repo' }
   const child = {
     id: 'child', parentThreadId: root.id, cwd: '/repo', createdAt: 100, agentNickname: 'Scout', status: { type: 'active' },
+    canAcceptDirectInput: true,
     source: { subAgent: { thread_spawn: { parent_thread_id: root.id, agent_path: '/root/check' } } },
   }
   const grandchild = {
     id: 'grandchild', cwd: '/repo', createdAt: 110, agentRole: 'Reviewer',
+    canAcceptDirectInput: false,
     source: { subAgent: { thread_spawn: { parent_thread_id: child.id } } },
   }
+  const legacy = { id: 'legacy', name: 'Legacy', parentThreadId: child.id, createdAt: 120 }
   const { sessions, workspaces } = projectCatalog({ projects: [], workspacePaths: {}, threads: [root], selected: grandchild,
-    childThreads: { child, grandchild },
-    childCatalogs: { root: { state: 'idle', ids: [child.id] }, child: { state: 'idle', ids: [grandchild.id] } },
+    childThreads: { child, grandchild, legacy },
+    childCatalogs: { root: { state: 'idle', ids: [child.id] }, child: { state: 'idle', ids: [grandchild.id, legacy.id] } },
   })
-  assert.deepEqual(sessions.projectionsBySession.root.values.subagentCatalog, [{ id: 'child', label: '/root/check', createdAt: 100_000, mode: 'unknown' }])
-  assert.deepEqual(sessions.projectionsBySession.child.values.subagentCatalog, [{ id: 'grandchild', label: 'Reviewer', createdAt: 110_000, mode: 'unknown' }])
+  assert.deepEqual(sessions.projectionsBySession.root.values.subagentCatalog, [{ id: 'child', label: '/root/check', createdAt: 100_000, mode: 'continuable' }])
+  assert.deepEqual(sessions.projectionsBySession.child.values.subagentCatalog, [
+    { id: 'grandchild', label: 'Reviewer', createdAt: 110_000, mode: 'unknown' },
+    { id: 'legacy', label: 'Legacy', createdAt: 120_000, mode: 'continuable' },
+  ])
   assert.equal(sessions.byId.grandchild.origin, 'subagent')
   assert.equal(sessions.byId[sessions.byId.grandchild.parentId].id, child.id)
   assert.equal(sessions.byId.child.origin, 'subagent')

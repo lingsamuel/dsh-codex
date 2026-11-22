@@ -1,7 +1,6 @@
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
-import { commandUnavailable } from './command-action.jsx'
 import { installQueueImages } from './queue-images.jsx'
 
 const bar = 'conversation.composer.bar'
@@ -27,7 +26,7 @@ const noGoalDraft = createSnapshotStore(undefined)
 function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, composerT, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   // 发送锁定期间，原生输入栏仍按取消权限处理活动轮次的 Stop。
-  const canStop = props.useSession(state => state.running && Boolean(state.live.activeTurnId) && !commandUnavailable(state))
+  const canStop = props.useSession(state => state.running && Boolean(state.live.activeTurnId) && !composerUnavailable(state))
   const archived = props.useSession(state => state.archived)
   const plan = props.useProjection('plan', value => value?.active)
   const goal = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
@@ -72,14 +71,14 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
     }} />
 }
 
-function canUseQueue(state) {
-  return state.openState === 'open' && !state.subagent && state.canAcceptDirectInput !== false
-    && ['idle', 'notLoaded'].includes(state.live.status?.type)
+function composerUnavailable({ removed, canAcceptDirectInput, openState }) {
+  return removed || canAcceptDirectInput === false ? 'readonly'
+    : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : undefined
 }
 
 function ContinueQueue({ useSession, useProjection, startQueue, t }) {
   const archived = useSession(state => state.archived)
-  const ready = useSession(canUseQueue)
+  const ready = useSession(state => !composerUnavailable(state) && ['idle', 'notLoaded'].includes(state.live.status?.type))
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
   const [starting, setStarting] = useState(false)
   if (!ready || !queued) return null
@@ -116,10 +115,9 @@ export function installComposer(ctx, catalog) {
           binding.ctx.effect(() => {
             const { sessionId, session } = binding
             const sync = () => {
-              const { subagent, canAcceptDirectInput, openState, planChanging } = session.getSnapshot()
+              const state = session.getSnapshot()
               // 模式写入确认前锁定原生发送入口，避免同一份草稿被送到错误的模式。
-              const reason = subagent || canAcceptDirectInput === false ? 'readonly'
-                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : planChanging ? 'changingPlan' : undefined
+              const reason = composerUnavailable(state) ?? (state.planChanging ? 'changingPlan' : undefined)
               blocks.set(sessionId, reason ? { reason: t(reason) } : undefined)
             }
             sync()

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
+import { transformSync } from 'esbuild'
 import { projectCodexTurns } from '../src/client/native-chat/events.js'
 import { fileAttachmentInput } from '../src/shared/file-attachments.js'
 
@@ -16,11 +18,19 @@ const storeModule = `data:text/javascript,${encodeURIComponent(`
 const hook = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
-    if (specifier === '@deepseek-ai/dsh-client-ui-primitives' || specifier === 'react') {
-      const url = 'data:text/javascript,export const Toast = null; export const createElement = (type, props, ...children) => ({ type, props, children })'
-      return { shortCircuit: true, url }
-    }
+    const source = {
+      '@deepseek-ai/dsh-client-ui-primitives': 'export const Button = null, InlineEditor = null, Modal = null, Toast = null',
+      react: `export const createElement = (type, props, ...children) => ({ type, props, children });
+        export const useState = value => [value, () => {}], useLayoutEffect = null, useMemo = null, useSyncExternalStore = null`,
+      'react/jsx-runtime': 'export const Fragment = Symbol(), jsx = (type, props) => ({ type, props }), jsxs = jsx',
+    }[specifier]
+    if (source) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` }
     return next(specifier, context)
+  },
+  load(url, context, next) {
+    if (!url.endsWith('.jsx')) return next(url, context)
+    const { code } = transformSync(readFileSync(new URL(url), 'utf8'), { loader: 'jsx', jsx: 'automatic' })
+    return { format: 'module', shortCircuit: true, source: code }
   },
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
@@ -28,6 +38,7 @@ const { createSessionInput } = await import('../src/client/native-dsh/session-in
 const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
+const { installComposer } = await import('../src/client/native-dsh/composer.jsx')
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
 
@@ -50,6 +61,77 @@ function turn(id, status, items) {
 
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
+
+test('子会话按原生能力开启输入、插话和继续队列，保留父子地址', async t => {
+  const source = mockTransport(t)
+  const child = { id: 'child', parentThreadId: 'parent', status: { type: 'idle' },
+    source: { subAgent: { thread_spawn: { agent_path: '/root/check' } } } }
+  const store = createSnapshotStore({ selected: child, childThreads: { child } })
+  const { session } = createCodexHistory({ effect: install => t.after(install()) }, child, { store, setStatus() {} })
+  await Promise.resolve()
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const snapshot = fields => emit({ type: 'snapshot', mode: 'live', status: child.status, page: { data: [] }, ...fields })
+  const useSession = select => select(session.getSnapshot())
+  const useProjection = (key, select) => select(session.projections.faceOf(key).getSnapshot())
+  let block
+  let continueQueue
+  let starts = 0
+  const dock = { options: { id: 'queue' }, component() {}, inject() {} }
+  installComposer({
+    locale: { bind: () => key => key, subscribe: () => () => {} },
+    effect() {},
+    inject(services, install) {
+      if (services.includes('uiSession')) install({
+        conversation: { blocks: { set: (id, value) => { block = value }, forget() {} } },
+        uiSession: { provide: binding => binding.resolve({ sessionId: child.id, session,
+          ctx: { effect: activate => t.after(activate()) } }) },
+      })
+      if (services.length === 1) install({
+        slots: { inject: (name, activate) => activate(), register: (options, component) => { continueQueue = component },
+          entries: () => [dock] },
+        effect: activate => t.after(activate()), on: () => () => {},
+      })
+    },
+  })
+  const continueButton = () => continueQueue({ useSession, useProjection, t: key => key, startQueue: () => { starts++ } })
+  const queueAddress = () => dock.component({ useSession }).props.children[0].props.useSession(state => state.subagent.address)
+  const address = () => session.getSnapshot().subagent.address
+  await snapshot({})
+  await emit({ type: 'queue', submissions: [{ id: 'queued', input: [{ type: 'text', text: '待发' }] }] })
+  assert.equal(block.reason, 'readonly')
+  assert.equal(continueButton(), null)
+  assert.equal(queueAddress().mode, 'unknown')
+
+  await snapshot({ canAcceptDirectInput: true })
+  assert.equal(block, undefined)
+  assert.deepEqual(address(), { parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' })
+  assert.equal(queueAddress().mode, 'continuable')
+  await continueButton().props.onClick()
+  assert.equal(starts, 1)
+
+  await snapshot({ canAcceptDirectInput: true, status: { type: 'active' }, page: { data: [turn('child-turn', 'inProgress', [ask])] } })
+  assert.equal(session.getSnapshot().running, true)
+  assert.equal(queueAddress().mode, 'continuable')
+  assert.equal(continueButton(), null)
+
+  await snapshot({ canAcceptDirectInput: true, archived: true })
+  assert.equal(address().mode, 'continuable')
+  assert.equal(queueAddress().mode, 'unknown')
+  assert.equal(continueButton().props.children, 'unarchiveAndContinue')
+
+  await snapshot({ canAcceptDirectInput: false, archived: false })
+  assert.equal(block.reason, 'readonly')
+  assert.equal(queueAddress().mode, 'unknown')
+  assert.equal(continueButton(), null)
+
+  // 子代理在 CLI 中加载或卸载时，目录会收到原生状态和最新线程摘要。
+  store.update(state => { state.childThreads.child.canAcceptDirectInput = true })
+  assert.equal(block, undefined)
+  assert.equal(address().mode, 'continuable')
+  store.update(state => { state.childThreads.child.canAcceptDirectInput = null })
+  assert.equal(block.reason, 'readonly')
+  assert.equal(address().mode, 'unknown')
+})
 
 test('最近会话和草稿只保留缓存，视图重开时续读原生历史', async t => {
   const sources = []
@@ -995,7 +1077,7 @@ test('从活动打开的未展开子会话仍跟随原生目录更新与删除',
     })
   })
   assert.deepEqual(await catalog.resolveSubagent(child.id, lifetime.signal), {
-    childSessionId: child.id, parentSessionId: parent.id, mode: 'unknown',
+    childSessionId: child.id, parentSessionId: parent.id, mode: 'continuable',
   })
   assert.equal(catalog.store.getSnapshot().childCatalogs[parent.id], undefined)
   const emit = thread => source().onmessage({ data: JSON.stringify({ type: 'thread', id: child.id, thread }) })

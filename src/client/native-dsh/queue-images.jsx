@@ -21,7 +21,7 @@ const copy = {
 }
 
 function QueueImageEdit({ useSession, useProjection, updateQueue, notify, t }) {
-  const editable = useSession(state => !state.subagent && !state.archived && state.canAcceptDirectInput !== false)
+  const editable = useSession(state => !state.archived && state.canAcceptDirectInput !== false)
   const inbox = useProjection('inbox')
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
@@ -97,7 +97,8 @@ export function installQueueImages(ctx) {
       function Queue(props) {
         // DSH 的队列组件通过会话地址判断只读状态。此映射只传给队列组件。
         function useQueueSession(select) {
-          return props.useSession(state => select(state.archived && !state.subagent ? { ...state, subagent: readOnlyQueue } : state))
+          return props.useSession(state => select(state.archived || state.canAcceptDirectInput === false
+            ? { ...state, subagent: readOnlyQueue } : state))
         }
         const dockProps = { ...props, useSession: useQueueSession }
         return <><Component {...dockProps} /><QueueSteerDock Dock={Component} dockProps={dockProps} t={t} />

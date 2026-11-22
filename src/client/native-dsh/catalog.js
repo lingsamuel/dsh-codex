@@ -66,7 +66,7 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
     const subagentCatalog = value.ids.map(childId => {
       const thread = childThreads[childId]
       const label = subagentPath(thread) || thread.agentNickname || thread.agentRole || thread.name
-      return { id: childId, label, createdAt: unixMillis(thread.createdAt), mode: 'unknown' }
+      return { id: childId, label, createdAt: unixMillis(thread.createdAt), mode: subagentAddress(thread)?.mode ?? 'unknown' }
     })
     return [id, { state: value.state, error: value.error, values: { subagentCatalog } }]
   }))
