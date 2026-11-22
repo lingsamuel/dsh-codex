@@ -1,5 +1,6 @@
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { readThreadTurns } from './live-history.mjs'
+import { createRolloutFacts } from './rollout-facts.mjs'
 
 /** 从当前历史头倒序读取全部原生分页，导出时保留会话的加载与归档状态。 */
 export function createSessionExportRoute(socketPath, ownerSignal, renderMarkdown) {
@@ -14,11 +15,14 @@ export function createSessionExportRoute(socketPath, ownerSignal, renderMarkdown
       try {
         const markdown = await withCodexReader(socketPath, signal, async rpc => {
           const { thread } = await rpc('thread/read', { threadId })
-          const turns = await readCodexPages(cursor => readThreadTurns(rpc, {
-            threadId, sortDirection: 'desc', itemsView: 'full', limit: 25, ...(cursor && { cursor }),
-          }))
+          const [turns, facts] = await Promise.all([
+            readCodexPages(cursor => readThreadTurns(rpc, {
+              threadId, sortDirection: 'desc', itemsView: 'full', limit: 25, ...(cursor && { cursor }),
+            })),
+            createRolloutFacts(thread.path, signal, threadId)?.read(),
+          ])
           signal.throwIfAborted()
-          return renderMarkdown(thread, turns.reverse())
+          return renderMarkdown(thread, turns.reverse(), facts?.cancelledToolCalls)
         }, 90_000)
         return new Response(markdown, {
           headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store' },

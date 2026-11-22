@@ -67,30 +67,38 @@ function postCommand(get, action, fields) {
 }
 
 test('Markdown 导出用原生分页读取归档会话的全部已保存内容', async t => {
-  const { socketPath, messages } = await fakeCodex(t, {
-    'thread/read': () => ({ result: { thread: { id: 'archive', name: '仓库整理', archived: true, status: { type: 'notLoaded' } } } }),
+  let rollout
+  const { socketPath, messages, directory } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'archive', name: '仓库整理', path: rollout, archived: true, status: { type: 'notLoaded' } } } }),
     'thread/turns/list': ({ cursor }) => ({ result: cursor ? {
       data: [{ id: 'older', status: 'completed', items: [
-        { type: 'userMessage', id: 'question', content: [{ type: 'text', text: '最早的问题' }, { type: 'image', url: 'data:image/png;base64,AA==' }] },
-        { type: 'commandExecution', id: 'command', command: 'git status', status: 'completed', aggregatedOutput: 'working tree clean' },
+        { type: 'userMessage', id: 'question', startedAtMs: 1, content: [{ type: 'text', text: '最早的问题' }, { type: 'image', url: 'data:image/png;base64,AA==' }] },
+        { type: 'commandExecution', id: 'command', command: 'git status', startedAtMs: 2, status: 'completed', aggregatedOutput: 'working tree clean' },
       ] }], nextCursor: null,
     } : {
       data: [{ id: 'newer', status: 'inProgress', items: [{ type: 'agentMessage', id: 'answer', text: '最近的回复\n\n```js\nconst x = 1\n```' }] }],
       nextCursor: 'older-page',
     } }),
   })
+  rollout = join(directory, 'archive.jsonl')
+  const rows = [
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'older' } },
+    { type: 'response_item', payload: { type: 'function_call', name: 'exec_command', call_id: 'cancelled', arguments: '{"cmd":"pwd"}' } },
+    { type: 'response_item', payload: { type: 'function_call_output', call_id: 'cancelled', output: 'aborted by user' } },
+  ]
+  await writeFile(rollout, rows.map(row => JSON.stringify({ timestamp: '2026-11-23T00:00:00Z', ...row })).join('\n') + '\n')
   const { createSessionExportRoute } = await import('../src/host/session-export.mjs')
   const { formatCodexMarkdown } = await import('../src/host/session-markdown.mjs')
   const requireDsh = createRequire(import.meta.resolve('@deepseek-ai/dsh/package.json'))
   const { formatSessionMarkdown } = await import(requireDsh.resolve('@deepseek-ai/dsh-session-log-export'))
   const route = createSessionExportRoute(socketPath, undefined,
-    (thread, turns) => formatCodexMarkdown(thread, turns, formatSessionMarkdown))
+    (thread, turns, cancelled) => formatCodexMarkdown(thread, turns, formatSessionMarkdown, cancelled))
   const response = await route.fetch(new Request('http://localhost/api/codex/session-export?threadId=archive'))
   assert.equal(response.status, 200)
   assert.equal(response.headers.get('content-type'), 'text/markdown; charset=utf-8')
   const markdown = await response.text()
   assert.match(markdown, /^# 仓库整理\n/)
-  assert.match(markdown, /最早的问题[\s\S]+图片附件[\s\S]+git status[\s\S]+working tree clean[\s\S]+最近的回复/)
+  assert.match(markdown, /最早的问题[\s\S]+图片附件[\s\S]+git status[\s\S]+working tree clean[\s\S]+aborted by user[\s\S]+最近的回复/)
   assert.match(markdown, /```js\nconst x = 1\n```/)
   assert.doesNotMatch(markdown, /base64/)
   assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),

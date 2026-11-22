@@ -30,7 +30,7 @@ export async function apply(ctx) {
     ctx.loader.import('@deepseek-ai/dsh-session-log-export'),
   ])
   const exportSession = createSessionExportRoute(process.env.DSH_CHATGPT_SOCKET, owner.signal,
-    (thread, turns) => formatCodexMarkdown(thread, turns, formatSessionMarkdown))
+    (thread, turns, cancelled) => formatCodexMarkdown(thread, turns, formatSessionMarkdown, cancelled))
   ctx.effect(() => ctx.connection.fetch.register(exportSession))
   const { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_MAX_RESULTS, DEFAULT_FILE_SEARCH_MAX_ENTRIES,
     DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES } = await import('../../dist/file-reference-search.mjs')
