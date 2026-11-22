@@ -9,13 +9,13 @@ const locale = 'codex.composer'
 const copy = {
   zh: { readonly: '此会话无法直接发送消息', unarchiveAndSend: '取消归档并发送', unarchiveAndContinue: '取消归档并继续队列',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
-    select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列',
+    select: '选择一个 Codex 会话浏览历史', commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
     viewQueue: '查看队列', unarchiveAndView: '取消归档并查看', queueEmpty: '没有待发消息。',
     viewQueueDescription: '查看队列需要先取消归档。待发消息继续由你手动启动。', cancel: '取消', close: '关闭',
     imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
-    select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue',
+    select: 'Select a Codex session to browse its history', commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
     viewQueue: 'View queue', unarchiveAndView: 'Unarchive and view', queueEmpty: 'No queued messages.',
     viewQueueDescription: 'Viewing the queue unarchives this session. You can start pending messages manually.', cancel: 'Cancel', close: 'Close',
     imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
@@ -29,7 +29,7 @@ function CatalogStatus({ catalog, t }) {
   return <p role="status">{t(busy ? 'loading' : 'select')}</p>
 }
 
-function ComposerBar({ Native, commandsLabel, unarchiveLabel, ...props }) {
+function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
   const archived = props.useSession(state => state.archived)
@@ -60,10 +60,14 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, ...props }) {
       button.removeEventListener('keydown', navigate)
     }
   }, [blocked, commandsLabel, disabled, keyboard, toggleCommandMenu])
-  return <Native {...props} stop={!blocked && knownTurn ? props.stop : undefined}
+  const withSkillHint = text => `${text}, ${skillHint}`
+  const placeholder = !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
+    ? withSkillHint(props.placeholder) : props.placeholder
+  return <Native {...props} placeholder={placeholder} stop={!blocked && knownTurn ? props.stop : undefined}
     t={(key, ...args) => {
       if (key === 'input.commands' && toggleCommandMenu) return commandsLabel
       if (key === 'input.send' && archived) return unarchiveLabel
+      if (key === 'placeholder.default') return withSkillHint(t(key, ...args))
       return t(key, ...args)
     }} />
 }
@@ -213,7 +217,8 @@ export function installComposer(ctx, catalog) {
         } }
       }
       function Composer(props) {
-        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')} />
+        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')}
+          skillHint={t('skillHint')} />
       }
       entry.inject = injectComposer
       entry.component = Composer
