@@ -25,7 +25,11 @@ try {
 const executable = process.env.DSH_CHATGPT_DSH_BIN || 'dsh'
 const child = spawn(executable, ['--profile', 'codex', ...process.argv.slice(2)], {
   cwd: root,
-  env: { ...process.env, DSH_HOME: home },
+  env: {
+    ...process.env,
+    DSH_HOME: home,
+    DSH_CHATGPT_CACHE_DIR: process.env.DSH_CHATGPT_CACHE_DIR ?? join(root, '.runtime', 'cache'),
+  },
   stdio: 'inherit',
   // POSIX 终端会向前台进程组广播 Ctrl+C，由启动脚本向 DSH 转发一次。
   detached: process.platform !== 'win32',

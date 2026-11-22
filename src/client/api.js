@@ -8,21 +8,6 @@ export async function readPage(collection, parameters, signal) {
   return result
 }
 
-export function mergePages(previous, next, { prepend = false } = {}) {
-  const entries = prepend ? [...next, ...previous] : [...previous, ...next]
-  const unique = new Map()
-  for (const entry of entries) {
-    if (!unique.has(entry.id)) unique.set(entry.id, entry)
-  }
-  return [...unique.values()]
-}
-
-export function formatTime(seconds) {
-  return Number.isFinite(seconds)
-    ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(seconds * 1000)
-    : null
-}
-
 export function directoryTitle(directory) {
   return directory.split(/[/\\]/).filter(Boolean).at(-1) || directory
 }

@@ -45,7 +45,7 @@ async function fakeCodex(t, methods) {
   const routes = createHistoryRoutes(socketPath)
   const get = path => routes.find(route => path.split('?')[0] === route.path)
     .fetch(new Request(`http://localhost${path}`))
-  return { get, messages, clientClosed }
+  return { get, messages, clientClosed, socketPath, directory }
 }
 
 test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t => {
@@ -101,4 +101,95 @@ test('已取消的读取不会打开 socket 或留下未捕获错误', async () 
     readCodex('thread/list', {}, socketPath, AbortSignal.abort()),
     { name: 'AbortError' },
   )
+})
+
+test('先发布索引项目，完整清单共享一次扫描，后台补齐旧目录', async t => {
+  const indexed = { id: 'indexed', cwd: '/projects/new' }
+  const legacy = { id: 'legacy', cwd: '/projects/old' }
+  const { get, messages } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': params => {
+      if (params.useStateDbOnly) return { result: { data: [indexed], nextCursor: null } }
+      return { result: params.cursor
+        ? { data: [indexed, legacy], nextCursor: null }
+        : { data: [indexed], nextCursor: 'page-two' } }
+    },
+  })
+  const index = await (await get('/api/codex/catalog')).json()
+  assert.deepEqual(index, { projects: [], threads: [indexed], workspacePaths: {}, complete: false })
+  const both = await Promise.all([get('/api/codex/catalog?complete=1'), get('/api/codex/catalog?complete=1')])
+  const expected = { projects: [], threads: [indexed, legacy], workspacePaths: {}, complete: true }
+  assert.deepEqual(await both[0].json(), expected)
+  assert.deepEqual(await both[1].json(), expected)
+  assert.deepEqual(await (await get('/api/codex/catalog')).json(), expected)
+  assert.deepEqual(messages.filter(m => m.method === 'thread/list').map(m => m.params.cursor), [
+    undefined, undefined, 'page-two',
+  ])
+  assert.equal(messages.filter(m => m.method === 'initialize').length, 2)
+  assert.equal(messages.some(m => m.method.startsWith('thread/turns')), false)
+})
+
+test('Host 重启可以先返回磁盘清单，随后重新从 Codex 确认', async t => {
+  let thread = { id: 'original', name: '旧标题', cwd: '/projects/example', status: { type: 'active' } }
+  const { socketPath, directory, messages } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': () => ({ result: { data: [thread], nextCursor: null } }),
+  })
+  function newHost() {
+    const route = createHistoryRoutes(socketPath, undefined, join(directory, 'cache'))
+      .find(route => route.path === '/api/codex/catalog')
+    return async query => (await route.fetch(new Request(`http://localhost${route.path}${query}`))).json()
+  }
+
+  const first = await newHost()('?complete=1')
+  assert.equal(first.complete, true)
+  assert.equal(messages.filter(m => m.method === 'thread/list').length, 1)
+  thread = { ...thread, name: 'Codex 的新标题' }
+
+  const restarted = newHost()
+  const warm = await restarted('')
+  assert.equal(warm.complete, false)
+  assert.deepEqual(warm.threads, [{ id: 'original', name: '旧标题', cwd: '/projects/example' }])
+  assert.equal(messages.filter(m => m.method === 'thread/list').length, 1)
+  const refreshed = await restarted('?complete=1')
+  assert.equal(refreshed.threads[0].name, 'Codex 的新标题')
+  assert.equal(messages.filter(m => m.method === 'thread/list').length, 2)
+})
+
+test('Codex 状态库不可用时仍可从原生历史读取工作区', async t => {
+  const legacy = { id: 'legacy', cwd: '/projects/old' }
+  const { get } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': ({ useStateDbOnly }) => (useStateDbOnly
+      ? { error: { code: -32603, message: 'state database unavailable' } }
+      : { result: { data: [legacy], nextCursor: null } }),
+  })
+  const response = await get('/api/codex/catalog')
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { projects: [], threads: [legacy], workspacePaths: {}, complete: true })
+})
+
+test('缓存过期后的完整刷新失败，不会让已显示的旧工作区退回索引子集', async t => {
+  t.mock.timers.enable({ apis: ['Date'] })
+  let offline = false
+  const indexed = { id: 'indexed', cwd: '/projects/new' }
+  const legacy = { id: 'legacy', cwd: '/projects/old' }
+  const { get } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': ({ useStateDbOnly }) => {
+      if (useStateDbOnly) return { result: { data: [indexed], nextCursor: null } }
+      return offline
+        ? { error: { code: -32603, message: 'history unavailable' } }
+        : { result: { data: [indexed, legacy], nextCursor: null } }
+    },
+  })
+  await get('/api/codex/catalog?complete=1')
+  offline = true
+  t.mock.timers.tick(60_001)
+
+  const cached = await (await get('/api/codex/catalog')).json()
+  assert.deepEqual(cached.threads, [indexed, legacy])
+  assert.equal(cached.complete, false)
+  assert.equal((await get('/api/codex/catalog?complete=1')).status, 502)
+  assert.deepEqual((await (await get('/api/codex/catalog')).json()).threads, [indexed, legacy])
 })

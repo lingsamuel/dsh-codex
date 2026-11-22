@@ -1,48 +1,50 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { mergePages, readPage } from './api.js'
+import { readPage } from './api.js'
 
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
 export function createHistoryCatalog(signal) {
-  const store = createSnapshotStore({ projects: [], threads: [], selected: null, nextCursor: null, busy: true, error: '' })
+  const store = createSnapshotStore({
+    projects: [],
+    threads: [],
+    workspacePaths: {},
+    selected: null,
+    busy: true,
+    error: '',
+  })
+  let refreshing = false
 
-  async function loadProjects() {
-    let cursor
-    do {
-      const page = await readPage('projects', cursor ? { cursor } : {}, signal)
-      store.update(state => { state.projects = mergePages(state.projects, page.data) })
-      cursor = page.nextCursor
-    } while (cursor)
-  }
-
-  async function loadThreads(cursor) {
+  function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
-      state.busy = true
+      state.projects = projects
+      state.threads = threads
+      state.workspacePaths = workspacePaths
+      state.selected = threads.find(thread => thread.id === state.selected?.id) ?? state.selected
+      state.busy = false
       state.error = ''
     })
+  }
+
+  async function refresh() {
+    if (refreshing || signal.aborted) return
+    refreshing = true
     try {
-      const page = await readPage('threads', cursor ? { cursor } : {}, signal)
-      store.update(state => {
-        state.threads = mergePages(cursor ? state.threads : [], page.data)
-        state.nextCursor = page.nextCursor
-      })
+      // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
+      const index = await readPage('catalog', {}, signal)
+      publish(index)
+      if (!index.complete) publish(await readPage('catalog', { complete: 1 }, signal))
     } catch (error) {
       if (!signal.aborted) store.update(state => { state.error = error.message })
     } finally {
+      refreshing = false
       if (!signal.aborted) store.update(state => { state.busy = false })
     }
   }
 
-  void loadThreads()
-  void loadProjects().catch(error => {
-    if (!signal.aborted) store.update(state => { state.error = error.message })
-  })
+  void refresh()
+  window.addEventListener('focus', refresh, { signal })
 
   return {
     store,
-    loadMore() {
-      const { nextCursor, busy } = store.getSnapshot()
-      if (!busy && nextCursor) void loadThreads(nextCursor)
-    },
     select(thread) {
       store.update(state => { state.selected = thread })
     },

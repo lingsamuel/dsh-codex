@@ -48,5 +48,23 @@
       name: '@deepseek-ai/dsh-client-shortcuts'
     - id: ui-layout
       name: '@deepseek-ai/dsh-client-ui-layout'
+    - id: ui-session
+      name: '@deepseek-ai/dsh-client-ui-session'
+    - id: ui-workspace
+      name: '@deepseek-ai/dsh-client-ui-workspace'
+    - id: ui-sidebar
+      name: '@deepseek-ai/dsh-client-ui-sidebar'
+    - id: resources
+      name: '@deepseek-ai/dsh-client-resources'
+    - id: ui-sidebar-right
+      name: '@deepseek-ai/dsh-client-ui-sidebar-right'
+    - id: ui-conversation
+      name: '@deepseek-ai/dsh-client-ui-conversation'
+    - id: ui-chat
+      name: '@deepseek-ai/dsh-client-ui-chat'
+    - id: ui-attachment
+      name: '@deepseek-ai/dsh-client-ui-attachment'
+    - id: ui-tool
+      name: '@deepseek-ai/dsh-client-ui-tool'
     - id: dsh-chatgpt
       name: dsh-chatgpt

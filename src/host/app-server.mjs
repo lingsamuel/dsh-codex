@@ -13,7 +13,7 @@ export class CodexRpcError extends Error {
   }
 }
 
-async function discoverSocket(signal) {
+export async function findCodexSocket(signal) {
   const executable = process.env.DSH_CHATGPT_CODEX_BIN || 'codex'
   const { stdout } = await run(executable, ['app-server', 'daemon', 'version'], { signal })
   const daemon = JSON.parse(stdout)
@@ -23,11 +23,11 @@ async function discoverSocket(signal) {
   return daemon.socketPath
 }
 
-/** 在 WSL App Server 的既有入口执行一次只读查询，结束后释放连接。 */
-export async function readCodex(method, params, socketPath, requestSignal) {
-  const timeout = AbortSignal.timeout(15_000)
+/** 同一批只读请求共用一次握手，批次完成或取消后释放连接。 */
+export async function withCodexReader(socketPath, requestSignal, read, timeoutMs = 15_000) {
+  const timeout = AbortSignal.timeout(timeoutMs)
   const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout
-  const endpoint = socketPath || await discoverSocket(signal)
+  const endpoint = socketPath || await findCodexSocket(signal)
   signal.throwIfAborted()
   const ws = new WebSocket('ws://localhost/', {
     createConnection: () => createConnection({ path: endpoint }),
@@ -59,11 +59,15 @@ export async function readCodex(method, params, socketPath, requestSignal) {
       capabilities: { experimentalApi: true },
     })
     ws.send(JSON.stringify({ method: 'initialized' }))
-    return await request(method, params)
+    return await read(request)
   } finally {
     // 连接在握手期间取消也可能异步产生 error，此时请求已经结束。
     ws.once('error', () => {})
     ws.terminate()
     await messages?.return()
   }
+}
+
+export function readCodex(method, params, socketPath, signal) {
+  return withCodexReader(socketPath, signal, request => request(method, params))
 }
