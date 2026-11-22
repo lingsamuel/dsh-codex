@@ -1,6 +1,8 @@
 <h1><img src="assets/logo.svg" alt="Codex on DSH" width="282"></h1>
 
-Codex on DSH 在独立的 DeepSeek Harness `codex` Profile 中接入本机 Codex。你可以通过 DSH 的原生工作区和聊天界面浏览项目、查看历史，或接着处理 CLI 中的任务。
+> **纯粹的 Codex 展示层。会话数据只来自本机 Codex。**
+
+在独立的 DeepSeek Harness `codex` Profile 中浏览 Codex 项目和会话、查看历史，或接着处理 CLI 中的任务。
 
 <img src="assets/readme-preview.png" alt="Codex on DSH 的侧栏、示例会话和文件变更" width="880">
 
@@ -15,6 +17,8 @@ Codex on DSH 在独立的 DeepSeek Harness `codex` Profile 中接入本机 Codex
 
 ## 运行边界
 
-Codex 持有会话历史、模型、权限和执行状态。插件通过本机共享 Codex App Server 读取这些状态，并把网页上的操作交给 Codex 执行。运行时需要既有的 Codex 登录与共享服务，网页默认只监听本机回环地址。
+Codex 持有项目、会话历史、模型、权限和执行状态。网页通过本机共享 Codex App Server 读取这些状态并提交操作。本地存储用于界面设置、草稿、列表缓存和用户上传的附件。
+
+运行时需要既有的 Codex 登录与共享服务，网页默认只监听本机回环地址。
 
 [安装与使用](manual/guide.md) · [给 AI 助手的安装指南](manual/ai-install.md) · [架构](https://github.com/lingsamuel/dsh-codex/blob/master/docs/architecture.md)
