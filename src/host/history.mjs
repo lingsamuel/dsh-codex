@@ -3,7 +3,6 @@ import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage, readThreadSummary } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
-import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
 import { createProjectActionRoute, createProjectOpener } from './project-actions.mjs'
 import { createPermissionActions } from './permissions.mjs'
@@ -171,11 +170,6 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       limit: 20,
       ...optionalParams(query, ['cursor']),
     }))),
-    route('turn-outline', (query, signal) => {
-      const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
-      const cursor = requiredParam(query, 'cursor', '缺少较早轮次的游标。')
-      return withCodexReader(socketPath, signal, request => readTurnOutline(request, threadId, cursor), 90_000)
-    }),
     route('turns', (query, signal) => withCodexReader(socketPath, signal, request => readThreadTurns(request, {
         threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
         limit: 25,

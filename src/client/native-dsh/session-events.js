@@ -16,8 +16,6 @@ import { userInputText } from '../../shared/user-input.js'
 import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
-// 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
-const outlineSequenceStart = 2 ** 40
 
 function questionItem(item) {
   return item?.type === 'userMessage' || (item?.type === 'agentMessage' && item.questions?.length)
@@ -44,7 +42,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     openState: 'loading',
     openError: null,
     hasMore: false,
+    historyWasPartial: false,
     loadingOlder: false,
+    historyLoadStatus: 'idle',
     promptError: null,
     goalError: null,
     blank: Boolean(thread.blank),
@@ -71,7 +71,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let savedGoalCompletions = {}
   let goalCompletions = {}
   const announcedGoalCompletions = new Map()
-  const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
   const queueStore = createSnapshotStore([])
@@ -90,10 +89,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let goalRevisionAtConnect = 0
   const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
-  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection], ['plan', planProjection],
+  const projections = new Map([['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection], ['plan', planProjection],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
     ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
-  const outlineTargets = new Map()
   const rows = []
   const rowsById = new Map()
   const liveTurns = new Map()
@@ -103,11 +101,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let asyncQuestionInputs
   let asyncQuestions = []
   let nextCursor
-  let pending
+  let olderRequest
+  let historyView
   let queue = Promise.resolve()
   let opened = false
   let triedFallback = false
-  let outlineRevision = 0
   let liveQuestions = []
   let watchingInteractions = false
   let itemCursor
@@ -159,6 +157,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       current.live.turnPermission = current.running && recordedTurnPermission?.turnId === current.live.activeTurnId
         ? recordedTurnPermission.permission : undefined
       current.hasMore = Boolean(nextCursor)
+      current.historyWasPartial ||= current.hasMore
       if (lastTurn) current.blank = false
       if (opened) {
         current.openState = 'open'
@@ -228,11 +227,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       turnWorkingDirectories, goalInputs, goalCompletions, liveTurns, ...bounds }
   }
 
-  async function addOlderPage(page) {
+  function addOlderPage(page, images) {
     const turns = mergePages([], page.data.toReversed())
       .filter(turn => !transcript.getTurn(turn.id))
       .map(turn => transcript.reconcile(turn).turn)
-    await collectAttachments(turns)
+    for (const [id, entry] of images) {
+      if (!attachments.has(id)) attachments.set(id, entry)
+    }
     const pageEntries = projectCodexTurns(turns, projectionOptions(pageBounds(rows[0]?.entries[0])))
     const older = []
     for (const entry of pageEntries) {
@@ -380,27 +381,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     return page
   }
 
-  async function refreshOutline() {
-    const anchor = rows[0]?.entries[0]?.event.data.turn
-    const cursor = nextCursor
-    const revision = ++outlineRevision
-    outlineTargets.clear()
-    outline.set(undefined)
-    if (!state.getSnapshot().historyMode || anchor === undefined || !cursor) return
-    try {
-      const earlier = await readPage('turn-outline', { threadId: thread.id, cursor }, signal)
-      if (signal.aborted || revision !== outlineRevision) return
-      outline.set(earlier.map(({ id, prompt, response }, index) => {
-        const turn = anchor - index - 1
-        const seq = outlineSequenceStart + turn
-        outlineTargets.set(seq, id)
-        return { turn, seq, prompt, response }
-      }).reverse())
-    } catch {
-      // 原生导航仍可使用已加载的轮次。
-    }
-  }
-
   function forgetTurn(id) {
     transcript.forgetTurn(id)
     rowsById.delete(id)
@@ -410,6 +390,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function clearHistory() {
+    clearOlder()
     for (const { id } of rows) forgetTurn(id)
     rows.length = 0
     attachments.clear()
@@ -417,8 +398,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
 
   async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
     if (!opened || replace) {
+      const images = await readInlineCodexAttachments(page.data, lifetime)
+      lifetime.throwIfAborted()
       if (replace) clearHistory()
-      const entries = await addOlderPage(page)
+      const entries = addOlderPage(page, images)
       if (entries.length) rebuildWindow = true
       opened = true
     } else {
@@ -472,7 +455,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       else catalog?.seedReadState(thread.id, readState)
     }
     markReady()
-    void refreshOutline()
   }
 
   function fail(error) {
@@ -650,32 +632,74 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }, lifetime)
   }
 
-  function loadOlder() {
-    if (pending) return pending
-    if (!nextCursor && state.getSnapshot().openState !== 'error') return Promise.resolve()
-    pending = enqueue(async () => {
-      state.update(current => { current.loadingOlder = true })
-      try {
-        if (!opened) await receiveSnapshot({ page: await loadPage(), mode: 'history' })
-        else if (nextCursor) {
-          const entries = await addOlderPage(await loadPage(nextCursor))
-          publish(entries)
-          publishState()
+  function setHistoryLoadStatus(status) {
+    state.update(current => {
+      current.historyLoadStatus = status
+      current.loadingOlder = status === 'loading'
+    })
+  }
+
+  function clearOlder(status = 'idle') {
+    olderRequest = undefined
+    if (state.getSnapshot().historyLoadStatus !== status) setHistoryLoadStatus(status)
+  }
+
+  /** DSH 在插入旧页前先记录当前阅读位置，搜索定位则直接使用同一页。 */
+  async function loadOlder({ deferConsumption = false } = {}) {
+    if (!historyView || signal.aborted) return
+    if (!opened) {
+      if (state.getSnapshot().openState !== 'error') return
+      const lifetime = AbortSignal.any([signal, historyView.signal])
+      await enqueue(async () => {
+        if (!opened) await receiveSnapshot({ page: await loadPage(undefined, lifetime), mode: 'history' }, lifetime)
+      }, lifetime)
+      return
+    }
+    if (!nextCursor) return
+    if (!olderRequest) {
+      const cursor = nextCursor
+      const lifetime = AbortSignal.any([signal, historyView.signal])
+      const request = { cursor, lifetime }
+      olderRequest = request
+      request.promise = Promise.resolve().then(async () => {
+        try {
+          lifetime.throwIfAborted()
+          const page = await loadPage(cursor, lifetime)
+          if (page.nextCursor === cursor) throw new Error('Codex 返回了重复的分页游标。')
+          const images = await readInlineCodexAttachments(page.data, lifetime)
+          if (olderRequest !== request || lifetime.aborted) return
+          request.prepared = { page, images }
+          setHistoryLoadStatus('pendingConsumption')
+        } catch {
+          if (olderRequest === request && !lifetime.aborted) clearOlder('error')
         }
-      } finally {
-        if (!signal.aborted) state.update(current => { current.loadingOlder = false })
-      }
-    }).finally(() => { pending = undefined })
-    return pending
+      })
+      setHistoryLoadStatus('loading')
+    }
+    const request = olderRequest
+    await request?.promise
+    if (request && olderRequest === request && (!deferConsumption || request.prepared?.page.data.length === 0)) consumeOlder()
+  }
+
+  function consumeOlder() {
+    const request = olderRequest
+    if (!request?.prepared || request.lifetime.aborted) return false
+    if (request.cursor !== nextCursor) {
+      clearOlder()
+      return false
+    }
+    const { page, images } = request.prepared
+    // 发布会同步通知订阅方，同一页在通知期间也只能消费一次。
+    request.prepared = undefined
+    publish(addOlderPage(page, images))
+    publishState()
+    if (olderRequest === request) clearOlder()
+    return true
   }
 
   async function loadThrough(seq) {
-    const turnId = outlineTargets.get(seq)
-    if (turnId) {
-      await loadTurn(turnId)
-      return
-    }
-    while (!signal.aborted && nextCursor && events.getSnapshot().entries[0]?.event.seq > seq) {
+    const view = historyView?.signal
+    while (view && !view.aborted && !signal.aborted && nextCursor && events.getSnapshot().entries[0]?.event.seq > seq) {
       const cursor = nextCursor
       await loadOlder()
       if (cursor === nextCursor) return
@@ -683,12 +707,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   async function loadTurn(turnId, requestSignal = signal) {
+    const startingView = historyView?.signal
     await ready
-    while (!signal.aborted && !requestSignal.aborted) {
+    const view = startingView ?? historyView?.signal
+    while (!signal.aborted && !requestSignal.aborted && !view?.aborted) {
       const row = rowsById.get(turnId)
       if (row) return row
       const cursor = nextCursor
-      if (!cursor) return
+      if (!cursor || !view) return
       await loadOlder()
       if (cursor === nextCursor) return
     }
@@ -748,6 +774,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     const connected = !retention || Boolean(retention.getSnapshot().connectionCount)
     const selected = connected && (!visibleCatalog || snapshot?.selected?.id === thread.id)
     if (Boolean(watch) === connected && selected === watchingInteractions) return
+    // 最近会话继续保留已发布的窗口，最后一个连接引用释放时取消尚未发布的请求。
+    if (connected) historyView ??= new AbortController()
+    else {
+      historyView?.abort()
+      historyView = undefined
+      clearOlder()
+    }
     watchingInteractions = selected
     watch?.abort()
     const nextWatch = connected ? new AbortController() : undefined
@@ -791,6 +824,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       getSnapshot: state.getSnapshot,
       subscribe: state.subscribe,
       loadOlder,
+      consumeOlder,
       loadThrough,
       planMarkdown,
       async readPlanMarkdown(turnId, itemId, requestSignal) {
