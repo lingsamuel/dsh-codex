@@ -1,6 +1,6 @@
 # 启动与使用
 
-需要 Node.js 24.9 或更新版本、可在当前 WSL 环境运行的 `dsh`，以及正在运行的 Codex App Server。首版使用 DSH 0.2.1-rc.2 和 Codex App Server 0.171.0 验证。
+需要 Node.js 24.9 或更新版本、可在当前 WSL 环境运行的 `dsh`，以及正在运行的 Codex App Server。当前使用 DSH 0.2.2-rc.5 和 Codex App Server 0.171.0 验证。
 
 ```sh
 npm ci
@@ -9,6 +9,8 @@ npm start -- --no-open
 ```
 
 用浏览器打开 DSH 打印的完整启动链接。服务监听 `127.0.0.1:3190`，可通过 `--port` 指定另一个端口。启动链接包含本次运行的 DSH 访问令牌。
+
+升级 DSH 或更新项目的 Profile 配置后，重启项目的 DSH 实例以载入新的插件清单。
 
 在侧栏底部打开「设置」，可以在 DSH 原生「通用」页调整语言、外观和字体等界面偏好。
 
