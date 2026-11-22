@@ -379,9 +379,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function publishQuestions() {
-    const { archived, canAcceptDirectInput } = state.getSnapshot()
+    const { canAcceptDirectInput } = state.getSnapshot()
     const latest = transcript.getTurn(rows.at(-1)?.id)
-    const asynchronous = archived || canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, queueStore.getSnapshot())
+    const asynchronous = canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, queueStore.getSnapshot())
     const requests = [...liveQuestions, ...asynchronous]
     if (JSON.stringify(requests) === JSON.stringify(codexQuestions.getSnapshot())) return
     codexQuestions.set(requests)

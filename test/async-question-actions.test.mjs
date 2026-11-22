@@ -196,3 +196,45 @@ test('冷恢复已有消息进入新轮次时拒绝旧问题的异步答复', as
   assert.equal((await post([{ index: 0, answer: '测试' }])).status, 409)
   assert.equal(frames.some(frame => frame.method === 'thread/queue/add'), false)
 })
+
+test('归档答复只在明确提交待答题时解除归档，加载前过滤原生队列中的答复', async t => {
+  let archived = true
+  let status = { type: 'notLoaded' }
+  let latest = 'newer-turn'
+  const thread = () => ({ id: threadId, status, historyMode: 'paginated' })
+  const saved = [{ turnId, item: { type: 'userMessage', id: 'cli-answer', content: input(reply(0, '测试')) } }]
+  const { post, frames } = await fakeCodex(t, {
+    'thread/read': () => ({ thread: thread() }),
+    'thread/list': () => ({ data: archived ? [thread()] : [] }),
+    'thread/items/read': () => ({ data: [{ turnId, item }] }),
+    'thread/items/list': () => ({ data: saved }),
+    'thread/turns/list': () => ({ data: [{ id: latest, status: 'completed' }] }),
+    'thread/unarchive': () => {
+      archived = false
+      return { thread: thread() }
+    },
+    'thread/queue/list': () => archived ? { error: { code: -32600, message: 'thread is archived' } }
+      : { data: [{ id: 'cli-queued', input: input(reply(1, '今晚')) }] },
+    'thread/resume': () => {
+      status = { type: 'active' }
+      return { thread: thread() }
+    },
+    'thread/queue/add': params => ({ queuedSubmission: { id: 'queued', ...params } }),
+  })
+  const batch = [{ index: 0, answer: '生产' }, { index: 1, answer: '中午' }, { index: 2, answer: '先备份' }]
+  assert.equal((await post(batch)).ok, false)
+  assert.equal((await post(batch, { unarchive: true })).status, 409)
+  latest = turnId
+  assert.deepEqual(await (await post(batch.slice(0, 1), { unarchive: true })).json(), { submitted: false })
+  assert.equal(archived, true)
+  assert.equal(frames.some(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/queue/add'].includes(method)), false)
+
+  const from = frames.length
+  assert.deepEqual(await (await post(batch, { unarchive: true })).json(), { submitted: true })
+  assert.equal(archived, false)
+  const sent = frames.slice(from)
+  assert.deepEqual(sent.filter(({ method }) => [
+    'thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/add',
+  ].includes(method)).map(({ method }) => method), ['thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/add'])
+  assert.deepEqual(questionReplies(sent.find(({ method }) => method === 'thread/queue/add').params.input), [reply(2, '先备份')])
+})

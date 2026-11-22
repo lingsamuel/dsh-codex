@@ -573,7 +573,7 @@ test('异步问答随当前轮次的原生条目弹出，即使没有等待状�
   assert.deepEqual(displayed(), [])
 })
 
-test('归档会话的异步题目和选项保留在历史中，查看时不发布问答面板', async t => {
+test('归档会话从只读历史同时显示异步问题正文与原生问答面板', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'archived', archived: true })
   const question = { id: 'archived-question', type: 'agentMessage', delivery: 'async', text: '',
@@ -583,8 +583,11 @@ test('归档会话的异步题目和选项保留在历史中，查看时不发�
   }) })
   const reply = history.events.getSnapshot().entries.find(({ event }) => event.type === 'assistant/message')
   assert.equal(reply.event.data.message.content[0].text, '**部署到哪里？**\n\n- 测试环境\n- 正式环境')
-  assert.deepEqual(history.session.projections.faceOf('codexQuestions').getSnapshot(), [])
+  const [pending] = history.session.projections.faceOf('userQuestions').getSnapshot().active
+  assert.equal(pending.callId, question.id)
+  assert.deepEqual(pending.questions[0].options.map(option => option.label), question.questions[0].options)
   assert.equal(history.session.getSnapshot().archived, true)
+  assert.deepEqual(history.session.getSnapshot().live.status, { type: 'notLoaded' })
 })
 
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {

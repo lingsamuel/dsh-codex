@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, IconQuestionOutlineRegular, Toast } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useSyncExternalStore } from 'react'
 import { writeAsyncQuestionAnswer, writeQuestionAnswer } from '../api.js'
 import { asyncQuestionAnswers, nativeQuestionAnswers } from './native-questions.js'
 
@@ -11,13 +11,27 @@ const remoteKey = 'remote.userQuestions'
 const locale = 'codex.question'
 const labels = {
   zh: { open: '打开待回答的问题', close: '收起问题面板', loadingAndSubmitting: '正在加载会话并提交…',
+    unarchiveAndSubmit: '取消归档并提交', skipAndSubmit: '跳过本题并取消归档提交',
     queued: '答复已交给 Codex。', alreadyAnswered: 'Codex 已有这条答复。' },
   en: { open: 'Open pending question', close: 'Close question panel', loadingAndSubmitting: 'Loading session and submitting…',
+    unarchiveAndSubmit: 'Unarchive and submit', skipAndSubmit: 'Skip this question, unarchive and submit',
     queued: 'Answer submitted to Codex.', alreadyAnswered: 'Codex already has this answer.' },
 }
+const subscribeMissing = () => () => {}
 
-function questionRequests(scope, sessionId) {
-  return scope.sessions.binding(sessionId)?.session.projections.faceOf('codexQuestions').getSnapshot() ?? []
+function questionRequest(session, callId) {
+  return session?.projections.faceOf('codexQuestions').getSnapshot()?.find(row => row.itemId === callId)
+}
+
+/** 原生选项和文本框的 Enter 可以直接发送。归档期间保留选项激活和文本编辑行为。 */
+function editArchivedAnswer(event) {
+  if (event.key !== 'Enter') return
+  const field = event.target.closest('textarea, [role="radio"], [role="checkbox"]')
+  if (!field) return
+  event.stopPropagation()
+  if (field.localName === 'textarea') return
+  event.preventDefault()
+  field.click()
 }
 
 function QuestionReopen({ sessionId, useProjection, reveal, t }) {
@@ -61,12 +75,14 @@ export function installCodexQuestions(ctx) {
       const remote = scope.get(remoteKey)
       const original = Object.getOwnPropertyDescriptor(remote, 'answer')
       async function answer(threadId, callId, submitted) {
-        const request = questionRequests(scope, threadId).find(row => row.itemId === callId)
+        const session = scope.sessions.binding(threadId)?.session
+        const request = questionRequest(session, callId)
         if (!request) return { ok: true, value: false }
         if (request.kind === 'async') {
           const answers = asyncQuestionAnswers(request.questions, submitted)
           if (!answers.length) return { ok: true, value: false }
-          const { submitted: accepted } = await writeAsyncQuestionAnswer({ threadId, turnId: request.turnId, itemId: request.itemId, answers })
+          const { submitted: accepted } = await writeAsyncQuestionAnswer({ threadId, turnId: request.turnId,
+            itemId: request.itemId, answers, ...(session.getSnapshot().archived && { unarchive: true }) })
           receipt.set({ id: ++receiptId, label: accepted ? 'queued' : 'alreadyAnswered' })
         } else {
           await writeQuestionAnswer({ threadId, requestId: request.requestId, answers: nativeQuestionAnswers(request.questions, submitted) })
@@ -93,11 +109,18 @@ export function installCodexQuestions(ctx) {
         if (!entry?.component) return
         const Native = entry.component
         function CodexQuestionComposer({ matched, t, ...props }) {
-          const request = questionRequests(scope, matched.sessionId).find(row => row.itemId === matched.callId)
+          const session = scope.sessions.binding(matched.sessionId)?.session
+          const request = questionRequest(session, matched.callId)
+          const archived = useSyncExternalStore(session?.subscribe ?? subscribeMissing,
+            () => request?.kind === 'async' && session.getSnapshot().archived)
+          const index = props.useStore(state => state.progressByRequest[matched.key]?.index ?? 0)
           const translateQuestion = (key, ...args) => {
             if (request && key === 'nav.close') return translate('close')
+            if (archived && key === 'submit') return translate('unarchiveAndSubmit')
+            // 原生最后一页的跳过也会提交，此时按钮需要说明同样的后果。
+            if (archived && key === 'action.skip' && index === matched.questions.length - 1) return translate('skipAndSubmit')
             if (key === 'submitting' && request?.kind === 'async'
-              && scope.sessions.binding(matched.sessionId)?.session.getSnapshot().live.status?.type === 'notLoaded') {
+              && session.getSnapshot().live.status?.type === 'notLoaded') {
               return translate('loadingAndSubmitting')
             }
             return t(request?.isBlocking && key === 'wait.continued' ? 'wait.held' : key, ...args)
@@ -106,7 +129,9 @@ export function installCodexQuestions(ctx) {
             return <SecretQuestionComposer key={matched.key} Native={Native} questions={request.questions}
               {...props} matched={matched} t={translateQuestion} />
           }
-          return <Native {...props} matched={matched} t={translateQuestion} />
+          return <div style={{ display: 'contents' }} onKeyDownCapture={archived ? editArchivedAnswer : undefined}>
+            <Native {...props} matched={matched} t={translateQuestion} />
+          </div>
         }
         entry.component = CodexQuestionComposer
         restore = () => { if (entry.component === CodexQuestionComposer) entry.component = Native }

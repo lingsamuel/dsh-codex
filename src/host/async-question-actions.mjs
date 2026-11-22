@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { steerTurn } from './conversation-actions.mjs'
 import { readLatestTurn } from './live-history.mjs'
-import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
+import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread, unarchiveForSubmission,
+  waitForThreadActivity } from './thread-runtime.mjs'
 import { answeredAsyncQuestions, asyncQuestionItemId, encodeQuestionReplies } from '../shared/question-replies.js'
 
 function json(value, status = 200) {
@@ -32,10 +33,8 @@ async function readFollowingAnswers(request, threadId, turnId, itemId) {
   }, { type: 'item', itemId })
 }
 
-async function submit(request, threadId, turnId, itemId, answers, signal) {
-  const thread = await addressableThread(request, threadId)
-  // 优先读队列，再读历史，覆盖原生正在领取待发消息的情况。
-  const queued = await readConversationQueue(request, threadId)
+async function readQuestionReplies(request, thread, turnId, itemId, answers, queued = []) {
+  const { id: threadId } = thread
   let latest
   let item
   let saved
@@ -61,6 +60,24 @@ async function submit(request, threadId, turnId, itemId, answers, signal) {
 
   latest ??= await readLatestTurn(request, threadId, 'notLoaded')
   if (latest?.id !== turnId) return staleQuestion()
+  return { latest, replies }
+}
+
+async function submit(request, threadId, turnId, itemId, answers, unarchive, signal) {
+  const original = await addressableThread(request, threadId, unarchive)
+  let thread = original
+  if (unarchive) {
+    // 原生归档线程只能读历史。确认题目仍待答后，才解除归档以读取队列。
+    const checked = await readQuestionReplies(request, original, turnId, itemId, answers)
+    if (checked instanceof Response) return checked
+    thread = await unarchiveForSubmission(request, original)
+  }
+  // 优先读队列，再读历史，覆盖原生正在领取待发消息的情况。
+  const queued = await readConversationQueue(request, threadId)
+  const checked = await readQuestionReplies(request, original, turnId, itemId, answers, queued)
+  if (checked instanceof Response) return checked
+  const { replies } = checked
+  let { latest } = checked
   if (thread.status?.type === 'notLoaded') {
     try {
       await resumeThread(request, thread)
@@ -100,14 +117,15 @@ export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitTh
     async fetch(request) {
       const type = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
       if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
-      const { threadId, turnId, itemId, answers } = (await request.json().catch(() => null)) ?? {}
+      const { threadId, turnId, itemId, answers, unarchive } = (await request.json().catch(() => null)) ?? {}
       if (!validFields(threadId, turnId, itemId, answers)) return json({ error: '异步问题或答案格式无效。' }, 400)
       const key = JSON.stringify([threadId, itemId])
       if (submitting.has(key)) return json({ error: '这条提问已有答复正在提交。' }, 409)
       submitting.add(key)
       try {
         const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
-        return await submitThread(threadId, () => withCodexReader(socketPath, signal, rpc => submit(rpc, threadId, turnId, itemId, answers, signal)))
+        return await submitThread(threadId, () => withCodexReader(socketPath, signal, rpc =>
+          submit(rpc, threadId, turnId, itemId, answers, unarchive === true, signal)))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason
