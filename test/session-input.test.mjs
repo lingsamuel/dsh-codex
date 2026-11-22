@@ -2,6 +2,45 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionInput } from '../src/client/native-dsh/session-input.js'
 
+test('Goal 发送错误归属本次输入模式，退出后图片走普通发送', async t => {
+  let draft = { budget: '' }
+  let changed
+  const goalDraft = { getSnapshot: () => draft,
+    subscribe(listener) { changed = listener; return () => {} },
+    clear(value) { if (value === draft) { draft = undefined; changed() } },
+  }
+  const requests = []
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push([url.pathname, JSON.parse(options.body)])
+    return Response.json({ queuedSubmissionId: 'image' })
+  })
+  const state = { pendingSubmissions: [] }
+  const subscribe = () => () => {}
+  const history = {
+    session: { getSnapshot: () => state }, events: { getSnapshot: () => ({ entries: [] }), subscribe },
+    queueStore: { getSnapshot: () => [], subscribe }, updateState: edit => edit(state),
+  }
+  const model = { getSnapshot: () => undefined, clear() {} }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, model, undefined, undefined, undefined, goalDraft)
+  const image = [{ type: 'image', mediaType: 'image/png', data: 'AAAA' }]
+  assert.equal((await input.prompt(image, 'queue')).ok, false)
+  assert.match(state.goalError.message, /退出 Goal 模式/)
+  assert.equal(state.promptError, null)
+  assert.deepEqual(requests, [])
+
+  goalDraft.clear(goalDraft.getSnapshot())
+  assert.equal(state.goalError, null)
+  assert.equal((await input.prompt(image, 'queue')).ok, true)
+  assert.equal(goalDraft.getSnapshot(), undefined)
+  assert.equal(state.promptError, null)
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0][0], '/api/codex/conversation-action')
+  assert.deepEqual(requests[0][1].input, [{ type: 'image', url: 'data:image/png;base64,AAAA' }])
+})
+
 test('输入栏创建目标需确认替换，取消保留 Goal 模式，成功只提交原生目标', async t => {
   const existing = { objective: '旧目标', status: 'paused', createdAt: 100 }
   const next = { objective: '新目标', status: 'active', createdAt: 100 }
@@ -27,7 +66,7 @@ test('输入栏创建目标需确认替换，取消保留 Goal 模式，成功�
       if (state.goalReplacement) confirmationReady?.resolve(state.goalReplacement)
     },
   }
-  const goalDraft = { getSnapshot: () => draft, clear(value) { if (draft === value) draft = undefined } }
+  const goalDraft = { getSnapshot: () => draft, subscribe: noopSubscribe, clear(value) { if (draft === value) draft = undefined } }
   const model = { getSnapshot: () => undefined, clear() {} }
   const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, model, undefined, undefined, undefined, goalDraft)
   const statuses = []

@@ -41,6 +41,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     hasMore: false,
     loadingOlder: false,
     promptError: null,
+    goalError: null,
     blank: Boolean(thread.blank),
     lastAgentError: null,
     promptAttempted: false,

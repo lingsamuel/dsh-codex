@@ -2,6 +2,7 @@ import { Input, PathLabel, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useId, useState } from 'react'
 import { CommandButton, CommandModal, commandUnavailable, fieldLayout, textAreaStyle, useCommandAction, useCommandInfo } from './command-action.jsx'
 import { ExportCommand } from './session-export.jsx'
+import { GoalBudget } from './goal-command.jsx'
 
 const reviewValues = { uncommittedChanges: null, baseBranch: 'branch', commit: 'sha', custom: 'instructions' }
 const reviewChoice = { display: 'flex', alignItems: 'center', gap: 8 }
@@ -91,6 +92,7 @@ function ReviewCommand({ command, onClose, session, useSession, t }) {
 /** 在原生输入栏弹层中按命令类型挂载对应表单，表单状态随这次打开保留。 */
 export function CommandDetails(props) {
   switch (props.command) {
+    case 'goal-budget': return <GoalBudget {...props} />
     case 'export': return <ExportCommand {...props} />
     case 'compact': return <CompactCommand {...props} />
     case 'review': return <ReviewCommand {...props} />

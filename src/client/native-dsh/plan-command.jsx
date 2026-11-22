@@ -3,8 +3,8 @@ import { Button, IconCloseOutlineRegular, IconPlanOutlineRegular, Tooltip } from
 import { useSyncExternalStore } from 'react'
 import { writeCommandAction } from '../api.js'
 import { commandUnavailable } from './command-action.jsx'
+import { ComposerModeLabel } from './composer-mode-label.jsx'
 
-const modeStyle = { background: 'var(--dsw-alias-state-business-tertiary)', color: 'var(--dsw-alias-state-business-primary)' }
 const rowStyle = { display: 'inline-flex', alignItems: 'center', gap: 4 }
 
 /** 命令与标签共用同一设置请求，只以 Codex 的确认更新模式。 */
@@ -53,10 +53,6 @@ export function createPlanAction(ctx, session) {
 }
 
 export function PlanChip({ controls, locked, useSession, useInput, t }) {
-  return controls && <PlanMode {...{ controls, locked, useSession, useInput, t }} />
-}
-
-function PlanMode({ controls, locked, useSession, useInput, t }) {
   const { planAction, focus, session: { goalDraft } } = controls
   const mode = useSession(state => state.planMode)
   const revision = useSession(state => state.planRevision)
@@ -78,12 +74,8 @@ function PlanMode({ controls, locked, useSession, useInput, t }) {
       <Button size="sm" variant="ghost" aria-label={t('cancel')} onClick={() => { planAction.dismiss(); focus() }}>
         <IconCloseOutlineRegular size={12} />
       </Button>
-    </> : showPlan && <Tooltip label={exit} side="top" portal>
-      <Button size="sm" variant="ghost" style={modeStyle} icon={<IconPlanOutlineRegular size={14} />} aria-label={exit}
-        disabled={Boolean(unavailable || pending || locked || inputBusy)} onClick={() => { planAction.request('default'); focus() }}>
-        {t('plan')} <IconCloseOutlineRegular size={12} aria-hidden="true" />
-      </Button>
-    </Tooltip>}
+    </> : showPlan && <ComposerModeLabel label={t('plan')} exitLabel={exit} icon={<IconPlanOutlineRegular size={14} />}
+      disabled={Boolean(unavailable || pending || locked || inputBusy)} onExit={() => { planAction.request('default'); focus() }} />}
     {pending && <span role="status">{t('pending')}</span>}
     {waiting && <span role="status">{t('awaitingMode')}</span>}
     {error && <Tooltip label={error} side="top" portal>

@@ -8,10 +8,10 @@ import { CommandDetails } from './command-details.jsx'
 import { createPlanAction, PlanChip } from './plan-command.jsx'
 import { GoalChip, GoalReplacement, installGoalBar } from './goal-command.jsx'
 import { commandUnavailable } from './command-action.jsx'
+import { installComposerModeLabel } from './composer-mode-label.jsx'
 
 const overlay = 'conversation.input.overlay'
-const planSlot = 'conversation.input.plan'
-const goalSlot = 'conversation.input.left'
+const modeSlot = 'conversation.input.plan'
 const locale = 'codex.commands'
 const copy = {
   zh: {
@@ -39,7 +39,8 @@ const copy = {
     'review.instructions': '审查要求', 'review.run': '开始审查', 'review.run.unarchive': '取消归档并审查',
     'plan.exit': '退出计划模式', 'plan.enter.unarchive': '取消归档并进入计划模式', 'plan.exit.unarchive': '取消归档并退出计划模式',
     'plan.changeFailed': '模式切换失败',
-    'goal.exit': '退出目标输入模式', 'goal.budget': '设置预算', 'goal.optionalBudget': 'token 预算（选填）',
+    'goal.exit': '退出目标输入模式', 'goal-budget': '设置目标预算', 'goal-budget.description': '设置此次目标的 token 预算',
+    'goal.optionalBudget': 'token 预算（选填）', 'goal.saveBudget': '保存', 'goal.invalidBudget': '请输入正整数。',
     'goal.replace': '替换目标', 'goal.confirmReplace': '将以输入栏正文替换当前目标。',
     'goal.resumeBudget': '目标的 token 预算已用完。可通过 /goal 设置新的预算。',
     'goal.resumeBlocked': 'Codex 未能继续目标，请查看当前状态。',
@@ -69,7 +70,8 @@ const copy = {
     'review.instructions': 'Review instructions', 'review.run': 'Start review', 'review.run.unarchive': 'Unarchive and review',
     'plan.exit': 'Exit Plan mode', 'plan.enter.unarchive': 'Unarchive and enter Plan mode', 'plan.exit.unarchive': 'Unarchive and exit Plan mode',
     'plan.changeFailed': 'Could not change mode',
-    'goal.exit': 'Exit Goal input mode', 'goal.budget': 'Set budget', 'goal.optionalBudget': 'Token budget (optional)',
+    'goal.exit': 'Exit Goal input mode', 'goal-budget': 'Set goal budget', 'goal-budget.description': 'Set the token budget for this goal',
+    'goal.optionalBudget': 'Token budget (optional)', 'goal.saveBudget': 'Save', 'goal.invalidBudget': 'Enter a positive whole number.',
     'goal.replace': 'Replace goal', 'goal.confirmReplace': 'The text in the composer will replace the current goal.',
     'goal.resumeBudget': 'The goal is out of tokens. Use /goal to set a new budget.',
     'goal.resumeBlocked': 'Codex could not resume this goal. Check its current status.',
@@ -81,6 +83,10 @@ function CommandOverlay({ controls, ...props }) {
     <CommandDialog {...props} {...controls} />
     <GoalReplacement {...props} session={controls.session} />
   </>
+}
+
+function ComposerModes(props) {
+  return props.controls && <><GoalChip {...props} /><PlanChip {...props} /></>
 }
 
 function CommandDialog({ commandRequest, session, ...props }) {
@@ -99,6 +105,7 @@ export function installCommands(ctx) {
   ctx.effect(() => ctx.locale.register(locale, copy))
   const t = ctx.locale.bind(locale)
   installGoalBar(ctx, t)
+  installComposerModeLabel(ctx)
 
   ctx.inject(['commandUi', 'sessions', 'conversation', 'contextMenus', 'remoteAccess'], scope => {
     const { commandUi, sessions } = scope
@@ -141,6 +148,11 @@ export function installCommands(ctx) {
         if ((planMode === 'plan' || change?.mode === 'plan') && !archived && !await planAction.select('default', false)) return
         if (!session.goalDraft.getSnapshot()) session.goalDraft.set({ budget: '' })
         focus()
+      } },
+      { name: 'goal-budget', icon: IconGoalOutlineRegular, available: context => {
+        if (!modeAvailable(context)) return false
+        const { session } = sessions.binding(context.sessionId)
+        return Boolean(session.goalDraft.getSnapshot() && !session.getSnapshot().planChanging)
       } },
       { name: 'compact', icon: IconFlatListOutlineRegular },
       { name: 'review', icon: IconSearchOutlineRegular },
@@ -195,13 +207,9 @@ export function installCommands(ctx) {
       name: overlay, id: 'codex-command-details', order: 30, locale,
       inject: sessionId => ({ controls: controlsFor(sessionId) }),
     }, CommandOverlay))
-    scope.slots.inject(planSlot, () => scope.slots.register({
-      name: planSlot, locale,
+    scope.slots.inject(modeSlot, () => scope.slots.register({
+      name: modeSlot, locale,
       inject: sessionId => ({ controls: controlsFor(sessionId) }),
-    }, PlanChip))
-    scope.slots.inject(goalSlot, () => scope.slots.register({
-      name: goalSlot, id: 'codex-goal-mode', locale,
-      inject: sessionId => ({ controls: controlsFor(sessionId) }),
-    }, GoalChip))
+    }, ComposerModes))
   })
 }

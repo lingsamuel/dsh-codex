@@ -71,10 +71,16 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   ctx.effect(() => {
     const stopEvents = events.subscribe(observeSubmissions)
     const stopQueue = queueStore.subscribe(observeSubmissions)
+    const stopGoal = goalDraft?.subscribe(() => {
+      if (!goalDraft.getSnapshot() && session.getSnapshot().goalError) {
+        updateState(state => { state.goalError = null })
+      }
+    })
     return () => {
       goalConfirmation?.resolve(false)
       stopEvents()
       stopQueue()
+      stopGoal?.()
       for (const requestId of submissions.keys()) retire(requestId, failedSubmission)
     }
   })
@@ -155,6 +161,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   return {
     acceptSubmittedSettings,
     decideGoalReplacement: accepted => goalConfirmation?.resolve(accepted),
+    dismissGoalError(error) {
+      if (session.getSnapshot().goalError === error) updateState(state => { state.goalError = null })
+    },
     beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
       const { running, archived, blank } = session.getSnapshot()
       const worktree = blank && !archived ? worktreeDraft?.getSnapshot() : undefined
@@ -184,6 +193,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const goal = submission ? submission.goal : goalDraft?.getSnapshot()
       updateState(state => {
         state.promptError = null
+        state.goalError = null
         state.lastAgentError = null
         state.promptAttempted = true
       })
@@ -215,6 +225,12 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           return accepted
         }
         retire(requestId, failedSubmission)
+        if (goal) {
+          // Goal 的错误随输入模式销毁。原生发送 Toast 会在退出模式后继续显示旧错误。
+          const result = failure(error)
+          if (goalDraft.getSnapshot() === goal) updateState(state => { state.goalError = result.error })
+          return result
+        }
         if (worktree && error.worktreeRecovery && worktreeDraft.getSnapshot() === worktree) {
           worktreeDraft.set({ ...worktree, recovery: error.worktreeRecovery })
         }

@@ -1,38 +1,55 @@
-import { Button, IconCloseOutlineRegular, IconGoalOutlineRegular, Input, Modal, Tooltip } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useState, useSyncExternalStore } from 'react'
+import { Button, IconGoalOutlineRegular, IconWarningOutlineRegular, Input, Modal, Toast } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
 import { readPage, writeCommandAction } from '../api.js'
 import { observe, remoteFailure } from './catalog.js'
-import { commandUnavailable } from './command-action.jsx'
+import { CommandModal, commandUnavailable, fieldLayout } from './command-action.jsx'
 import { adaptSlot } from './slot-adapter.js'
-
-const goalControlsStyle = { display: 'inline-flex', gap: 4, alignItems: 'center', minWidth: 0 }
+import { ComposerModeLabel } from './composer-mode-label.jsx'
 
 export function GoalChip({ controls, useInput, useSession, t }) {
-  return controls && <GoalInputMode {...{ controls, useInput, useSession, t }} />
-}
-
-function GoalInputMode({ controls, useInput, useSession, t }) {
   const { session, focus } = controls
   const { goalDraft } = session
   const draft = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
   const changingPlan = useSession(state => state.planChanging)
+  const error = useSession(state => state.goalError)
   const inputBusy = useInput(state => state.phase !== 'plain')
-  const locked = changingPlan || inputBusy
-  const [budgetOpen, setBudgetOpen] = useState(false)
+  const label = useRef(null)
   if (!draft) return null
-  const budgetLabel = t('goal.optionalBudget')
-  return <span style={goalControlsStyle}>
-    <Tooltip label={t('goal.exit')} side="top" portal>
-      <Button size="sm" variant="outline" icon={<IconGoalOutlineRegular size={14} />} aria-label={t('goal.exit')}
-        disabled={locked} onClick={() => { goalDraft.clear(draft); setBudgetOpen(false); focus() }}>
-        {t('goal')} <IconCloseOutlineRegular size={12} aria-hidden="true" />
-      </Button>
-    </Tooltip>
-    {budgetOpen ? <Input aria-label={budgetLabel} placeholder={budgetLabel} type="number" inputMode="numeric" min={1} step={1}
-      style={{ width: '9em' }} disabled={locked} value={draft.budget}
-      onChange={event => goalDraft.set({ budget: event.target.value })} />
-      : <Button size="sm" variant="ghost" disabled={locked} onClick={() => setBudgetOpen(true)}>{draft.budget || t('goal.budget')}</Button>}
+  return <span ref={label} style={{ display: 'inline-flex' }}>
+    <ComposerModeLabel label={t('goal')} exitLabel={t('goal.exit')} icon={<IconGoalOutlineRegular size={14} />}
+      disabled={Boolean(changingPlan || inputBusy)} onExit={() => { goalDraft.clear(draft); focus() }} />
+    {error && !inputBusy && <Toast text={error.message} icon={<IconWarningOutlineRegular />}
+      anchor={label.current?.closest('[data-composer-card]')} onDone={() => session.dismissGoalError(error)} />}
   </span>
+}
+
+export function GoalBudget({ command, session, onClose, t }) {
+  const { goalDraft } = session
+  const [budget, setBudget] = useState(() => goalDraft.getSnapshot()?.budget ?? '')
+  const form = useId()
+  const amount = budget.trim()
+  const invalid = Boolean(amount) && (!Number.isSafeInteger(Number(amount)) || Number(amount) < 1)
+
+  function save(event) {
+    event.preventDefault()
+    if (invalid) return
+    if (goalDraft.getSnapshot()) goalDraft.set({ budget: amount })
+    onClose()
+  }
+
+  return <CommandModal {...{ command, onClose, t }} footer={<>
+    <Button variant="outline" onClick={onClose}>{t('cancel')}</Button>
+    <Button type="submit" form={form} variant="primary" disabled={invalid}>{t('goal.saveBudget')}</Button>
+  </>}>
+    <form id={form} onSubmit={save} style={fieldLayout}>
+      <label style={fieldLayout}>
+        {t('goal.optionalBudget')}
+        <Input inputMode="numeric" value={budget} data-modal-autofocus aria-invalid={invalid || undefined}
+          onChange={event => setBudget(event.currentTarget.value)} />
+      </label>
+      {invalid && <span role="status">{t('goal.invalidBudget')}</span>}
+    </form>
+  </CommandModal>
 }
 
 /** 替换确认期间由原生发送流程保留草稿，切走会话时取消本次确认。 */
