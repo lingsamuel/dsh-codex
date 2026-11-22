@@ -198,6 +198,8 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
   return {
     remember,
     withThreadCreation,
+    validateSelection: requireProfile,
+    switchPermission,
     async startOptions(request, cwd) {
       const profileId = await preference.get()
       if (profileId === null) return {}

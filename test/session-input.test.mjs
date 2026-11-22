@@ -35,3 +35,45 @@ test('原生队列曾确认图片送达时，后续 HTTP 失败不会恢复草�
   assert.deepEqual(state.pendingSubmissions, [])
   assert.equal(state.promptError, null)
 })
+
+test('归档草稿的模型和权限随提交传递，遇到失败或空队列时保留', async t => {
+  const model = { provider: 'openai', model: 'selected', reasoningEffort: 'high' }
+  const profileId = ':read-only'
+  const confirmed = { profileId, source: 'runtime' }
+  const requests = []
+  let projection = { permission: undefined }
+  const responses = [Response.json({ error: 'fixture rejected' }, { status: 409 }), Response.json({ queueEmpty: true }), Response.json({ permission: confirmed })]
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (_, request) => {
+    requests.push(JSON.parse(request.body))
+    if (responses.length === 1) projection = { permission: { profileId: ':workspace', source: 'saved' } }
+    return responses.shift()
+  })
+  const draft = initial => {
+    let value = initial
+    return { getSnapshot: () => value, clear(selection) { if (selection === value) value = undefined } }
+  }
+  const modelDraft = draft(model)
+  const permissionDraft = draft(profileId)
+  const state = { pendingSubmissions: [], archived: true }
+  const history = {
+    session: { getSnapshot: () => state, projections: { faceOf: () => ({ getSnapshot: () => projection }) },
+      publishPermission(permission) { projection = { permission } } },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe: () => () => {} },
+    queueStore: { getSnapshot: () => [], subscribe: () => () => {} },
+    updateState: edit => edit(state),
+  }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, modelDraft, permissionDraft)
+  assert.equal((await input.prompt([{ type: 'text', text: '继续' }], 'queue')).ok, false)
+  assert.equal((await input.startQueue()).ok, true)
+  assert.deepEqual(modelDraft.getSnapshot(), model)
+  assert.equal(permissionDraft.getSnapshot(), profileId)
+  assert.equal((await input.startQueue()).ok, true)
+  assert.equal(modelDraft.getSnapshot(), undefined)
+  assert.equal(permissionDraft.getSnapshot(), undefined)
+  assert.deepEqual(projection.permission, confirmed)
+  assert.deepEqual(requests.map(({ action, unarchive, modelDraft, permissionDraft }) => [action, unarchive, modelDraft, permissionDraft]),
+    [['prompt', true, model, profileId], ['queue', true, model, profileId], ['queue', true, model, profileId]])
+})

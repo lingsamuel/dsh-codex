@@ -15,19 +15,24 @@ async function rejectWrite() {
   throw new Error(unsupported)
 }
 
-function codexBinding(ctx, thread, catalog, modelDrafts) {
-  const history = createCodexHistory(ctx, thread, catalog)
-  const modelDraft = observe(modelDrafts, drafts => drafts.get(thread.id))
+// 切换会话会释放历史绑定。输入设置与原生文本草稿一样在返回后可继续使用。
+function sessionDraft(storage, threadId) {
+  const draft = observe(storage, drafts => drafts.get(threadId))
   function setDraft(selection) {
-    const drafts = new Map(modelDrafts.getSnapshot())
-    if (selection) drafts.set(thread.id, selection)
-    else drafts.delete(thread.id)
-    modelDrafts.set(drafts)
+    const drafts = new Map(storage.getSnapshot())
+    if (selection) drafts.set(threadId, selection)
+    else drafts.delete(threadId)
+    storage.set(drafts)
   }
-  // 切换会话会释放历史绑定，草稿模型应和输入草稿一样仍可在返回时使用。
-  const draft = { ...modelDraft, set: setDraft, clear(selection) {
-    if (selection && modelDraft.getSnapshot() === selection) setDraft(undefined)
+  return { ...draft, set: setDraft, clear(selection) {
+    if (selection && draft.getSnapshot() === selection) setDraft(undefined)
   } }
+}
+
+function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts) {
+  const history = createCodexHistory(ctx, thread, catalog)
+  const modelDraft = sessionDraft(modelDrafts, thread.id)
+  const permissionDraft = sessionDraft(permissionDrafts, thread.id)
   return {
     ctx,
     sessionId: thread.id,
@@ -35,8 +40,9 @@ function codexBinding(ctx, thread, catalog, modelDrafts) {
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, draft),
-      modelDraft: draft,
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft),
+      modelDraft,
+      permissionDraft,
       sessionId: thread.id,
       async rename(title) {
         try {
@@ -59,6 +65,7 @@ export function provideCodexControllers(ctx, catalog) {
   const bindings = new Map()
   const retention = new Map()
   const modelDrafts = createSnapshotStore(new Map())
+  const permissionDrafts = createSnapshotStore(new Map())
   const scopeId = Symbol('Codex session')
 
   function syncManualOrder() {
@@ -123,7 +130,7 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts), fiber }
+        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts, permissionDrafts), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }

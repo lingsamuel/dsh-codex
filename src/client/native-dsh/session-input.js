@@ -13,9 +13,25 @@ function failure(error) {
 }
 
 /** DSH 决定发送模式和草稿恢复，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, modelDraft) {
+export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft) {
   const { session, events, queueStore, updateState, activeTurnId } = history
   const submissions = new Map()
+
+  function clearDrafts(model, permission) {
+    modelDraft.clear(model)
+    permissionDraft?.clear(permission)
+  }
+
+  function permissionSnapshot(profileId) {
+    return profileId && session.projections.faceOf('permissions').getSnapshot()
+  }
+
+  function confirmPermission(profileId, before, result) {
+    if (!result?.permission) return
+    const current = permissionSnapshot(profileId)
+    // 恢复期间重连可能先读到旧历史，只有更新的运行时确认可以取代本次响应。
+    if (current === before || current?.permission?.source !== 'runtime') session.publishPermission(result.permission)
+  }
 
   function retire(requestId, settlement) {
     const submission = submissions.get(requestId)
@@ -24,7 +40,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
     if (settlement.reason === 'observed') {
       // 待发项可能先于 HTTP 回执被领取。保留已送达状态，再交接原生草稿图片。
       submission.observed = true
-      modelDraft.clear(submission.model)
+      clearDrafts(submission.model, submission.permission)
       submission.onAccept?.()
     }
     updateState(state => {
@@ -66,10 +82,11 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
     return result
   }
 
-  async function control(action, parameters, op) {
+  async function control(action, parameters, op, onAccepted) {
     updateState(state => { state.promptError = null })
     try {
-      await native(action, parameters)
+      const result = await native(action, parameters)
+      onAccepted?.(result)
       return accepted
     } catch (error) {
       return operationFailure(op, error)
@@ -85,7 +102,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
       submissions.set(requestId, { onAccept, onRetire, expectedTurnId,
-        model: modelDraft.getSnapshot(), unarchive: archived })
+        model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
       updateState(state => {
         state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
         state.promptAttempted = true
@@ -96,6 +113,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
       const submission = submissions.get(requestId)
       const expectedTurnId = submission ? submission.expectedTurnId : mode === 'steer' ? activeTurnId() : undefined
       const selection = submission ? submission.model : modelDraft.getSnapshot()
+      const profileId = submission ? submission.permission : permissionDraft?.getSnapshot()
+      const before = permissionSnapshot(profileId)
       const unarchive = submission ? submission.unarchive : session.getSnapshot().archived
       updateState(state => {
         state.promptError = null
@@ -108,16 +127,18 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
           if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }
           throw new Error('当前仅支持发送文本和图片。')
         })
-        await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId, expectedTurnId, modelDraft: selection,
+        const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
+          expectedTurnId, modelDraft: selection, permissionDraft: profileId,
           ...(unarchive && { unarchive: true }) }, signal)
-        modelDraft.clear(selection)
+        confirmPermission(profileId, before, result)
+        clearDrafts(selection, profileId)
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。
         if (submission?.observed) return accepted
         const settlement = observedSettlement(requestId)
         if (settlement) {
-          modelDraft.clear(selection)
+          clearDrafts(selection, profileId)
           retire(requestId, settlement)
           return accepted
         }
@@ -140,7 +161,15 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
       }
     },
     startQueue() {
-      return control('queue', { operation: 'start', ...(session.getSnapshot().archived && { unarchive: true }) }, 'send')
+      const model = modelDraft.getSnapshot()
+      const profileId = permissionDraft?.getSnapshot()
+      const before = permissionSnapshot(profileId)
+      return control('queue', { operation: 'start', modelDraft: model, permissionDraft: profileId,
+        ...(session.getSnapshot().archived && { unarchive: true }) }, 'send', result => {
+        if (result?.queueEmpty) return
+        confirmPermission(profileId, before, result)
+        clearDrafts(model, profileId)
+      })
     },
   }
 }

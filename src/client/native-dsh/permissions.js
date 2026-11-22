@@ -11,6 +11,7 @@ const labels = {
   zh: {
     follow: '跟随 Codex', unknown: '权限未确认', custom: '自定义权限', saved: '上次记录：{mode}', requested: '已提交，首轮确认：{mode}',
     defaultDescription: '仅用于从此网页新建的 Codex 会话。', unavailable: '所选默认权限不再可用。',
+    draft: '发送或继续队列时应用：{mode}',
     sandbox: '沙箱：{mode}', approval: '审批：{policy}', readOnly: '仅可查看', workspaceWrite: '工作区内修改',
     dangerFullAccess: '完全权限', externalSandbox: '外部沙箱', 'on-request': '按需', untrusted: '不受信时', never: '从不', granular: '按类别',
     managed: '托管沙箱', reviewer: '审批人：{name}', user: '用户', auto_review: '自动审查', guardian_subagent: '审查子代理',
@@ -21,6 +22,7 @@ const labels = {
   en: {
     follow: 'Follow Codex', unknown: 'Permission unconfirmed', custom: 'Custom permissions', saved: 'Last saved: {mode}', requested: 'Submitted for first turn: {mode}',
     defaultDescription: 'Applies only to new Codex sessions created from this web interface.', unavailable: 'The saved default is no longer selectable.',
+    draft: 'Apply on send or queue start: {mode}',
     sandbox: 'Sandbox: {mode}', approval: 'Approval: {policy}', readOnly: 'Read Only', workspaceWrite: 'Workspace Write',
     dangerFullAccess: 'Full Access', externalSandbox: 'External Sandbox', 'on-request': 'On request', untrusted: 'When untrusted', never: 'Never', granular: 'By category',
     managed: 'Managed sandbox', reviewer: 'Reviewer: {name}', user: 'User', auto_review: 'Auto review', guardian_subagent: 'Review subagent',
@@ -69,7 +71,7 @@ function details(permission, t) {
 }
 
 function canSelect(state) {
-  return state.openState === 'open' && !state.archived && !state.subagent && state.canAcceptDirectInput !== false
+  return state.openState === 'open' && !state.subagent && state.canAcceptDirectInput !== false
     && ['idle', 'active', 'notLoaded'].includes(state.live?.status?.type)
 }
 
@@ -111,6 +113,7 @@ export function installPermissions(ctx, catalog, signal) {
   const directory = createSnapshotStore({ value: null })
   const defaults = createSnapshotStore({ status: 'idle', error: null, writable: false, options: [], currentValue: '', revision: 0 })
   const errorStore = createSnapshotStore(null)
+  const emptyDraft = createSnapshotStore(undefined)
   let errorId = 0
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay', id: 'codex-permission-error', locale,
@@ -197,13 +200,21 @@ export function installPermissions(ctx, catalog, signal) {
   ctx.inject(['sessions'], scope => adaptSlot(scope, 'conversation.input.permission', entry => entry.locale === 'permission.access', (inject, Native) => ({
     inject: (sessionId, ...args) => {
       const props = inject(sessionId, ...args)
-      return { ...props, hooks: { ...props.hooks, permissionCatalog: directory }, async select(value) {
+      const permissionDraft = scope.sessions.binding(sessionId)?.session.permissionDraft ?? emptyDraft
+      return { ...props, hooks: { ...props.hooks, permissionCatalog: directory, permissionDraft }, async select(value) {
         const session = scope.sessions.binding(sessionId)?.session
         const target = directory.getSnapshot().value?.options.find(option => option.value === value)
-        if (!session || !target || !canSelect(session.getSnapshot())) return false
+        const state = session?.getSnapshot()
+        if (!state || !target || !canSelect(state)) return false
+        if (state.archived) {
+          session.permissionDraft.set(target.id)
+          return true
+        }
+        const stored = session.permissionDraft.getSnapshot()
         const before = session.projections.faceOf('permissions').getSnapshot()
         try {
           const { permission } = await writePermissionAction({ action: 'select', threadId: sessionId, profileId: target.id }, signal)
+          session.permissionDraft.clear(stored)
           if (scope.sessions.binding(sessionId)?.session === session && session.projections.faceOf('permissions').getSnapshot() === before) {
             session.publishPermission(permission)
           }
@@ -216,8 +227,9 @@ export function installPermissions(ctx, catalog, signal) {
     },
     component: function PermissionSelect(props) {
       const projection = props.useProjection('permissions')
+      const draft = props.usePermissionDraft(value => value)
       const editable = props.useSession(canSelect)
-      const current = projection?.permission
+      const current = draft ? { profileId: draft, source: 'draft' } : projection?.permission
       const available = props.usePermissionCatalog(state => state.value?.options)
       const value = current?.profileId && permissionOptionValue(current.profileId)
       const currentValue = current?.source === 'runtime' && available?.some(option => option.value === value)

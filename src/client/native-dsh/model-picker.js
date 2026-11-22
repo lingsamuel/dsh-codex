@@ -14,8 +14,8 @@ function replaceMethod(object, name, method) {
   }
 }
 
-function canChangeModel({ archived, live, subagent, canAcceptDirectInput }) {
-  return !archived && !subagent && canAcceptDirectInput !== false
+function canChangeModel({ live, subagent, canAcceptDirectInput }) {
+  return !subagent && canAcceptDirectInput !== false
     && live.mode !== 'connecting' && live.mode !== 'disconnected'
     && ['notLoaded', 'idle', 'active'].includes(live.status?.type)
 }
@@ -71,10 +71,11 @@ export function installModelPicker(ctx, signal) {
       })
       const selectModel = replaceMethod(remote, 'selectModel', async ({ sessionId, provider, model, reasoningEffort }) => {
         const session = scope.sessions.binding(sessionId)?.session
-        if (!session || !canChangeModel(session.getSnapshot())) {
+        const state = session?.getSnapshot()
+        if (!state || !canChangeModel(state)) {
           return { ok: false, error: remoteFailure('此会话当前无法选择模型。') }
         }
-        if (session.getSnapshot().live.status.type === 'notLoaded') {
+        if (state.archived || state.live.status.type === 'notLoaded') {
           const selected = { provider, model, reasoningEffort }
           session.modelDraft.set(selected)
           return { ok: true, value: { selected } }

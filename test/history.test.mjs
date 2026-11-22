@@ -446,6 +446,73 @@ test('发送归档会话先按原生目录确认，再取消归档并恢复同�
     { archived: true, includedThreadIds: [thread.id], modelProviders: [], limit: 1 })
 })
 
+test('恢复归档会话时，在原生 queue 可能启动前应用草稿模型和权限', async t => {
+  for (const action of ['prompt', 'queue']) {
+    await t.test(action, async t => {
+      const thread = { id: 'archive-settings', cwd: '/workspace', preview: 'old', modelProvider: 'openai',
+        model: 'old', status: { type: 'notLoaded' } }
+      const target = { id: 'first', clientUserMessageId: 'prior' }
+      let archived = true
+      let settings
+      const { get, messages } = await fakeCodex(t, {
+        'thread/read': () => ({ result: { thread } }),
+        'permissionProfile/list': () => ({ result: { data: [{ id: ':read-only', allowed: true }] } }),
+        'thread/list': () => ({ result: { data: archived ? [thread] : [] } }),
+        'thread/unarchive': () => { archived = false; return { result: { thread } } },
+        'thread/queue/list': () => ({ result: { data: [target], nextCursor: null } }),
+        'thread/resume': params => {
+          assert.equal(archived, false)
+          settings = params
+          thread.model = params.model ?? thread.model
+          thread.reasoningEffort = params.config?.model_reasoning_effort
+          thread.status = { type: 'active' }
+          return { result: { thread, activePermissionProfile: params.permissions ? { id: params.permissions } : null } }
+        },
+        'thread/settings/update': () => {
+          Object.assign(thread, { model: 'selected', reasoningEffort: 'high' })
+          return { result: {} }
+        },
+        'thread/turns/list': () => ({ result: { data: [] } }),
+        'thread/queue/add': () => ({ result: { accepted: true } }),
+        'thread/queue/start': () => ({ result: { accepted: true } }),
+      })
+      const fields = { action, threadId: thread.id, unarchive: true, modelDraft: { provider: 'openai', model: 'selected', reasoningEffort: 'high' },
+        ...(action === 'prompt' ? { input: [{ type: 'text', text: '继续' }], clientUserMessageId: 'new', mode: 'queue' } : { operation: 'start' }) }
+      const submit = permissionDraft => get('/api/codex/conversation-action', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...fields, permissionDraft }),
+      })
+      assert.equal((await submit('unavailable-profile')).status, 400)
+      assert.equal(archived, true)
+      const accepted = await submit(':read-only')
+      assert.equal(accepted.status, 200)
+      assert.equal((await accepted.json()).permission?.profileId, ':read-only')
+      assert.deepEqual(settings, { threadId: thread.id, excludeTurns: true, model: 'selected', config: { model_reasoning_effort: 'high' }, permissions: ':read-only' })
+      assert.equal(messages.filter(({ method }) => method === 'thread/resume').length, 1)
+      assert.equal(messages.some(({ method }) => method === 'thread/settings/update'), false)
+    })
+  }
+})
+
+test('另一客户端已恢复归档会话并清空队列时，不提交草稿设置', async t => {
+  const thread = { id: 'empty-archive-queue', cwd: '/workspace', modelProvider: 'openai', status: { type: 'idle' } }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ result: { data: [] } }),
+    'permissionProfile/list': () => ({ result: { data: [{ id: ':read-only', allowed: true }] } }),
+  })
+  const response = await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'queue', operation: 'start', unarchive: true, threadId: thread.id,
+      modelDraft: { provider: 'openai', model: 'selected' }, permissionDraft: ':read-only',
+    }),
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { queueEmpty: true })
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
+    ['thread/read', 'thread/list', 'thread/read', 'thread/queue/list'])
+})
+
 test('继续归档会话的队列先取消归档，再确认目标消息', async t => {
   const thread = { id: 'archived-queue', status: { type: 'notLoaded' } }
   const target = { id: 'first', clientUserMessageId: 'browser' }

@@ -128,23 +128,59 @@ async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId) {
   }
 }
 
-async function startQueued(request, threadId, queuedSubmissionId, signal, unarchive, onResume, scheduleTitle) {
+async function submissionThread(request, threadId, { unarchive, modelDraft, permissionDraft }, permissions) {
+  const current = await addressableThread(request, threadId, unarchive === true)
+  validateModelDraft(current, modelDraft)
+  if (permissionDraft !== undefined) {
+    if (!permissions) throw badRequest('Codex 权限选择不可用。')
+    await permissions.validateSelection(request, current.cwd, required(permissionDraft, '缺少 Codex 权限预设。'))
+  }
+  return unarchive === true ? unarchiveForSubmission(request, current) : current
+}
+
+/** 原生可能在冷恢复时启动旧队列，因此草稿设置随恢复请求一起应用。 */
+async function submissionRuntime(request, thread, { modelDraft, permissionDraft }, signal, permissions) {
+  const settings = {
+    ...(modelDraft && { model: modelDraft.model, ...(modelDraft.reasoningEffort && {
+      config: { model_reasoning_effort: modelDraft.reasoningEffort },
+    }) }),
+    ...(permissionDraft && { permissions: permissionDraft }),
+  }
+  let permission
+  const runtime = await resumeThread(request, thread, (id, result) => {
+    const confirmed = permissions?.remember(id, result)
+    if (permissionDraft) permission = confirmed
+  }, settings)
+  if (permissionDraft && permission?.profileId !== permissionDraft) {
+    ({ permission } = await permissions.switchPermission(thread.id, permissionDraft, signal))
+    if (permission?.source !== 'runtime') throw conflict('permission-not-confirmed', 'Codex 尚未确认草稿权限。')
+  }
+  if (modelDraft) await updateModelSelection(request, { ...modelDraft, threadId: thread.id }, signal)
+  return { runtime, ...(permission && { permission }) }
+}
+
+async function startQueued(request, threadId, fields, signal, permissions, scheduleTitle) {
+  const { queuedSubmissionId } = fields
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
-  const current = await addressableThread(request, threadId, unarchive)
-  const thread = unarchive ? await unarchiveForSubmission(request, current) : current
+  const thread = await submissionThread(request, threadId, fields, permissions)
+  let permission
   function started(result) {
     if (result.turn?.id) scheduleTitle(thread, undefined, result.turn.id)
-    return result
+    return permission ? { ...result, permission } : result
   }
-  if (thread.status?.type !== 'notLoaded') return started(await request('thread/queue/start', { threadId, queuedSubmissionId }))
+  const hasDraft = fields.modelDraft !== undefined || fields.permissionDraft !== undefined
+  if (thread.status?.type !== 'notLoaded' && fields.unarchive !== true && !hasDraft) {
+    return started(await request('thread/queue/start', { threadId, queuedSubmissionId }))
+  }
 
   const queue = await readConversationQueue(request, threadId)
   const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
   if (!target) {
-    if (unarchive && queuedSubmissionId === undefined) return { queueEmpty: true }
+    if (queuedSubmissionId === undefined && (fields.unarchive === true || hasDraft)) return { queueEmpty: true }
     throw missingQueueItem()
   }
-  const resumed = await resumeThread(request, thread, onResume)
+  const ready = await submissionRuntime(request, thread, fields, signal, permissions)
+  permission = ready.permission
   async function claimedTurn() {
     const turn = await readLatestTurn(request, threadId, 'full')
     if (turn?.items?.some(item => item.type === 'userMessage' && item.clientId === target.clientUserMessageId)) {
@@ -154,7 +190,7 @@ async function startQueued(request, threadId, queuedSubmissionId, signal, unarch
   }
 
   // 冷恢复可能已领取队首。始终保留原目标，避免再启动后面的消息。
-  if (resumed.status?.type === 'active') {
+  if (ready.runtime.status?.type === 'active') {
     const claimed = await claimedTurn()
     if (claimed) return started(claimed)
   }
@@ -234,7 +270,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const fields = await request.json().catch(() => null)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
-      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId, modelDraft } = fields ?? {}
+      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId } = fields ?? {}
       try {
         if (action === 'project') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
@@ -267,15 +303,12 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           const params = { threadId, input: promptInput(input), clientUserMessageId: required(clientUserMessageId, '缺少消息 ID。') }
           if (mode === 'steer' && expectedTurnId !== undefined) required(expectedTurnId, '当前轮次 ID 无效。')
           return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
-            const unarchive = fields.unarchive === true
-            const current = await addressableThread(rpc, threadId, unarchive)
-            validateModelDraft(current, modelDraft)
-            const thread = unarchive ? await unarchiveForSubmission(rpc, current) : current
-            const runtime = await resumeThread(rpc, thread, permissions?.remember)
-            if (modelDraft) await updateModelSelection(rpc, { ...modelDraft, threadId }, signal)
+            const thread = await submissionThread(rpc, threadId, fields, permissions)
+            const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
             if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
-                return await steerTurn(rpc, { ...params, expectedTurnId })
+                const result = await steerTurn(rpc, { ...params, expectedTurnId })
+                return permission ? { ...result, permission } : result
               } catch (error) {
                 if (error.data?.reason !== 'steer-unavailable') throw error
               }
@@ -286,7 +319,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             const started = queuedId ? await startOnlyQueuedMessage(rpc, threadId, queuedId) : undefined
             scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
             if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, threadId, signal)
-            return result
+            return permission ? { ...result, permission } : result
           })))
         }
         if (action === 'cancel') {
@@ -296,9 +329,9 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        const { operation, queuedSubmissionId, unarchive } = fields
+        const { operation } = fields
         const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
-          ? startQueued(rpc, threadId, queuedSubmissionId, signal, unarchive === true, permissions?.remember, scheduleTitle)
+          ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle)
           : queueAction(rpc, threadId, fields))
         return json(await (operation === 'start' || operation === 'steer' ? submit(threadId, run) : run()))
       } catch (error) {

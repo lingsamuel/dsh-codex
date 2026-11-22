@@ -40,11 +40,11 @@ export async function unarchiveForSubmission(request, thread) {
 }
 
 /** 仅恢复仍未加载的会话，复查期间由 CLI 加载的会话直接复用现有运行时。 */
-export async function resumeThread(request, thread, onResume) {
+export async function resumeThread(request, thread, onResume, settings) {
   if (thread.status?.type !== 'notLoaded') return thread
   const current = await addressableThread(request, thread.id)
   if (current.status?.type !== 'notLoaded') return current
-  const resumed = await request('thread/resume', { threadId: thread.id, excludeTurns: true }).catch(error => {
+  const resumed = await request('thread/resume', { ...settings, threadId: thread.id, excludeTurns: true }).catch(error => {
     if (!(error instanceof CodexRpcError)) throw error
     throw new CodexRpcError({ code: error.code, data: error.data, message: `无法恢复会话。${error.message}` })
   })
