@@ -12,3 +12,9 @@ export function pluginRequestSource({ path, name }, plugin) {
 export function pluginUninstallId(plugin) {
   return plugin.source?.type === 'remote' ? remotePluginId(plugin) : plugin.id
 }
+
+/** 与 Codex CLI 一样，只允许切换可管理的已安装插件。 */
+export function pluginCanToggle(plugin) {
+  return Boolean(plugin?.installed && plugin.id && plugin.installPolicy !== 'INSTALLED_BY_DEFAULT'
+    && plugin.availability !== 'DISABLED_BY_ADMIN')
+}

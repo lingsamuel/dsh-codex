@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
+import { pluginCanToggle } from '../shared/codex-plugin-source.js'
 import { readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
 import { createCodexCapabilityRoute, invalidCapabilityRequest, requiredValue } from './codex-capability-route.mjs'
 
@@ -57,6 +58,19 @@ export function createCodexPluginRoutes(socketPath, ownerSignal) {
     }
     if (params.action === 'uninstall' && requiredValue(params.pluginId)) {
       return readCodex('plugin/uninstall', { pluginId: params.pluginId }, socketPath, signal)
+    }
+    if (params.action === 'enable' || params.action === 'disable') {
+      const source = pluginSource(params)
+      return withCodexReader(socketPath, signal, async request => {
+        const { plugin } = await request('plugin/read', source)
+        const summary = plugin?.summary
+        if (!pluginCanToggle(summary)) throw invalidCapabilityRequest('该插件当前无法启用或停用。')
+        // 配置使用安装 ID，且必须把含点的插件名作为同一个配置键。
+        return request('config/value/write', {
+          keyPath: `plugins.${JSON.stringify(summary.id)}`,
+          value: { enabled: params.action === 'enable' }, mergeStrategy: 'upsert',
+        })
+      })
     }
     throw invalidCapabilityRequest('Codex 插件操作无效。')
   }

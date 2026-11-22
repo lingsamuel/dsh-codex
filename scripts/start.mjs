@@ -15,20 +15,25 @@ const options = delimiter === -1 ? argv : argv.slice(0, delimiter)
 const fresh = options.includes('--fresh-profile')
 const dshArgs = [...options.filter(arg => arg !== '--fresh-profile'), ...argv.slice(options.length)]
 
-async function legacyGoalPatch(home, profile, manifest) {
+async function legacyProfilePatch(home, profile, manifest) {
   const { dsh } = JSON.parse(await readFile(manifest, 'utf8'))
   if (dsh?.profile?.bundles?.includes(pluginName)) return
   const { composeEntries, loadOptionalPatches, loadOverlayPatches } = await import('@deepseek-ai/dsh-app-boot')
   const layers = [join(profile, 'cordis.patch.yml'), join(home, 'cordis.patch.yml')]
     .map(path => loadOptionalPatches('dsh', path) ?? [])
   const entries = composeEntries(layers)
-  if (!entries.some(entry => entry.name === pluginName) || entries.some(entry => entry.id === 'ui-goal')) return
+  if (!entries.some(entry => entry.name === pluginName)) return
   const defaults = composeEntries([loadOverlayPatches('dsh', join(root, 'profile', 'cordis.patch.yml'))])
-  const goal = defaults.find(entry => entry.id === 'ui-goal')
-  if (!goal) return
-  // 旧启动器把默认插件复制进了用户补丁。补齐缺失的原生视图，保留那份配置和清单。
-  const path = join(runtime, 'legacy-ui-goal.patch.yml')
-  await writeFile(path, JSON.stringify([{ insert: [goal] }]) + '\n')
+  const viewIds = new Set(['ui-goal', 'ui-sidebar-files'])
+  const configured = new Set(entries.map(entry => entry.id))
+  const missing = defaults.filter(entry => viewIds.has(entry.id) && !configured.has(entry.id))
+  if (!missing.length) return
+  // 命令行补丁最后加载。先用 DSH 的合成器处理原来找不到目标的用户覆盖项。
+  const missingIds = new Set(missing.map(entry => entry.id))
+  const insert = composeEntries([[{ insert: missing }], ...layers]).filter(entry => missingIds.has(entry.id))
+  const { stringifyEntryYaml } = await import('@deepseek-ai/cordis-plugin-include')
+  const path = join(runtime, 'legacy-profile.patch.yml')
+  await writeFile(path, stringifyEntryYaml([{ insert }]))
   return path
 }
 
@@ -44,7 +49,7 @@ async function prepareProfile(home) {
   }
 
   const manifest = join(profile, 'package.json')
-  if (existsSync(manifest)) return legacyGoalPatch(home, profile, manifest)
+  if (existsSync(manifest)) return legacyProfilePatch(home, profile, manifest)
 
   // 组合包提供插件默认配置，DSH 的用户补丁可独立保存。先写完整清单再创建链接，避免并发启动读到半份文件。
   const staging = await mkdtemp(join(profile, '.initialize-'))

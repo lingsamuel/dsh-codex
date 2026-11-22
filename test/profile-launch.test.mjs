@@ -4,6 +4,7 @@ import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { parseEntryYaml, stringifyEntryYaml } from '@deepseek-ai/cordis-plugin-include'
 
 const project = fileURLToPath(new URL('../', import.meta.url))
 const dshManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
@@ -41,7 +42,10 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
   })
   const defaults = await readFile(join(root, 'profile', 'cordis.patch.yml'), 'utf8')
-  const previousPatch = defaults.replace("    - id: ui-goal\n      name: '@deepseek-ai/dsh-client-ui-goal'\n", '') + savedSetting
+  const previousDefaults = parseEntryYaml(defaults).map(patch => patch.insert ? {
+    insert: patch.insert.filter(entry => !['ui-goal', 'ui-sidebar-files'].includes(entry.id)),
+  } : patch)
+  const previousPatch = stringifyEntryYaml(previousDefaults) + savedSetting
   await mkdir(profile, { recursive: true })
   await writeFile(manifest, previousManifest)
   await writeFile(patch, previousPatch)
@@ -49,10 +53,21 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
   const config = dump('--dump-config')
   assert.match(config, /busyEnterBehavior: steer/)
   assert.match(config, /name: ['"]?@deepseek-ai\/dsh-client-ui-goal/)
+  assert.deepEqual(parseEntryYaml(config).find(entry => entry.id === 'ui-sidebar-files'), {
+    id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files',
+  })
   assert.equal(await readFile(patch, 'utf8'), previousPatch)
   assert.equal(await readFile(manifest, 'utf8'), previousManifest)
-  await writeFile(patch, defaults + savedSetting)
-  assert.equal([...dump('--dump-config').matchAll(/name: ['"]?@deepseek-ai\/dsh-client-ui-goal/g)].length, 1)
+  const disabledFiles = '- id: ui-sidebar-files\n  disabled: true\n'
+  await writeFile(patch, previousPatch + disabledFiles)
+  const disabled = parseEntryYaml(dump('--dump-config')).find(entry => entry.id === 'ui-sidebar-files')
+  assert.deepEqual(disabled, { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files', disabled: true })
+  await writeFile(patch, defaults + savedSetting + disabledFiles)
+  const overridden = parseEntryYaml(dump('--dump-config'))
+  assert.equal(overridden.filter(entry => entry.id === 'ui-goal').length, 1)
+  assert.deepEqual(overridden.filter(entry => entry.id === 'ui-sidebar-files'), [
+    { id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files', disabled: true },
+  ])
 })
 
 test('临时 Profile 加载插件默认配置，并在进程退出后清理', { skip: process.platform === 'win32' }, async t => {
@@ -64,6 +79,9 @@ test('临时 Profile 加载插件默认配置，并在进程退出后清理', { 
   const freshConfig = dump('--fresh-profile', '--dump-config')
   assert.match(freshConfig, /name: dsh-chatgpt/)
   assert.doesNotMatch(freshConfig, /busyEnterBehavior: steer/)
+  assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === 'ui-sidebar-files'), {
+    id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files',
+  })
   assert.throws(() => dump('--fresh-profile', '--dump-config', '--dump-default-config'), { status: 1 })
   assert.deepEqual(await readdir(runtime), ['dsh'])
   assert.equal(await readFile(patch, 'utf8'), savedSetting)

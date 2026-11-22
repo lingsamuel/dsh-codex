@@ -3,7 +3,7 @@ import {
   IconRefreshOutlineRegular, IconSearchOutlineRegular, Input, PathLabel, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { pluginRequestSource, pluginUninstallId } from '../../shared/codex-plugin-source.js'
+import { pluginCanToggle, pluginRequestSource, pluginUninstallId } from '../../shared/codex-plugin-source.js'
 import { externalWebUrl } from '../../shared/external-url.js'
 import { readPage, writeCodexCapability } from '../api.js'
 
@@ -12,7 +12,7 @@ const labels = {
   zh: {
     title: 'Codex 插件', installed: '已安装', available: '可发现的插件', disabled: '已停用', refresh: '刷新', loading: '正在读取插件…',
     empty: 'Codex 当前未返回插件。', search: '搜索插件', noResults: '没有匹配的插件。', back: '返回插件列表',
-    install: '安装', uninstall: '卸载', cancel: '取消', 'confirm.install': '使用 Codex 安装 {name}？',
+    install: '安装', uninstall: '卸载', enable: '启用', disable: '停用', cancel: '取消', 'confirm.install': '使用 Codex 安装 {name}？',
     'confirm.uninstall': '从 Codex 卸载 {name}？', unavailable: 'Codex 当前未开放此操作。',
     apps: 'App', connected: '已连接', authorize: '打开授权页面', authUnknown: '授权状态未知', authRequired: '需要授权',
     skills: '技能', servers: 'MCP 服务', capabilities: '能力',
@@ -22,7 +22,8 @@ const labels = {
   en: {
     title: 'Codex Plugins', installed: 'Installed', available: 'Available plugins', disabled: 'Disabled', refresh: 'Refresh',
     loading: 'Reading plugins…', empty: 'Codex returned no plugins.', search: 'Search plugins', noResults: 'No matching plugins.',
-    back: 'Back to plugins', install: 'Install', uninstall: 'Uninstall', cancel: 'Cancel', 'confirm.install': 'Install {name} with Codex?',
+    back: 'Back to plugins', install: 'Install', uninstall: 'Uninstall', enable: 'Enable', disable: 'Disable',
+    cancel: 'Cancel', 'confirm.install': 'Install {name} with Codex?',
     'confirm.uninstall': 'Uninstall {name} from Codex?', unavailable: 'This action is currently unavailable in Codex.',
     apps: 'Apps', connected: 'Connected', authorize: 'Open authorization page', authUnknown: 'Unknown authorization status', authRequired: 'Authorization required',
     skills: 'Skills', servers: 'MCP servers', capabilities: 'Capabilities',
@@ -176,6 +177,7 @@ function PluginDetail({ selection, detail, apps, installResult, busy, change, re
   const name = pluginName(summary)
   const available = summary.availability !== 'DISABLED_BY_ADMIN' && summary.installPolicy !== 'NOT_AVAILABLE'
   const action = summary.installed ? 'uninstall' : 'install'
+  const toggle = summary.enabled ? 'disable' : 'enable'
   const uninstallId = pluginUninstallId(summary)
   const canChange = summary.installed ? Boolean(uninstallId) : available
   const description = plugin?.description ?? summary.interface?.longDescription ?? summary.interface?.shortDescription
@@ -190,8 +192,12 @@ function PluginDetail({ selection, detail, apps, installResult, busy, change, re
           </Tag>
         </div>}
       </div>
-      {canChange && confirm !== action && <Button variant="outline" size="sm" disabled={busy}
-        onClick={() => setConfirm(action)}>{t(action)}</Button>}
+      <div className="codex-settings-actions">
+        {pluginCanToggle(summary) && <Button variant="outline" size="sm" disabled={busy || Boolean(confirm)}
+          onClick={() => { void change(toggle, selection.source) }}>{t(toggle)}</Button>}
+        {canChange && confirm !== action && <Button variant="outline" size="sm" disabled={busy}
+          onClick={() => setConfirm(action)}>{t(action)}</Button>}
+      </div>
     </header>
     {!canChange && <p className="codex-settings-notice">{t('unavailable')}</p>}
     {confirm === action && <div className="codex-settings-card codex-settings-toolbar">
@@ -199,7 +205,10 @@ function PluginDetail({ selection, detail, apps, installResult, busy, change, re
       <div className="codex-settings-actions">
         <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(null)}>{t('cancel')}</Button>
         <Button variant="primary" size="sm" disabled={busy || !canChange}
-          onClick={() => { setConfirm(null); void change(action, uninstallId) }}>{t(action)}</Button>
+          onClick={() => {
+            setConfirm(null)
+            void change(action, summary.installed ? { pluginId: uninstallId } : selection.source)
+          }}>{t(action)}</Button>
       </div>
     </div>}
     {(description || marketplacePath) && <div className="codex-settings-heading">
@@ -265,13 +274,13 @@ function PluginSettings({ useCodexHistory, cache, t }) {
       refreshInventory({ force: true })
     }
   }
-  async function change(action, pluginId) {
+  async function change(action, target) {
     if (changing.current) return
     changing.current = true
     setBusy(true)
     setActionError('')
     try {
-      const result = await writeCodexCapability('plugins', { action, ...(action === 'install' ? selection.source : { pluginId }) })
+      const result = await writeCodexCapability('plugins', { action, ...target })
       setInstallResult(action === 'install' ? result : null)
       for (const table of Object.values(cache)) {
         for (const entry of table.values()) entry.expiresAt = 0

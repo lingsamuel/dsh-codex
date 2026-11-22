@@ -134,6 +134,45 @@ test('插件目录、App 授权和安装状态读回原生 Codex，区分本地�
   assert.deepEqual((await (await request('plugins', { cwd })).json()).installed.marketplaces, [])
 })
 
+test('插件启停更新原生配置并保留安装，沿用 Codex 的插件管理策略', { timeout: 5_000 }, async t => {
+  const { createCodexPluginRoutes } = await import('../src/host/codex-plugins.mjs')
+  const source = { pluginName: 'plugins_mail_remote_fixture', remoteMarketplaceName: 'remote' }
+  const plugin = { id: 'mail.tools@remote', name: 'mail.tools', installed: true, enabled: true, availability: 'AVAILABLE',
+    installPolicy: 'AVAILABLE', source: { type: 'remote' }, remotePluginId: source.pluginName }
+  let writable = true
+  const native = await nativeRpc(t, (method, params) => {
+    if (method === 'plugin/read') {
+      assert.deepEqual(params, source)
+      return { plugin: { summary: plugin, apps: [] } }
+    }
+    if (method === 'plugin/installed') return { marketplaces: [{ name: 'remote', plugins: [plugin] }] }
+    assert.equal(method, 'config/value/write')
+    assert.deepEqual(params, { keyPath: 'plugins."mail.tools@remote"', value: { enabled: !plugin.enabled }, mergeStrategy: 'upsert' })
+    if (!writable) throw new Error('此配置由管理员管理。')
+    plugin.enabled = params.value.enabled
+    return { status: 'ok' }
+  })
+  const routes = createCodexPluginRoutes(native.socketPath, native.signal)
+  const change = action => access(routes, 'plugins', { method: 'POST', action, ...source })
+  assert.equal((await change('disable')).status, 200)
+  const { installed } = await (await access(routes, 'plugins', { part: 'installed' })).json()
+  assert.equal(installed.marketplaces[0].plugins[0].installed, true)
+  assert.equal(installed.marketplaces[0].plugins[0].enabled, false)
+  assert.equal((await change('enable')).status, 200)
+  assert.equal((await (await access(routes, 'plugin', source)).json()).plugin.summary.enabled, true)
+
+  writable = false
+  const rejected = await change('disable')
+  assert.equal(rejected.status, 400)
+  assert.equal((await rejected.json()).error, '此配置由管理员管理。')
+  plugin.installPolicy = 'INSTALLED_BY_DEFAULT'
+  assert.equal((await change('disable')).status, 400)
+  plugin.installPolicy = 'AVAILABLE'
+  plugin.availability = 'DISABLED_BY_ADMIN'
+  assert.equal((await change('disable')).status, 400)
+  assert.equal(native.calls.filter(call => call.method === 'config/value/write').length, 3)
+})
+
 test('读取原生 MCP 工具分页、刷新配置并关联 OAuth 完成通知', { timeout: 5_000 }, async t => {
   const { createCodexMcpRoutes } = await import('../src/host/codex-mcp.mjs')
   const name = 'notes'

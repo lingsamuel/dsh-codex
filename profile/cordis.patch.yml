@@ -78,6 +78,8 @@
       name: '@deepseek-ai/dsh-api-workspace-files'
     - id: ui-sidebar-documentpreview
       name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
+    - id: ui-sidebar-files
+      name: '@deepseek-ai/dsh-client-ui-sidebar-files'
     - id: ui-conversation
       name: '@deepseek-ai/dsh-client-ui-conversation'
     - id: ui-goal
