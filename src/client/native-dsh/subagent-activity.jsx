@@ -16,12 +16,16 @@ const rowStyle = {
   color: 'var(--dsw-alias-label-tertiary)',
 }
 const iconStyle = { display: 'inline-grid', placeItems: 'center', flex: 'none', width: iconSize, height: iconSize }
-// 路径与状态共用过程行的字体和行高，保留原生按钮的键盘操作。
+// 代码标签使用自己的字体设置，由过程行把两个文字框沿垂直中线对齐。
 const pathStyle = {
-  height: 'auto', maxWidth: '100%', minWidth: 0, padding: 0, background: 'none',
-  font: 'inherit', color: 'inherit', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start',
-  textDecoration: 'underline', textUnderlineOffset: '0.15em',
+  height: 'auto', maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: '0 5px',
+  backgroundColor: 'var(--dsw-alias-markdown-inline-code)',
+  border: '0.5px solid var(--dsw-alias-border-l1)', borderRadius: 'var(--dsw-radius-sm)',
+  font: 'var(--dsw-font-markdown-code, 0.875em/1.5 monospace)',
+  fontFamily: 'var(--dsh-font-family-code, "Cascadia Mono", "Source Code Pro"), var(--ds-font-family-code, ui-monospace, monospace)',
+  color: 'var(--dsw-alias-label-secondary)', whiteSpace: 'normal', overflowWrap: 'anywhere', textAlign: 'start',
 }
+const pathTextStyle = { font: 'inherit', minWidth: 0 }
 
 function SubagentActivity({ node, open, t }) {
   const { kind, agentThreadId, agentPath } = node.data
@@ -50,8 +54,10 @@ function SubagentActivity({ node, open, t }) {
     <span style={iconStyle} aria-hidden><IconUsersOutlineRegular size={16} /></span>
     <span>{t(kind)}</span>
     {agentThreadId
-      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>{agentPath}</Button>
-      : <span style={{ overflowWrap: 'anywhere' }}>{agentPath}</span>}
+      ? <Button size="sm" variant="ghost" onClick={openChild} disabled={busy} style={pathStyle}>
+          <code style={pathTextStyle}>{agentPath}</code>
+        </Button>
+      : <code style={pathStyle}>{agentPath}</code>}
     {unavailable && <span role="status">{t('unavailable')}</span>}
   </div>
 }
