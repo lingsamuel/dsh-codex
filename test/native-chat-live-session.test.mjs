@@ -170,6 +170,28 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   assert.deepEqual(readOnlyNotice(), ['此子智能体暂时只读', 'Codex 尚未提供此子会话的直接输入能力。'])
 })
 
+test('保存默认模型后，已打开的新会话草稿重读其工作目录的模型', async t => {
+  mockTransport(t)
+  const cwd = '/workspace/draft'
+  let selection = { provider: 'openai', model: 'first', reasoningEffort: 'low' }
+  const requests = []
+  globalThis.fetch = async url => {
+    requests.push([url.pathname, url.searchParams.get('cwd')])
+    return Response.json({ default: selection })
+  }
+  const { session } = createCodexHistory({ effect: install => t.after(install()) },
+    { id: 'web-new-draft', cwd, localDraft: true, status: { type: 'idle' } })
+  const projected = session.projections.faceOf('modelSelection')
+  const settle = () => new Promise(resolve => setImmediate(resolve))
+  await settle()
+  assert.deepEqual(projected.getSnapshot().next, selection)
+  selection = { provider: 'openai', model: 'saved', reasoningEffort: 'high' }
+  window.dispatchEvent(new Event('dsh-codex-model-default-changed'))
+  await settle()
+  assert.deepEqual(projected.getSnapshot().next, selection)
+  assert.deepEqual(requests, [['/api/codex/models', cwd], ['/api/codex/models', cwd]])
+})
+
 test('最近会话和草稿只保留缓存，视图重开时续读原生历史', async t => {
   const sources = []
   mockTransport(t, sources)

@@ -1,11 +1,10 @@
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, openCodexReader, readCodexPages, withCodexReader } from './app-server.mjs'
 import { hasNoMaterializedHistory } from './live-history.mjs'
 import { addressableThread, createThreadSubmissionQueue, isArchived } from './thread-runtime.mjs'
 import { permissionOf } from '../shared/permissions.js'
+import { createDefaultPreference } from './default-preference.mjs'
 
 const creationIdleMs = 60_000
 
@@ -36,38 +35,6 @@ async function requireProfile(request, cwd, profileId) {
   }
 }
 
-function createDefaultPreference(path) {
-  let profileId = null
-  let writes = Promise.resolve()
-  return {
-    async get() {
-      await writes
-      if (!path) return profileId
-      const saved = await readFile(path, 'utf8').catch(error => {
-        if (error.code !== 'ENOENT') throw error
-      })
-      return saved == null ? null : JSON.parse(saved).profileId ?? null
-    },
-    set(value) {
-      const write = writes.then(async () => {
-        if (path) {
-          const temporary = `${path}.${randomUUID()}.tmp`
-          try {
-            await mkdir(dirname(path), { recursive: true })
-            await writeFile(temporary, JSON.stringify({ profileId: value }), { mode: 0o600 })
-            await rename(temporary, path)
-          } finally {
-            await rm(temporary, { force: true })
-          }
-        }
-        profileId = value
-      })
-      writes = write.catch(() => {})
-      return write
-    },
-  }
-}
-
 /** 切换是显式操作。冷会话在恢复时应用预设，避免队列先用旧策略运行。 */
 export async function updateThreadPermission(request, threadId, profileId, waitForConfirmation, readDraftPermission) {
   const thread = await addressableThread(request, threadId)
@@ -94,7 +61,7 @@ export async function updateThreadPermission(request, threadId, profileId, waitF
 
 /** 同源设置接口只修改 DSH 的新会话默认值或明确指定的 Codex 线程。 */
 export function createPermissionActions(socketPath, ownerSignal, preferencePath, submit = createThreadSubmissionQueue()) {
-  const preference = createDefaultPreference(preferencePath)
+  const preference = createDefaultPreference(preferencePath, 'profileId')
   const known = new Map()
   const drafts = new Map()
 

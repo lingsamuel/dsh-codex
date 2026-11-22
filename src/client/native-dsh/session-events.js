@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../../shared/pages.js'
-import { readPage } from '../api.js'
+import { modelDefaultChanged, readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
 import { inlineAttachmentId, readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
 import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
@@ -883,9 +883,15 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     opened = true
     publishState({ mode: 'history', status: thread.status })
     markReady()
-    void readPage('models', { cwd: thread.cwd }, signal).then(({ default: model }) => {
-      if (!signal.aborted) publishModel(model)
-    }).catch(() => { /* 模型菜单仍可使用 Codex 的通用目录。 */ })
+    let modelRead = 0
+    function reloadModelDefault() {
+      const revision = ++modelRead
+      void readPage('models', { cwd: thread.cwd }, signal).then(({ default: model }) => {
+        if (!signal.aborted && revision === modelRead) publishModel(model)
+      }).catch(() => { /* 模型菜单仍可使用 Codex 的通用目录。 */ })
+    }
+    window.addEventListener(modelDefaultChanged, reloadModelDefault, { signal })
+    reloadModelDefault()
   } else if (visibleCatalog || retention) {
     ctx.effect(() => {
       const stopCatalog = visibleCatalog?.subscribe(syncWatch)

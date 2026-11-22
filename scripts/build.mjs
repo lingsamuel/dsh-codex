@@ -1,11 +1,12 @@
 import { build } from 'esbuild'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const { name } = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 
-await build({
+const client = await build({
   absWorkingDir: root,
   entryPoints: ['src/client/plugin.jsx'],
   outfile: 'dist/client.js',
@@ -13,6 +14,7 @@ await build({
   format: 'cjs',
   jsx: 'automatic',
   platform: 'browser',
+  write: false,
   external: [
     'react',
     'react-dom',
@@ -24,8 +26,14 @@ await build({
   banner: {
     js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,
   },
-  footer: { js: 'return module.exports; } });' },
+  footer: { js: 'return module.exports; }' },
 })
+const clientEntry = client.outputFiles.find(file => file.path.endsWith('.js'))
+const clientStyles = client.outputFiles.find(file => file.path.endsWith('.css'))
+// DSH 渲染器负责安装和卸载原生设置组件随包导出的 CSS。
+const styleMeta = clientStyles ? `, meta: () => ({ stylesheets: { 'client.css': { text: () => ${JSON.stringify(clientStyles.text)} } } })` : ''
+await mkdir(dirname(clientEntry.path), { recursive: true })
+await writeFile(clientEntry.path, `${clientEntry.text.trimEnd()}${styleMeta} });\n`)
 
 // 新版 DSH 随包发布搜索模块的 TypeScript 源码，由项目构建产出 Host 可加载的 JavaScript。
 await build({

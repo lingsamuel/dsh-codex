@@ -76,6 +76,12 @@ export function writePermissionAction(parameters, signal) {
   return writeAction('permission-action', parameters, signal)
 }
 
+export const modelDefaultChanged = 'dsh-codex-model-default-changed'
+
+export function writeModelDefault(selection, signal) {
+  return writeAction('model-default', { selection }, signal)
+}
+
 /** 异步答复优先通过 Codex 原生输入送进提问所在的轮次。 */
 export function writeAsyncQuestionAnswer(parameters, signal) {
   return writeAnswer('async-question-answer', parameters, signal)

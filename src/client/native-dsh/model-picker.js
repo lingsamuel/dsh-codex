@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import { readPage, writeThreadAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
+import { installModelDefaultSettings } from './model-default-settings.jsx'
 
 const modelSlot = 'conversation.input.model'
 
@@ -59,6 +60,7 @@ function filterDirectory(directory, session) {
 
 /** 复用 DSH 模型菜单，目录和会话设置均来自 Codex。 */
 export function installModelPicker(ctx, signal) {
+  installModelDefaultSettings(ctx, signal)
   ctx.inject(['remote', 'remote.session', 'sessions'], scope => {
     scope.effect(() => {
       const remote = scope.remote.session

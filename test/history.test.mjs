@@ -2470,6 +2470,78 @@ test('模型目录逐页读取各 Codex provider 的原生模型和等级', asyn
   assert.equal(messages.some(({ method }) => ['thread/start', 'thread/resume'].includes(method)), false)
 })
 
+test('Profile 默认模型随设置保存，并应用于各新会话的首次原生操作', async t => {
+  const threads = new Map()
+  const { openRoutes, directory, messages } = await fakeCodex(t, {
+    'config/read': () => ({ result: { config: { model: 'native', model_reasoning_effort: 'low' } } }),
+    'modelProvider/list': () => ({ result: { data: [{ id: 'test', name: 'Provider' }], defaultProviderId: 'test' } }),
+    'model/list': () => ({ result: { data: ['native', 'saved', 'explicit'].map(model => ({
+      model, displayName: model, defaultReasoningEffort: 'low',
+      supportedReasoningEfforts: ['low', 'high'].map(reasoningEffort => ({ reasoningEffort })),
+    })) } }),
+    'thread/start': ({ cwd, model, modelProvider, config }) => {
+      const thread = { id: `native-${threads.size}`, cwd, model, modelProvider,
+        reasoningEffort: config?.model_reasoning_effort, status: { type: 'idle' } }
+      threads.set(thread.id, thread)
+      return { result: { thread } }
+    },
+    'thread/read': ({ threadId }) => ({ result: { thread: threads.get(threadId) } }),
+    'thread/queue/add': () => ({ result: {} }),
+    'thread/goal/get': () => ({ result: { goal: null } }),
+    'thread/goal/set': ({ objective }) => ({ result: { goal: { objective, status: 'active' } } }),
+    'review/start': ({ threadId }) => {
+      threads.get(threadId).status = { type: 'active' }
+      return { result: { turn: { id: 'review' }, reviewThreadId: threadId } }
+    },
+  })
+  const profile = join(directory, 'profile')
+  const otherProfile = openRoutes(join(directory, 'other-profile'))
+  const writable = openRoutes(profile)
+  const modelDefault = '/api/codex/model-default'
+  const workspaceModels = `/api/codex/models?${new URLSearchParams({ cwd: directory })}`
+  const selection = { provider: 'test', model: 'saved', reasoningEffort: 'high' }
+  const native = { provider: 'test', model: 'native', reasoningEffort: 'low' }
+  assert.equal((await writable(modelDefault)).status, 200)
+  assert.deepEqual(await (await writable(modelDefault)).json(), { selection: null })
+  assert.equal((await postCodex(writable, 'model-default', { selection })).status, 200)
+
+  const get = openRoutes(profile)
+  assert.deepEqual(await (await get(modelDefault)).json(), { selection })
+  assert.deepEqual((await (await get(workspaceModels)).json()).default, selection)
+  assert.deepEqual((await (await otherProfile(workspaceModels)).json()).default, native)
+  assert.equal((await postCodex(get, 'model-default', { selection: { ...selection, reasoningEffort: 'unavailable' } })).status, 400)
+  assert.deepEqual(await (await get(modelDefault)).json(), { selection })
+  assert.equal(messages.some(({ method }) => method === 'thread/start' || method === 'config/batchWrite'), false)
+
+  const newSession = { cwd: directory }
+  const submit = (route, fields) => postCodex(get, route, {
+    threadId: 'web-new-30e49fb8-c38f-44ab-a918-3512c85445fd', newSession, clientUserMessageId: fields.action, ...fields,
+  })
+  const prompt = await submit('conversation-action', { action: 'prompt', mode: 'queue', input: [{ type: 'text', text: '首次发送' }] })
+  assert.equal(prompt.status, 200, await prompt.text())
+  const goal = await submit('command-action', { action: 'goal-create', objective: '首次创建目标' })
+  assert.equal(goal.status, 200, await goal.text())
+  const review = await submit('command-action', { action: 'review', target: { type: 'uncommittedChanges' },
+    modelDraft: { ...selection, model: 'explicit', reasoningEffort: 'low' } })
+  assert.equal(review.status, 200, await review.text())
+  const starts = messages.filter(({ method }) => method === 'thread/start').map(({ params }) =>
+    [params.modelProvider, params.model, params.config?.model_reasoning_effort])
+  assert.deepEqual(starts, [['test', 'saved', 'high'], ['test', 'saved', 'high'], ['test', 'explicit', 'low']])
+
+  assert.equal((await postCodex(get, 'model-default', { selection: null })).status, 200)
+  assert.deepEqual((await (await get(workspaceModels)).json()).default, native)
+
+  assert.equal((await postCodex(get, 'model-default', { selection: { reasoningEffort: 'high' } })).status, 200)
+  assert.deepEqual((await (await get(workspaceModels)).json()).default, { ...native, reasoningEffort: 'high' })
+  const effortOnly = await submit('conversation-action', { action: 'prompt', clientUserMessageId: 'effort-only',
+    mode: 'queue', input: [{ type: 'text', text: '使用 Codex 模型和网页强度' }] })
+  assert.equal(effortOnly.status, 200, await effortOnly.text())
+  const { params } = messages.findLast(({ method }) => method === 'thread/start')
+  assert.equal(params.model, undefined)
+  assert.equal(params.modelProvider, undefined)
+  assert.equal(params.config?.model_reasoning_effort, 'high')
+})
+
 test('模型选择只修改同一 provider 的后续轮次设置，并读取接受后的选择', async t => {
   let model = 'previous'
   let status = 'active'

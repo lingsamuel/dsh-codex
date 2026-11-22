@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { CodexRpcError, readCodexPages } from './app-server.mjs'
+import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
 /** 用 Codex 各 provider 自己的模型列表为 DSH 选择器供应可用等级。 */
@@ -65,6 +65,47 @@ export function validateModelDraft(thread, draft) {
     throw new CodexRpcError({ code: -32602, message: '无效的草稿模型设置。' })
   }
   if (thread && thread.modelProvider !== draft.provider) throw unavailable('会话的模型提供商已变化。')
+}
+
+/** 保存网页新会话的默认设置。仅覆盖强度时以 Codex 当前模型核对可用档位。 */
+export function createModelDefaultRoute(socketPath, ownerSignal, preference) {
+  function json(body, status = 200) {
+    return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } })
+  }
+  return {
+    path: '/api/codex/model-default', methods: ['GET', 'POST'], requestBody: 'buffered',
+    async fetch(request) {
+      if (request.method === 'POST' && request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+        return json({ error: '只接受 JSON 请求。' }, 415)
+      }
+      const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
+      try {
+        if (request.method === 'GET') return json({ selection: await preference.get() })
+        const { selection } = (await request.json().catch(() => null)) ?? {}
+        if (selection === undefined) return json({ error: '缺少默认模型设置。' }, 400)
+        let selected = null
+        if (selection !== null) {
+          const effortOnly = selection.model === undefined && selection.provider === undefined && typeof selection.reasoningEffort === 'string'
+          if (!effortOnly) validateModelDraft(undefined, selection)
+          const { groups, default: native } = await withCodexReader(socketPath, signal, readModelCatalog)
+          const { provider, model } = effortOnly ? native : selection
+          const { reasoningEffort } = selection
+          const option = groups.find(group => group.id === provider)?.models.find(value => value.id === model)
+          if (!option || (reasoningEffort !== undefined && !option.reasoning?.efforts.some(effort => effort.id === reasoningEffort))) {
+            return json({ error: '所选默认模型或思考强度不在 Codex 目录中。' }, 400)
+          }
+          selected = effortOnly ? { reasoningEffort }
+            : modelSelectionOf({ modelProvider: provider, model, reasoningEffort: reasoningEffort ?? option.reasoning?.defaultEffort })
+        }
+        signal.throwIfAborted()
+        await preference.set(selected)
+        return json({ selection: selected })
+      } catch (error) {
+        if (error instanceof CodexRpcError) return json({ error: error.message }, error.code === -32602 ? 400 : 502)
+        return json({ error: '无法读取或保存默认模型设置。' }, 503)
+      }
+    },
+  }
 }
 
 /** 已加载会话直接应用设置。随消息提交时，等原生确认后再允许发送。 */

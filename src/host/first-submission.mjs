@@ -54,11 +54,12 @@ async function submissionConflict(attempt, changed = false) {
 }
 
 /** 网页临时 ID 只在显式提交时启动线程。只在内存留存原生目标、提交标识与简化回执。 */
-export function createFirstSubmission(socketPath, submit, permissions, openProject) {
+export function createFirstSubmission(socketPath, submit, permissions, openProject, readDefaultModel) {
   const attempts = new Map()
 
   async function createThread(attempt, cwd, projectId, worktree, modelDraft, permissionDraft, signal) {
     if (!(await stat(cwd).catch(() => null))?.isDirectory()) throw invalid('工作目录不可用，请重新选择。')
+    const selectedModel = modelDraft ?? await readDefaultModel?.()
     const destination = worktree ? await resolveWorktreeCwd(cwd, worktree, signal) : cwd
     const create = async (rpc, retain) => {
       const project = projectId ?? (worktree && (await openProject(rpc, cwd)).project.id)
@@ -69,12 +70,12 @@ export function createFirstSubmission(socketPath, submit, permissions, openProje
       const options = permissionDraft === undefined
         ? await permissions?.startOptions(rpc, destination) : { permissions: permissionDraft }
       const config = await threadTaskToolsConfig(socketPath, signal)
-      if (modelDraft?.reasoningEffort) config.model_reasoning_effort = modelDraft.reasoningEffort
+      if (selectedModel?.reasoningEffort) config.model_reasoning_effort = selectedModel.reasoningEffort
       signal.throwIfAborted()
       attempt.state = 'opening'
       const started = await rpc('thread/start', {
         cwd: destination, historyMode: 'paginated', ...(project && { projectId: project }), ...options, config,
-        ...(modelDraft && { modelProvider: modelDraft.provider, model: modelDraft.model }),
+        ...(selectedModel?.model && { modelProvider: selectedModel.provider, model: selectedModel.model }),
       }).catch(error => {
         if (explicitlyRejected(error)) attempt.state = 'ready'
         throw error
