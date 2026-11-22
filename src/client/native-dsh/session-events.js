@@ -8,6 +8,7 @@ import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
+import { modelSelectionOf } from '../../shared/model-selection.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
@@ -25,6 +26,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   const state = createSnapshotStore({
     sessionId: thread.id,
     historyMode: thread.historyMode,
+    archived: Boolean(thread.archived),
+    canAcceptDirectInput: thread.canAcceptDirectInput,
     pendingSubmissions: [],
     running: false,
     subagent: address ? { address } : null,
@@ -52,7 +55,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
-  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure]])
+  const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
+  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['modelSelection', modelSelection]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -82,12 +86,13 @@ export function createCodexHistory(ctx, thread, catalog) {
     events.set({ entries, hasMore, revision: previous.revision + 1, change })
   }
 
-  function publishState({ mode, status, historyMode } = {}) {
+  function publishState({ mode, status, historyMode, canAcceptDirectInput } = {}) {
     const lastTurnStatus = transcript.getTurn(rows.at(-1)?.id)?.status
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
       if (status !== undefined) current.live.status = status
       if (historyMode !== undefined) current.historyMode = historyMode
+      if (canAcceptDirectInput !== undefined) current.canAcceptDirectInput = canAcceptDirectInput
       current.live.lastTurnStatus = lastTurnStatus
       current.running = current.live.mode === 'live' && current.live.status?.type === 'active'
       current.hasMore = Boolean(nextCursor)
@@ -106,6 +111,13 @@ export function createCodexHistory(ctx, thread, catalog) {
     const target = end?.data.reason.kind === 'error' ? { kind: 'turn-error', id: String(end.data.turn) }
       : newest && messageAnchor(newest)
     state.update(current => { current.reading = readState ? { readState, target } : undefined })
+  }
+
+  function publishModel(selection) {
+    const previous = modelSelection.getSnapshot().next
+    if ((previous && selection && previous.provider === selection.provider && previous.model === selection.model
+      && previous.reasoningEffort === selection.reasoningEffort) || previous === selection) return
+    modelSelection.set({ lastUsed: null, next: selection })
   }
 
   async function collectAttachments(turns) {
@@ -193,7 +205,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode }) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput }) {
     if (!opened) {
       await addOlderPage(page)
       opened = true
@@ -223,7 +235,8 @@ export function createCodexHistory(ctx, thread, catalog) {
       for (const turn of refreshed) await updateTurn(turn)
     }
     publish()
-    publishState({ mode, status, historyMode })
+    publishState({ mode, status, historyMode, canAcceptDirectInput })
+    if (selection !== undefined) publishModel(selection)
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
@@ -250,6 +263,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   function receive(frame) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
+      if (frame.type === 'model-selection') return publishModel(frame.selection)
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
         return
@@ -271,6 +285,11 @@ export function createCodexHistory(ctx, thread, catalog) {
           catalog?.setStatus(params.threadId, params.status)
         } else if (method === 'thread/readState/changed') {
           catalog?.setReadState(params.threadId, params.readState)
+        } else if (method === 'thread/settings/updated') {
+          const { effort, ...settings } = params.threadSettings
+          publishModel(modelSelectionOf({ ...settings, reasoningEffort: effort }))
+        } else if (method === 'thread/archived' || method === 'thread/unarchived') {
+          state.update(current => { current.archived = method === 'thread/archived' })
         } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
           state.update(current => {
             current.goal = params.goal ?? null
@@ -353,6 +372,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       loadOlder,
       loadThrough,
       findMessage,
+      publishModel,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       async readAttachment(id) {
         const value = attachments.get(id)

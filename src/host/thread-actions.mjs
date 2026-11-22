@@ -1,5 +1,6 @@
 import { pinnedSectionId } from '../shared/thread-sections.js'
-import { CodexRpcError, readCodex } from './app-server.mjs'
+import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
+import { updateModelSelection } from './models.mjs'
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -15,7 +16,7 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
       const contentType = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
       if (contentType !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const input = await request.json().catch(() => null)
-      const { threadId, action, expectedRevision, name, pinned } = input ?? {}
+      const { threadId, action, expectedRevision, name, pinned, provider, model, reasoningEffort } = input ?? {}
       if (typeof threadId !== 'string' || !threadId.trim()) return json({ error: '缺少 Codex 线程 ID。' }, 400)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       let method
@@ -30,17 +31,23 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
       } else if (action === 'pin' && typeof pinned === 'boolean') {
         method = 'thread/section/move'
         params = { threadId, sectionId: pinned ? pinnedSectionId : null }
-      } else {
+      } else if (action !== 'model' || typeof provider !== 'string' || !provider || typeof model !== 'string' || !model
+        || (reasoningEffort !== undefined && typeof reasoningEffort !== 'string')) {
         return json({ error: '无效的会话管理操作。' }, 400)
       }
 
       try {
+        if (action === 'model') {
+          return json(await withCodexReader(socketPath, signal,
+            request => updateModelSelection(request, { threadId, provider, model, reasoningEffort })))
+        }
         return json(await readCodex(method, params, socketPath, signal))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           if (error.data?.reason === 'readStateConflict') {
             return json({ error: '阅读状态已更新。', readState: error.data.readState }, 409)
           }
+          if (error.data?.reason === 'modelSelectionUnavailable') return json({ error: error.message }, 409)
           return json({ error: error.message }, error.code === -32600 || error.code === -32602 ? 400 : 502)
         }
         return json({ error: '无法连接 Codex App Server。' }, 503)

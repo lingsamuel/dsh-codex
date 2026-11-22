@@ -4,6 +4,7 @@ import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
 import { watchNativeUnread } from './unread-watch.mjs'
+import { modelSelectionOf } from '../shared/model-selection.js'
 
 const encoder = new TextEncoder()
 const catalogMethods = new Set([
@@ -43,6 +44,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let pendingReadState
           let receiptSequence = 0
           let rolloutFacts
+          let settingsStamp
           let connection
           let catalogReady = false
           let catalogQueue = Promise.resolve()
@@ -50,7 +52,16 @@ export function createWatchRoute(socketPath, ownerSignal) {
 
           async function sendFacts() {
             const facts = await rolloutFacts?.read()
-            if (facts) send({ type: 'rollout-facts', ...facts })
+            if (!facts || signal.aborted) return
+            const { settingsStamp: stamp, ...projection } = facts
+            send({ type: 'rollout-facts', ...projection })
+            if (stamp === settingsStamp) return
+            settingsStamp = stamp
+            // 旁路连接不会成为线程订阅者。原生设置落盘时仅读回该线程的当前模型。
+            const result = await connection.request('thread/read', { threadId }).catch(error => {
+              connection.close(error)
+            })
+            if (result && settingsStamp === stamp) send({ type: 'model-selection', selection: modelSelectionOf(result.thread) })
           }
 
           function wake() {
@@ -97,7 +108,8 @@ export function createWatchRoute(socketPath, ownerSignal) {
             }
             if (message.params?.threadId !== threadId) return
             const goal = goalMethods.has(message.method)
-            if (!catalogMethods.has(message.method) && !goal) return
+            const settings = message.method === 'thread/settings/updated'
+            if (!catalogMethods.has(message.method) && !goal && !settings) return
             if (!tail) { early.push(message); return }
             if (message.method === 'thread/readState/changed') {
               receiptSequence++
@@ -108,7 +120,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
               return
             }
             send({ type: 'notification', notification: message })
-            if (!goal) wake()
+            if (!goal && !settings) wake()
           }
 
           async function follow() {
@@ -140,7 +152,9 @@ export function createWatchRoute(socketPath, ownerSignal) {
                 threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
               })
               tail = createHistoryTail(connection.request, thread, page)
-              send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode, mode: watching ? 'live' : 'history' })
+              send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
+                selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput,
+                mode: watching ? 'live' : 'history' })
               for (const message of early) notify(message)
               early.length = 0
               void sendFacts()

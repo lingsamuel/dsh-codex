@@ -22,9 +22,9 @@ DSH 的会话搜索调用 Codex `thread/search`，在内存清单补上此前未
 
 轮次尾部汇总成功的 Codex 文件变更，与工具行共享补丁解析结果。相同路径的多次补丁保持原顺序，并由 DSH 的差异组件分别绘制。
 
-会话详情按需读取 `thread/read` 与 `thread/goal/get`。目标事件更新已打开的详情，当前模型配置不回填到历史轮次。已加载的会话同时通过 `thread/backgroundTerminals/list` 读取原生后台终端。
+原生 DSH 命令菜单按需执行 `/status`、`/goal`、`/ps` 和 `/rename`。状态读取 `thread/read`，目标读取 `thread/goal/get` 并消费实时通知，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
 
-DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近上下文 token 总量与模型窗口容量，并在只读会话详情中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。
+DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近上下文 token 总量与模型窗口容量，在原生输入栏和 `/status` 中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。
 
 浏览器投影把 Codex 的本地 URI 和行号转换为 DSH 支持的写法，复制操作沿用 DSH 显示的链接目标。右侧预览复用 DSH Workspace Files 的读取、分页和渲染，文件作用域只从 Codex 线程读取工作目录。文件读取服务不需要创建 DSH 会话或会话存储。
 
@@ -36,4 +36,4 @@ DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用�
 
 后续交互接入直接沿用 Codex App Server 的发送、插话、停止和服务端请求。Windows 原生接入复用同一协议，前提是目标 Codex 实例提供共享端点。
 
-会话管理复用 DSH 同源连接，只转发原生回执更新、改名和置顶。发送与轮次控制入口保持不可用。输入栏复用 DSH 原生编辑器和上下文计量。
+会话管理复用 DSH 同源连接，转发原生回执更新、改名、置顶和模型设置。模型选择器复用 DSH 原生组件，调用 Codex `model/list` 获取当前 provider 的模型和推理等级，对已加载的线程提交 `thread/settings/update`。网页旁路跟随原生设置落盘后读取当前值，历史轮次保持原来的模型信息。发送与轮次控制入口保持不可用。

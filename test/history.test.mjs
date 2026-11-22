@@ -84,6 +84,53 @@ test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', a
     ['thread/readState/update', 'thread/name/set', 'thread/section/move'])
 })
 
+test('模型目录逐页读取各 Codex provider 的原生模型和等级', async t => {
+  const model = (id, isDefault, effort) => ({ id, model: id, displayName: id, isDefault, defaultReasoningEffort: effort,
+    supportedReasoningEfforts: [{ reasoningEffort: effort, description: '原生等级' }] })
+  const { get, messages } = await fakeCodex(t, {
+    'modelProvider/list': () => ({ result: { data: [{ id: 'first', name: '原生 provider' }, { id: 'unavailable', name: '离线' }], defaultProviderId: 'first' } }),
+    'model/list': ({ modelProvider, cursor }) => modelProvider === 'unavailable'
+      ? { error: { code: -32600, message: 'unavailable' } }
+      : { result: cursor ? { data: [model('other', false, 'low')], nextCursor: null }
+        : { data: [model('native', true, 'high')], nextCursor: 'more' } },
+  })
+  const response = await get('/api/codex/models')
+  assert.equal(response.status, 200)
+  const catalog = await response.json()
+  assert.deepEqual(catalog.default, { provider: 'first', model: 'native', reasoningEffort: 'high' })
+  assert.deepEqual(catalog.groups[0].models.map(({ id, reasoning }) => [id, reasoning.defaultEffort]), [['native', 'high'], ['other', 'low']])
+  assert.deepEqual(catalog.failures.map(group => group.id), ['unavailable'])
+  assert.equal(messages.some(message => message.method === 'thread/resume'), false)
+})
+
+test('模型选择只修改同一 provider 的后续轮次设置，并读取接受后的选择', async t => {
+  let model = 'previous'
+  let status = 'active'
+  let queued = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'native-thread', model, modelProvider: 'original', reasoningEffort: 'high', status: { type: status } } } }),
+    'thread/settings/update': params => {
+      assert.deepEqual(params, { threadId: 'native-thread', model: 'selected', effort: 'high' })
+      if (!queued) model = params.model
+      return { result: {} }
+    },
+  })
+  const post = provider => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'model', threadId: 'native-thread', provider, model: 'selected', reasoningEffort: 'high', cwd: '/ignored' }),
+  })
+  assert.equal((await post('different')).status, 409)
+  assert.deepEqual(await (await post('original')).json(), { selection: { provider: 'original', model: 'selected', reasoningEffort: 'high' } })
+  status = 'notLoaded'
+  assert.equal((await post('original')).status, 409)
+  status = 'active'
+  model = 'previous'
+  queued = true
+  assert.deepEqual(await (await post('original')).json(), {})
+  assert.equal(messages.filter(message => message.method === 'thread/settings/update').length, 2)
+  assert.equal(messages.some(message => ['thread/resume', 'turn/start', 'turn/settings/update'].includes(message.method)), false)
+})
+
 test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t => {
   const thread = { id: 'original-thread', cwd: '/projects/example', updatedAt: 1234, projectId: null }
   const { get, messages } = await fakeCodex(t, {

@@ -21,6 +21,7 @@ function readonlyBinding(ctx, thread, catalog) {
     ready: history.ready,
     session: {
       ...history.session,
+      sessionId: thread.id,
       prompt: interactionUnavailable,
       cancel: interactionUnavailable,
       updateQueue: interactionUnavailable,

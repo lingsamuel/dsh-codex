@@ -3,6 +3,7 @@ import { createCatalogReader, readArchivedCatalog, readChildThreads, readProject
 import { createWatchRoute } from './live-watch.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
+import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
 function optionalParams(query, keys) {
@@ -49,23 +50,26 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => readChildThreads(requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'), socketPath, signal, query.get('archived') === '1')),
+    route('models', (_, signal) => withCodexReader(socketPath, signal, readModelCatalog)),
     route('thread-info', (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
+      const view = query.get('view')
       return withCodexReader(socketPath, signal, async request => {
         function unavailable(error) {
           if (error.code === -32601 || error.code === -32602) return null
           throw error
         }
-        const [{ thread }, goalResult] = await Promise.all([
-          request('thread/read', { threadId }),
-          request('thread/goal/get', { threadId }).catch(unavailable),
+        const [reading, goalResult] = await Promise.all([
+          view === 'goal' ? undefined : request('thread/read', { threadId }),
+          !view || view === 'goal' ? request('thread/goal/get', { threadId }).catch(unavailable) : undefined,
         ])
-        const terminals = thread.status?.type && thread.status.type !== 'notLoaded'
+        const thread = reading?.thread
+        const terminals = (!view || view === 'ps') && thread?.status?.type && thread.status.type !== 'notLoaded'
           ? await readCodexPages(cursor => request('thread/backgroundTerminals/list', {
             threadId, limit: 50, ...(cursor && { cursor }),
           })).catch(unavailable)
           : undefined
-        return { model: thread.model, reasoningEffort: thread.reasoningEffort, goal: goalResult?.goal ?? null, terminals }
+        return { model: thread?.model, reasoningEffort: thread?.reasoningEffort, goal: goalResult?.goal ?? null, terminals }
       })
     }),
     route('projects', (query, signal) => readProjectPage(

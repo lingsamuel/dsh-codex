@@ -18,6 +18,8 @@ export function createRolloutFacts(path, signal) {
   let line = ''
   let decoder = new StringDecoder('utf8')
   let identity
+  let generation = 0
+  let settingsChanges = 0
   let previous = '{}'
   let queue = Promise.resolve()
 
@@ -27,7 +29,7 @@ export function createRolloutFacts(path, signal) {
   }
 
   function consume(text) {
-    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count/.test(text)) return
+    if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
@@ -48,6 +50,8 @@ export function createRolloutFacts(path, signal) {
           // Codex 使用上一轮的 total_tokens 作为活跃上下文大小，整个会话的累计用量另有字段。
           currentTurn().contextPressure = { pressureTokens, contextWindow }
         }
+      } else if (value?.type === 'thread_settings_applied') {
+        settingsChanges++
       }
       return
     }
@@ -72,6 +76,8 @@ export function createRolloutFacts(path, signal) {
       const current = `${dev}:${ino}`
       if (identity !== current || size < offset) {
         identity = current
+        generation++
+        settingsChanges = 0
         turns = []
         pendingPlans.clear()
         offset = 0
@@ -89,6 +95,7 @@ export function createRolloutFacts(path, signal) {
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
+        settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

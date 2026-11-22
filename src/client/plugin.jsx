@@ -4,7 +4,8 @@ import { installLiveStatus } from './native-dsh/live-status.jsx'
 import { installMessageSearch } from './native-dsh/message-search.jsx'
 import { installArchiveView } from './native-dsh/archive-view.jsx'
 import { installTurnChanges } from './native-dsh/turn-changes.jsx'
-import { installSessionInfo } from './native-dsh/session-info.jsx'
+import { installCommands } from './native-dsh/commands.jsx'
+import { installModelPicker } from './native-dsh/model-picker.js'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 
@@ -22,6 +23,7 @@ export function apply(ctx) {
   installMessageSearch(ctx)
   installArchiveView(ctx)
   installTurnChanges(ctx)
-  installSessionInfo(ctx)
+  installModelPicker(ctx, controller.signal)
+  installCommands(ctx)
   installReadReceipts(ctx, catalog)
 }
