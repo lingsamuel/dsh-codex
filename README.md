@@ -1,6 +1,10 @@
-# DSH ChatGPT
+<h1><img src="assets/logo.svg" alt="Codex on DSH" width="282"></h1>
 
-DSH ChatGPT 在独立的 DeepSeek Harness `codex` Profile 中接入本机 Codex。你可以通过 DSH 的原生工作区和聊天界面浏览项目、查看历史，或接着处理 CLI 中的任务。
+Codex on DSH 在独立的 DeepSeek Harness `codex` Profile 中接入本机 Codex。你可以通过 DSH 的原生工作区和聊天界面浏览项目、查看历史，或接着处理 CLI 中的任务。
+
+<img src="assets/readme-preview.png" alt="Codex on DSH 的侧栏、示例会话和文件变更" width="880">
+
+<sub>界面示意，使用模拟会话。</sub>
 
 ## 核心功能
 
