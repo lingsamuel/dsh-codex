@@ -112,7 +112,9 @@ export function createCodexHistory(ctx, thread, catalog) {
       if (archived !== undefined) current.archived = Boolean(archived)
       current.live.lastTurnStatus = lastTurn?.status
       current.live.activeTurnId = lastTurn?.status === 'inProgress' ? lastTurn.id : undefined
-      current.running = (current.live.mode === 'live' || current.live.mode === 'history') && current.live.status?.type === 'active'
+      // 线程状态与已保存轮次各自到达。只有两者都确认运行时，输入栏才能对该轮插话。
+      current.running = (current.live.mode === 'live' || current.live.mode === 'history')
+        && current.live.status?.type === 'active' && current.live.activeTurnId !== undefined
       current.hasMore = Boolean(nextCursor)
       if (lastTurn) current.blank = false
       if (opened) {

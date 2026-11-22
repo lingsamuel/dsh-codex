@@ -113,6 +113,21 @@ async function deleteQueued(request, params) {
   return result
 }
 
+/** 原生暂停队列时，空闲发送仍可启动本次唯一的消息。旧待发项由用户显式继续。 */
+async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId) {
+  try {
+    // 入队期间，CLI 或网页可能刚好结束上一轮。用接纳消息后的状态决定是否启动。
+    const { thread } = await request('thread/read', { threadId })
+    if (thread.status?.type !== 'idle') return
+    const { data, nextCursor } = await request('thread/queue/list', { threadId, limit: 2 })
+    if (data.length === 1 && data[0].id === queuedSubmissionId && nextCursor == null) {
+      return await request('thread/queue/start', { threadId, queuedSubmissionId })
+    }
+  } catch {
+    // 入队已经确认。原生可能已领取消息或开始另一轮，后续由原生队列接管。
+  }
+}
+
 async function startQueued(request, threadId, queuedSubmissionId, signal, unarchive, onResume, scheduleTitle) {
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
   const current = await addressableThread(request, threadId, unarchive)
@@ -256,18 +271,20 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             const current = await addressableThread(rpc, threadId, unarchive)
             validateModelDraft(current, modelDraft)
             const thread = unarchive ? await unarchiveForSubmission(rpc, current) : current
-            await resumeThread(rpc, thread, permissions?.remember)
+            const runtime = await resumeThread(rpc, thread, permissions?.remember)
             if (modelDraft) await updateModelSelection(rpc, { ...modelDraft, threadId }, signal)
-            if (thread.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
+            if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
                 return await steerTurn(rpc, { ...params, expectedTurnId })
               } catch (error) {
                 if (error.data?.reason !== 'steer-unavailable') throw error
               }
             }
-            // turn/start 也能向活动轮次插话。原生队列能处理竞争，并在空闲时自行启动。
+            // turn/start 也能向活动轮次插话，普通发送交由会检查空闲状态的原生队列。
             const result = await rpc('thread/queue/add', params)
-            scheduleTitle(thread, clientUserMessageId)
+            const queuedId = result.queuedSubmission?.id
+            const started = queuedId ? await startOnlyQueuedMessage(rpc, threadId, queuedId) : undefined
+            scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
             if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, threadId, signal)
             return result
           })))

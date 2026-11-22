@@ -198,6 +198,7 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
 test('网页首条消息进入历史后只用一个临时轮次拟标题，并通过原生事件更新目录', async t => {
   const adopt = Promise.withResolvers()
   const title = await titleFixture(t, { defer: true, waitForClaim: adopt.promise })
+  title.thread.status = { type: 'active', activeFlags: [] }
   const abort = new AbortController()
   t.after(() => abort.abort())
   const response = await title.get('/api/codex/watch?scope=catalog', { signal: abort.signal })
@@ -227,6 +228,7 @@ test('网页首条消息进入历史后只用一个临时轮次拟标题，并�
     await observedQueue
     assert.equal(title.inferenceCount(), 0)
     assert.equal((await title.send()).status, 200)
+    title.thread.status = { type: 'idle' }
     assert.equal((await title.post({ action: 'queue', operation: 'start', queuedSubmissionId: 'first' })).status, 200)
     await delay(1_200)
     assert.equal(title.inferenceCount(), 0)
@@ -327,6 +329,7 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
       return { result: { thread } }
     },
     'thread/queue/add': () => ({ result: { queuedSubmission } }),
+    'thread/queue/list': () => ({ result: { data: [], nextCursor: null } }),
     'turn/steer': ({ expectedTurnId }) => expectedTurnId === 'active-turn' ? { result: { turnId: 'active-turn' } }
       : { error: { code: -32600, message: 'expected active turn id `stale-turn` but found `active-turn`' } },
     'turn/interrupt': () => ({ result: {} }),
@@ -355,12 +358,53 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
+    ['thread/queue/list', { threadId: thread.id, limit: 2 }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
     ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'stale-turn' }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
     ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' }],
     ['turn/interrupt', { threadId: thread.id, turnId: 'active-turn' }],
   ])
+})
+
+test('中断后空闲发送会启动唯一的新稿，既有待发消息仍由继续队列控制', async t => {
+  const cases = [
+    { name: '启动暂停队列中唯一的新稿', pending: [] },
+    { name: '保留此前暂停的队列', pending: [{ id: 'old', clientUserMessageId: 'held' }] },
+    { name: '初次读取后轮次中断，仍能启动新稿', pending: [], wasActive: true },
+  ]
+  for (const { name, pending, wasActive } of cases) {
+    await t.test(name, async t => {
+      const threadId = 'idle-after-interrupt'
+      const queued = [...pending]
+      let status = wasActive ? 'active' : 'idle'
+      const { get, messages } = await fakeCodex(t, {
+        'thread/read': () => ({ result: { thread: { id: threadId, status: { type: status } } } }),
+        'thread/queue/add': params => {
+          status = 'idle'
+          const queuedSubmission = { id: 'new', ...params }
+          queued.push(queuedSubmission)
+          return { result: { queuedSubmission } }
+        },
+        'thread/queue/list': () => ({ result: { data: queued, nextCursor: null } }),
+        'thread/queue/start': ({ queuedSubmissionId }) => {
+          assert.equal(queuedSubmissionId, 'new')
+          queued.shift()
+          return { result: { turn: { id: 'next-turn' } } }
+        },
+      })
+      const response = await get('/api/codex/conversation-action', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+          action: 'prompt', threadId, mode: wasActive ? 'queue' : 'steer', expectedTurnId: 'interrupted-turn',
+          clientUserMessageId: 'browser', input: [{ type: 'text', text: '新消息' }],
+        }),
+      })
+      assert.equal(response.status, 200)
+      assert.equal(messages.some(({ method }) => method === 'turn/steer'), false)
+      assert.equal(messages.some(({ method }) => method === 'thread/queue/start'), !pending.length)
+      assert.deepEqual(queued.map(({ id }) => id), pending.length ? ['old', 'new'] : [])
+    })
+  }
 })
 
 test('发送归档会话先按原生目录确认，再取消归档并恢复同一个线程', async t => {

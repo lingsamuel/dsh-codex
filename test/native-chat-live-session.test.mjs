@@ -189,8 +189,9 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
     'next-turn': [{ id: 'codex-q', role: 'user', source: { kind: 'user', rpcId: 'pending-input' },
       content: [{ type: 'text', text: 'queued text' }] }], 'next-step': [],
   })
-  await emit({ type: 'change', turn: { id: 'current', status: 'completed' }, items: [] })
+  await emit({ type: 'change', turn: { id: 'current', status: 'interrupted' }, items: [] })
   assert.equal(history.activeTurnId(), undefined)
+  assert.equal(history.session.getSnapshot().running, false)
 })
 
 test('实时问题使用原生请求身份，原生确认完成后清理当前投影', async t => {

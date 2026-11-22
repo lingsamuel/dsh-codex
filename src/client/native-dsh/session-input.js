@@ -80,10 +80,11 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
     beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
       const requestId = crypto.randomUUID()
       const { running, archived } = session.getSnapshot()
-      const placement = running && mode === 'steer' ? 'steering'
+      const expectedTurnId = mode === 'steer' ? activeTurnId() : undefined
+      const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { onAccept, onRetire, expectedTurnId: mode === 'steer' ? activeTurnId() : undefined,
+      submissions.set(requestId, { onAccept, onRetire, expectedTurnId,
         model: modelDraft.getSnapshot(), unarchive: archived })
       updateState(state => {
         state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
@@ -107,7 +108,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft) {
           if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }
           throw new Error('当前仅支持发送文本和图片。')
         })
-        await native('prompt', { input, mode, clientUserMessageId: requestId, expectedTurnId, modelDraft: selection,
+        await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId, expectedTurnId, modelDraft: selection,
           ...(unarchive && { unarchive: true }) }, signal)
         modelDraft.clear(selection)
         return accepted

@@ -1,13 +1,14 @@
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, Modal, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useRef, useState } from 'react'
 import { writeApprovalDecision } from '../api.js'
 
 const composer = 'conversation.composer'
 const utilities = 'conversation.session.header.utilities'
+const detail = 'conversation.approval.detail'
 const locale = 'codex.approval'
 const labels = {
   zh: {
-    open: '查看待审批请求', close: '关闭审批', select: '选择审批请求',
+    open: '查看待审批请求', close: '关闭审批', select: '选择审批请求', waiting: '等待审批',
     command: '允许执行命令？', 'terminal-input': '允许向终端写入输入？', network: '允许访问网络？',
     'file-change': '允许修改文件？', permissions: '授予请求的额外权限？',
     workspace: '工作目录 {path}', root: '请求写入范围 {path}',
@@ -17,7 +18,7 @@ const labels = {
     accept: '本次允许', 'accept.turn': '本轮允许', acceptForSession: '本会话允许', decline: '拒绝', cancel: '取消操作',
   },
   en: {
-    open: 'View pending approvals', close: 'Close approvals', select: 'Select approval request',
+    open: 'View pending approvals', close: 'Close approvals', select: 'Select approval request', waiting: 'Waiting for approval',
     command: 'Allow this command?', 'terminal-input': 'Allow sending input to the terminal?', network: 'Allow network access?',
     'file-change': 'Allow these file changes?', permissions: 'Grant the requested additional permissions?',
     workspace: 'Working directory {path}', root: 'Requested write scope {path}',
@@ -27,6 +28,8 @@ const labels = {
     accept: 'Allow once', 'accept.turn': 'Allow for this turn', acceptForSession: 'Allow for this session', decline: 'Deny', cancel: 'Cancel operation',
   },
 }
+const cardWidth = { width: '100%', maxWidth: 'var(--dsh-chat-content-width, 48rem)', marginInline: 'auto', boxSizing: 'border-box' }
+const actionRow = { ...cardWidth, display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8, padding: '8px 16px' }
 
 function useApprovalRequest(useProjection, key) {
   return useProjection('codexApprovals', approvals => approvals?.find(request => request.key === key))
@@ -54,7 +57,7 @@ function ApprovalRequestDetail({ request, t }) {
     request.grantRoot && t('root', { path: request.grantRoot }),
     permissions?.network?.enabled && t('networkAccess'),
   ].filter(Boolean)
-  return <>
+  return <div style={{ display: 'grid', gap: 6, overflowWrap: 'anywhere' }}>
     {entries.map((entry, index) => <div key={index} style={{ whiteSpace: 'pre-wrap' }}>{entry}</div>)}
     {paths.length > 0 && <details open><summary>{t('filesystem')}</summary>
       {paths.map((path, index) => <div key={index}>{path}</div>)}
@@ -64,7 +67,29 @@ function ApprovalRequestDetail({ request, t }) {
       const title = t(destination ? 'change.move' : `change.${kind.type}`, { path, destination })
       return <details key={index}><summary>{title}</summary><pre style={{ whiteSpace: 'pre-wrap' }}>{diff}</pre></details>
     }) : <div>{t('snapshotPending')}</div>)}
-  </>
+  </div>
+}
+
+function NativeApprovalDetail({ callId, useProjection, t }) {
+  const request = useApprovalRequest(useProjection, callId)
+  return request && <ApprovalRequestDetail request={request} t={t} />
+}
+
+function ApprovalFallback({ request, pending, t, children }) {
+  return <div data-codex-approval-fallback="" aria-busy={pending} style={{ ...cardWidth,
+    overflow: 'hidden', border: '1px solid var(--dsw-alias-state-warn-secondary)', borderRadius: 'var(--dsw-radius-xl)',
+    background: 'var(--dsw-specific-input-major)', boxShadow: 'var(--dsw-shadow-lv2)',
+  }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px', fontSize: 13,
+      background: 'var(--dsw-alias-state-warn-tertiary)', color: 'var(--dsw-alias-state-warn-primary)',
+    }}><StateDot state={pending ? 'ongoing' : 'warning'} />{t('waiting')}</div>
+    <div style={{ display: 'grid', gap: 8, maxHeight: 'var(--dsh-composer-text-max-height, 45vh)', overflowY: 'auto', padding: '12px 16px 4px' }}>
+      <strong>{t(request.kind)}</strong>
+      {request.reason && <div>{request.reason}</div>}
+      <ApprovalRequestDetail request={request} t={t} />
+    </div>
+    <div style={actionRow}>{children}</div>
+  </div>
 }
 
 function ApprovalCard({ request, renderFactorySlot, t }) {
@@ -95,18 +120,16 @@ function ApprovalCard({ request, renderFactorySlot, t }) {
     disabled={pending} onClick={() => { void decide(decision).catch(() => {}) }}>{label(decision)}</Button>)
   // DSH 卡片的拒绝按钮固定。仅有取消的请求必须显示为取消，避免混淆 Codex 的两种决定。
   const canRenderNativeCard = Boolean(allow && deny)
-  const fallback = <>
-    <strong>{t(kind)}</strong>
-    {reason && <p>{reason}</p>}
+  const fallback = <ApprovalFallback request={request} pending={pending} t={t}>
     {buttons(canRenderNativeCard ? [deny, allow] : decisions)}
-  </>
+  </ApprovalFallback>
+  const otherDecisions = canRenderNativeCard ? decisions.filter(decision => decision !== allow && decision !== deny) : []
   return <section data-codex-approval={key}>
-    <ApprovalRequestDetail request={request} t={t} />
     {canRenderNativeCard ? renderFactorySlot('conversation.approval.card', {
-      requestKey: key, title: t(kind), description: reason ?? undefined, allowLabel: label(allow),
+      requestKey: key, callId: key, title: t(kind), description: reason ?? undefined, allowLabel: label(allow),
       canAnswer: () => !responding.current, onAllow: () => decide(allow), onReject: () => decide(deny),
     }, { fallback }) : fallback}
-    {canRenderNativeCard && buttons(decisions.filter(decision => decision !== allow && decision !== deny))}
+    {otherDecisions.length > 0 && <div style={actionRow}>{buttons(otherDecisions)}</div>}
     {error && <p role="alert">{error}</p>}
   </section>
 }
@@ -166,4 +189,6 @@ export function installCodexApprovals(ctx) {
     select: ({ pendingInteraction }) => pendingInteraction?.codexApproval ? pendingInteraction : null,
   }, ApprovalComposer))
   ctx.slots.inject(utilities, () => ctx.slots.register({ name: utilities, id: 'codex-open-approval', order: 55, locale }, ApprovalUtilities))
+  // 原生聊天详情按 DSH 工具调用 ID 查找。Codex 请求在独立 Profile 使用自己的原生详情。
+  ctx.slots.inject(detail, () => ctx.slots.register({ name: detail, id: 'codex-approval-detail', locale, priority: -1 }, NativeApprovalDetail))
 }
