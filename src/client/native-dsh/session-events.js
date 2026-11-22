@@ -397,8 +397,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       publishGoal(goal, goalRevisionAtConnect)
       publishGoalCompletion(goal)
     }
-    todos.set(undefined)
-    contextPressure.set(undefined)
+    if (!replace) {
+      todos.set(undefined)
+      contextPressure.set(undefined)
+    }
     if (status) catalog?.setStatus(thread.id, status)
     publishReadingReceipt(readState)
     if (readState !== undefined) {
@@ -488,13 +490,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       }
       if (frame.type === 'unread') return catalog?.applyUnread(frame)
       if (frame.type === 'rollout-facts') {
-        todos.set(frame.todos)
-        contextPressure.set(frame.contextPressure)
+        if ('todos' in frame) todos.set(frame.todos ?? undefined)
+        if ('contextPressure' in frame) contextPressure.set(frame.contextPressure ?? undefined)
         publishCancelledToolCalls(frame.cancelledToolCalls)
         publishTurnDirectories(frame.turnWorkingDirectories)
         if (frame.goalInputs || frame.goalCompletions) publishGoalHistory(frame.goalInputs, frame.goalCompletions)
-        if (JSON.stringify(recordedTurnPermission) !== JSON.stringify(frame.turnPermission)) {
-          recordedTurnPermission = frame.turnPermission
+        if ('turnPermission' in frame) {
+          recordedTurnPermission = frame.turnPermission ?? undefined
           publishState()
         }
         const recorded = frame.permission
@@ -553,6 +555,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
         publishCancelledToolCalls([])
+        publishTurnDirectories({})
         publishGoalHistory({}, {})
         recordedTurnPermission = undefined
         lastSavedPlanMode = undefined

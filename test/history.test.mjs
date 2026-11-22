@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter, once } from 'node:events'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
@@ -65,6 +65,14 @@ function postCommand(get, action, fields) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ threadId: 'main', action, ...fields }),
   })
+}
+
+function openHistoryProjection(directory) {
+  const db = new DatabaseSync(join(directory, 'thread_history_1.sqlite'))
+  db.exec(`PRAGMA journal_mode = WAL;
+    CREATE TABLE thread_history_projection_state (thread_id TEXT PRIMARY KEY,
+      next_rollout_byte_offset INTEGER NOT NULL, next_rollout_ordinal INTEGER NOT NULL);`)
+  return db
 }
 
 test('Markdown 导出用原生分页读取归档会话的全部已保存内容', async t => {
@@ -2562,6 +2570,66 @@ test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线
   await fixture.clientClosed
 })
 
+test('分页历史 WAL 只唤醒检查点变动的会话，rollout 单独推送变化字段', { timeout: 5000 }, async t => {
+  const threads = ['first', 'second', 'third']
+  const turn = { id: 'round', status: 'completed', items: [] }
+  const late = { type: 'agentMessage', id: 'late', text: '已保存的增量' }
+  const event = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const tokens = total_tokens => event('event_msg', { type: 'token_count',
+    info: { last_token_usage: { total_tokens }, model_context_window: 100 } })
+  let directory
+  let projected = false
+  const { get, messages, directory: sqliteHome } = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => ({ result: { thread: { id: threadId, name: threadId,
+      status: { type: 'idle' }, historyMode: 'paginated', path: join(directory, `${threadId}.jsonl`),
+    } } }),
+    'thread/turns/list': () => ({ result: { data: [turn], backwardsCursor: 'round' } }),
+    'thread/items/list': ({ threadId, cursor }) => ({ result: {
+      backwardsCursor: threadId === threads[0] && projected ? 'new-item' : 'initial-item',
+      data: cursor === 'initial-item' ? [{ turnId: turn.id, item: late }] : [],
+    } }),
+  })
+  directory = sqliteHome
+  using db = openHistoryProjection(directory)
+  const checkpoint = db.prepare('INSERT OR REPLACE INTO thread_history_projection_state VALUES (?, ?, ?)')
+  for (const id of threads) {
+    checkpoint.run(id, 10, 1)
+    await writeFile(join(directory, `${id}.jsonl`), event('turn_context', { turn_id: turn.id, cwd: '/work' }) + tokens(20))
+  }
+  const readers = await Promise.all(threads.map(async id => (await get(`/api/codex/watch?threadId=${id}`)).body.getReader()))
+  t.after(() => Promise.all(readers.map(reader => reader.cancel())))
+  const read = async reader => new TextDecoder().decode((await reader.read()).value)
+  const frame = async reader => JSON.parse((await read(reader)).slice(6))
+  for (const reader of readers) {
+    assert.equal((await frame(reader)).type, 'snapshot')
+    assert.match(await read(reader), /^id: initial-item\n/)
+    assert.deepEqual(await frame(reader), { type: 'rollout-facts', contextPressure: { pressureTokens: 20, contextWindow: 100 },
+      turnWorkingDirectories: { round: '/work' } })
+  }
+
+  let start = messages.length
+  for (let ordinal = 1; ordinal <= 4; ordinal++) {
+    checkpoint.run('unobserved', 20 * ordinal, ordinal)
+    await delay(180)
+  }
+  assert.equal(messages.length - start, 0, '无关的四次提交引起的额外 RPC')
+
+  projected = true
+  checkpoint.run(threads[0], 30, 2)
+  assert.deepEqual(await frame(readers[0]), { type: 'change', turn: { id: turn.id, status: turn.status }, items: [late], onlyIfLoaded: true })
+  assert.match(await read(readers[0]), /^id: new-item\n/)
+  assert.ok(messages.length > start)
+  assert.ok(messages.slice(start).every(({ params }) => params.threadId === threads[0]))
+
+  start = messages.length
+  await appendFile(join(directory, `${threads[0]}.jsonl`), tokens(30))
+  assert.deepEqual(await frame(readers[0]), { type: 'rollout-facts', contextPressure: { pressureTokens: 30, contextWindow: 100 } })
+  assert.equal(messages.length - start, 0)
+
+  await appendFile(join(directory, `${threads[0]}.jsonl`), event('event_msg', { type: 'thread_rolled_back', num_turns: 1 }))
+  assert.deepEqual(await frame(readers[0]), { type: 'rollout-facts', contextPressure: null, turnWorkingDirectories: {} })
+})
+
 test('SSE 重连沿用先前的条目游标，回放初始快照之外的较早活动', { timeout: 5000 }, async t => {
   const threadId = 'root'
   const latest = { id: 'latest', status: 'completed', items: [] }
@@ -2623,26 +2691,55 @@ test('取消归档通知后重连历史流以读取移动后的原生记录', { 
   assert.equal((await reader.read()).done, true)
 })
 
-test('回退通知在同一 SSE 连接替换历史尾部和游标', { timeout: 5000 }, async t => {
-  const threadId = 'observed'
+test('回退在同一 SSE 连接替换快照并跟随新的 rollout 和投影', { timeout: 5000 }, async t => {
+  const threadId = '019af000-0000-7000-8000-000000000001'
+  const replacementId = '019af000-0000-7000-8000-000000000002'
   const kept = { id: 'kept', status: 'completed', items: [] }
+  const late = { type: 'agentMessage', id: 'late', text: '回退后写入' }
   let turns = [{ ...kept, id: 'removed' }, kept]
+  let itemCursor = 'before-revert'
+  let path
   const fixture = await fakeCodex(t, {
-    'thread/read': () => ({ result: { thread: { id: threadId, historyMode: 'paginated' } } }),
+    'thread/read': () => ({ result: { thread: { id: threadId, historyMode: 'paginated', path } } }),
     'config/read': () => ({ result: { config: {} } }),
     'thread/turns/list': () => ({ result: { data: turns, nextCursor: turns[0].id } }),
+    'thread/items/list': ({ cursor }) => ({ result: { backwardsCursor: itemCursor,
+      data: cursor === 'after-revert' ? [{ item: late, turnId: kept.id }] : [] } }),
   })
+  using db = openHistoryProjection(fixture.directory)
+  const checkpoint = db.prepare('INSERT OR REPLACE INTO thread_history_projection_state VALUES (?, ?, ?)')
+  checkpoint.run(threadId, 10, 1)
+  const prefix = join(fixture.directory, `rollout-2026-11-23T00-00-00-${threadId}`)
+  const context = (turn_id, cwd) => JSON.stringify({ type: 'turn_context', payload: { turn_id, cwd } }) + '\n'
+  path = `${prefix}.jsonl`
+  await writeFile(path, context('removed', '/removed'))
   const response = await fixture.get(`/api/codex/watch?threadId=${threadId}`)
   const reader = response.body.getReader()
-  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  t.after(() => reader.cancel())
+  const readText = async () => new TextDecoder().decode((await reader.read()).value)
+  const read = async () => JSON.parse((await readText()).slice(6))
   assert.equal((await read()).page.nextCursor, 'removed')
+  assert.match(await readText(), /^id: before-revert\n/)
+  assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: { removed: '/removed' } })
 
   turns = [kept]
+  path = `${prefix}_${replacementId}.jsonl`
+  itemCursor = 'after-revert'
+  checkpoint.run(replacementId, 10, 1)
+  await writeFile(path, '')
   fixture.broadcast({ method: 'thread/reverted', params: { threadId } })
   const snapshot = await read()
   assert.equal(snapshot.type, 'snapshot')
   assert.equal(snapshot.replace, true)
   assert.deepEqual(snapshot.page, { data: [kept], nextCursor: 'kept' })
+  assert.match(await readText(), /^id: after-revert\n/)
+  assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: {} })
+
+  await appendFile(path, context('kept', '/new'))
+  assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: { kept: '/new' } })
+  itemCursor = 'next-item'
+  checkpoint.run(replacementId, 20, 2)
+  assert.deepEqual((await read()).items, [late])
   assert.equal(fixture.messages.filter(({ method }) => method === 'initialize').length, 1)
   await reader.cancel()
 })

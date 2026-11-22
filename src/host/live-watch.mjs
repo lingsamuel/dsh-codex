@@ -45,12 +45,16 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           let timer
           let reading = false
           let dirty = false
+          let factsDirty = false
           let reset = false
           let tail
           let pendingReadState
           let awaitingPreview
           let receiptSequence = 0
           let rolloutFacts
+          let observedThread
+          let historyWatch
+          let sqliteHome
           let settingsStamp
           let confirmedCwd
           let wakeQueue
@@ -71,11 +75,14 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           }
 
           async function sendFacts() {
-            const facts = await rolloutFacts?.read()
+            const path = observedThread.path
+            if (!path) return
+            rolloutFacts ??= createRolloutFacts(path, signal, threadId)
+            const facts = await rolloutFacts?.read({ path, changesOnly: true })
             if (!facts || signal.aborted) return
             const { settingsStamp: stamp, ...projection } = facts
-            send({ type: 'rollout-facts', ...projection })
-            if (stamp === settingsStamp) return
+            if (Object.keys(projection).length) send({ type: 'rollout-facts', ...projection })
+            if (stamp === undefined || stamp === settingsStamp) return
             settingsStamp = stamp
             // 旁路连接不会成为线程订阅者。原生设置落盘时仅读回该线程的当前模型。
             const result = await connection.request('thread/read', { threadId }).catch(error => {
@@ -92,42 +99,55 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
 
           function wake() {
             dirty = true
+            scheduleRead()
+          }
+
+          function wakeFacts() {
+            factsDirty = true
+            scheduleRead()
+          }
+
+          function scheduleRead() {
             if (!tail || reading || timer || signal.aborted) return
             timer = setTimeout(async () => {
               timer = undefined
               if (signal.aborted) return
-              dirty = false
+              const readHistory = dirty
+              dirty = factsDirty = false
               reading = true
               const readState = pendingReadState
               const receipt = receiptSequence
               pendingReadState = undefined
               try {
-                const updates = reset ? null : await tail.readChanges()
-                if (!updates || reset) {
-                  reset = false
-                  const reading = await connection.request('thread/read', { threadId })
-                  await sendSnapshot(reading, true)
-                } else {
-                  for (const update of updates) send({ type: 'change', ...update })
-                  if (updates.length && steers?.list(threadId).length) wakeQueue?.()
-                  checkpoint(tail.itemCursor())
-                  if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
-                    // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
-                    const result = await connection.request('thread/read', { threadId }).catch(() => null)
-                    if (result?.thread.name || result?.thread.preview) {
-                      awaitingPreview = false
-                      send({ type: 'thread-summary', ...result })
+                if (readHistory) {
+                  const updates = reset ? null : await tail.readChanges()
+                  if (!updates || reset) {
+                    reset = false
+                    const reading = await connection.request('thread/read', { threadId })
+                    await sendSnapshot(reading, true)
+                  } else {
+                    for (const update of updates) send({ type: 'change', ...update })
+                    if (updates.length && steers?.list(threadId).length) wakeQueue?.()
+                    checkpoint(tail.itemCursor())
+                    if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
+                      // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
+                      const result = await connection.request('thread/read', { threadId }).catch(() => null)
+                      if (result?.thread.name || result?.thread.preview) {
+                        awaitingPreview = false
+                        followHistory(result.thread)
+                        send({ type: 'thread-summary', ...result })
+                      }
                     }
+                    // Codex 在保存新结果后才广播回执。在读取并发出该历史后暴露此版本。
+                    if (readState !== undefined && receipt === receiptSequence) send({ type: 'reading-receipt', readState })
                   }
-                  // Codex 在保存新结果后才广播回执。在读取并发出该历史后暴露此版本。
-                  if (readState !== undefined && receipt === receiptSequence) send({ type: 'reading-receipt', readState })
                 }
                 await sendFacts()
               } catch (error) {
                 if (!reset) connection.close(error)
               } finally {
                 reading = false
-                if (dirty) wake()
+                if (dirty || factsDirty) scheduleRead()
               }
             }, 120)
           }
@@ -183,7 +203,19 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             if (!goal && !settings) wake()
           }
 
+          function followHistory(thread) {
+            if (observedThread && observedThread.path === thread.path && observedThread.historyMode === thread.historyMode) return
+            // 分页回退可更换文件。先挂上新的监听，再读快照，避免漏掉并发追加。
+            historyWatch?.abort()
+            historyWatch = new AbortController()
+            observedThread = thread
+            const watching = watchNativeHistory({ thread, sqliteHome }, wake,
+              AbortSignal.any([signal, historyWatch.signal]), wakeFacts)
+            mode = watching ? 'live' : 'history'
+          }
+
           async function sendSnapshot({ thread, readState }, replace = false, goal) {
+            followHistory(thread)
             confirmedCwd = thread.cwd
             const itemCursor = thread.historyMode === 'paginated' ? await readItemTailCursor(connection.request, threadId) : undefined
             const page = await readThreadTurns(connection.request, {
@@ -223,19 +255,12 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 configRead,
                 connection.request('thread/goal/get', { threadId }).catch(() => undefined),
               ])
-              const { thread } = reading
-              rolloutFacts = createRolloutFacts(thread.path, signal, threadId)
-              const watching = watchNativeHistory({
-                thread,
-                sqliteHome: sqliteDirectory(config),
-              }, wake, signal)
-              mode = watching ? 'live' : 'history'
+              sqliteHome = sqliteDirectory(config)
               await sendSnapshot(reading, false, goalResult?.goal)
-              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteDirectory(config), send, signal, steers)
+              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteHome, send, signal, steers)
               for (const message of early) notify(message)
               early.length = 0
-              void sendFacts()
-              if (dirty) wake()
+              wakeFacts()
               await connection.closed
             } catch {
               // 浏览器重连时重新读取一次原生尾部快照。

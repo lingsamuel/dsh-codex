@@ -219,11 +219,21 @@ test('活动轮次显示自己的权限，切换后续权限和重新连接按�
   const readOnly = { profileId: ':read-only', source: 'saved' }
   const current = () => session.getSnapshot().live.turnPermission
   const selected = () => session.projections.faceOf('permissions').getSnapshot().permission
+  const todos = () => session.projections.faceOf('todos').getSnapshot()
   await snapshot('first', 'inProgress')
   assert.equal(session.getSnapshot().running, true)
   assert.equal(current(), undefined)
   await facts('first', work)
   assert.deepEqual(current(), work)
+  const plan = [{ content: '核对回归', status: 'in_progress' }]
+  await emit({ type: 'rollout-facts', todos: plan })
+  await emit({ type: 'rollout-facts', contextPressure: { pressureTokens: 20, contextWindow: 100 } })
+  assert.deepEqual(current(), work)
+  assert.deepEqual(todos(), plan)
+  await emit({ type: 'rollout-facts', todos: null, turnPermission: null })
+  assert.equal(current(), undefined)
+  assert.equal(todos(), undefined)
+  await facts('first', work)
   session.publishPermission(readOnly)
   assert.deepEqual(selected(), readOnly)
   assert.deepEqual(current(), work)

@@ -56,13 +56,10 @@ export function createRolloutFacts(path, signal, threadId) {
   let savedPlanMode
   let followsOwner = false
   let permissionSequence = 0
-  let publishedCancelledTools = false
-  let publishedTurnDirectories = false
-  let publishedGoalInputs = false
-  let publishedGoalCompletions = false
   let recordedGoal
   let pendingGoalInput
-  let previous = '{}'
+  const previous = {}
+  const pending = new Set()
   let queue = Promise.resolve()
 
   function currentTurn() {
@@ -86,21 +83,32 @@ export function createRolloutFacts(path, signal, threadId) {
       // 上下文可能晚于下一轮的开始记录到达。按原生 ID 找回它所属的轮次。
       const owner = turn.id && turnId !== turn.id ? turns.findLast(candidate => candidate.id === turnId) : turn
       const permission = recordPermission(value)
-      if (permission && owner) owner.permission = { ...permission, turnId }
+      if (permission && owner) {
+        owner.permission = { ...permission, turnId }
+        pending.add('permission').add('turnPermission')
+      }
       if (owner && typeof value?.cwd === 'string' && isAbsolute(value.cwd)) {
         owner.id ??= turnId
         owner.cwd = value.cwd
+        pending.add('turnWorkingDirectories')
       }
       const mode = planModeOf(value)
-      if (mode) currentTurn().planMode = mode
+      if (mode) {
+        currentTurn().planMode = mode
+        pending.add('planMode')
+      }
       return
     }
     if (record.type === 'event_msg') {
       if (value?.type === 'task_started' || value?.type === 'turn_started') {
-        if (!value.turn_id || turns.at(-1)?.id !== value.turn_id) turns.push({ id: value.turn_id })
+        if (!value.turn_id || turns.at(-1)?.id !== value.turn_id) {
+          turns.push({ id: value.turn_id })
+          pending.add('turnPermission')
+        }
         if (value.turn_id && value.turn_attribution?.turn_trigger === 'goal' && pendingGoalInput) {
           currentTurn().goalInput = pendingGoalInput
           pendingGoalInput = undefined
+          pending.add('goalInputs')
         }
         pendingPlans.clear()
         pendingToolCalls.clear()
@@ -109,6 +117,7 @@ export function createRolloutFacts(path, signal, threadId) {
         pendingPlans.clear()
         pendingToolCalls.clear()
         pendingGoalInput = undefined
+        invalidateProjection()
       } else if (value?.type === 'thread_goal_updated' && value.threadId === threadId) {
         const goal = value.goal
         const objective = goal?.objective?.trim()
@@ -130,19 +139,25 @@ export function createRolloutFacts(path, signal, threadId) {
         if (objective === pendingGoalInput?.objective) {
           turn.goalInput = { ...pendingGoalInput, ...input }
           pendingGoalInput = undefined
+          pending.add('goalInputs')
         }
       } else if (value?.type === 'plan_update') {
         const plan = normalizePlan(value)
-        if (plan) currentTurn().todos = plan
+        if (plan) {
+          currentTurn().todos = plan
+          pending.add('todos')
+        }
       } else if (value?.type === 'token_count') {
         const pressureTokens = value.info?.last_token_usage?.total_tokens
         const contextWindow = value.info?.model_context_window
         if (Number.isSafeInteger(pressureTokens) && pressureTokens >= 0 && Number.isSafeInteger(contextWindow) && contextWindow > 0) {
           // Codex 使用上一轮的 total_tokens 作为活跃上下文大小，整个会话的累计用量另有字段。
           currentTurn().contextPressure = { pressureTokens, contextWindow }
+          pending.add('contextPressure')
         }
       } else if (value?.type === 'thread_settings_applied') {
         settingsChanges++
+        pending.add('settingsStamp').add('planMode').add('permission')
         if (value.thread_id) followsOwner = value.thread_id === threadId
         if (followsOwner || !value.thread_id) savedPlanMode = planModeOf(value.thread_settings) ?? savedPlanMode
         const permission = recordPermission(value.thread_settings)
@@ -171,9 +186,15 @@ export function createRolloutFacts(path, signal, threadId) {
         const turn = currentTurn()
         const created = call.goalCall === 'create_goal'
         const goal = readGoalToolResult(value.output, threadId, created ? undefined : recordedGoal)
-        if (created && goal?.status === 'active' && turn.goalMessage) turn.goalInput ??= turn.goalMessage
+        if (created && goal?.status === 'active' && turn.goalMessage && !turn.goalInput) {
+          turn.goalInput = turn.goalMessage
+          pending.add('goalInputs')
+        }
         const completion = goalCompletion(goal)
-        if (completion) turn.goalCompletion = completion
+        if (completion) {
+          turn.goalCompletion = completion
+          pending.add('goalCompletions')
+        }
       }
       if (call && ['exec', 'exec_command', 'shell_command'].includes(call.name)
         && typeof value.output === 'string' && userCancelled.test(value.output)) {
@@ -182,6 +203,7 @@ export function createRolloutFacts(path, signal, threadId) {
         turn.cancelledToolCalls ??= []
         const { goalCall, ...execution } = call
         turn.cancelledToolCalls.push({ ...execution, output: value.output, completedAtMs: Date.parse(record.timestamp) })
+        pending.add('cancelledToolCalls')
       }
     }
     if (value.type === 'function_call' && value.name === 'update_plan' && !value.namespace) {
@@ -192,19 +214,57 @@ export function createRolloutFacts(path, signal, threadId) {
     } else if (value.type === 'function_call_output') {
       const plan = pendingPlans.get(value.call_id)
       pendingPlans.delete(value.call_id)
-      if (plan && value.output === 'Plan updated') currentTurn().todos = plan
+      if (plan && value.output === 'Plan updated') {
+        currentTurn().todos = plan
+        pending.add('todos')
+      }
     }
   }
 
-  async function scan() {
+  function collection(key, value) {
+    // 只在曾有该字段时发出空集合，以清除客户端已保存的条目。
+    const size = Array.isArray(value) ? value.length : Object.keys(value).length
+    return size || Object.hasOwn(previous, key) ? value : undefined
+  }
+
+  const project = {
+    todos: () => turns.findLast(turn => turn.todos !== undefined)?.todos,
+    contextPressure: () => turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
+    settingsStamp: () => settingsChanges ? `${generation}:${settingsChanges}` : undefined,
+    permission() {
+      const turn = turns.findLast(turn => turn.permission)?.permission
+      const latest = (turn?.sequence ?? 0) > (legacyPermission?.sequence ?? 0) ? turn : legacyPermission
+      return displayPermission(ownedPermission ?? latest, turn)
+    },
+    turnPermission() {
+      const latest = turns.at(-1)?.permission
+      if (latest?.turnId) return { turnId: latest.turnId, permission: latest.permission }
+    },
+    planMode: () => savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode,
+    cancelledToolCalls: () => collection('cancelledToolCalls', turns.flatMap(turn =>
+      turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])),
+    turnWorkingDirectories: () => collection('turnWorkingDirectories', Object.fromEntries(
+      turns.filter(({ id, cwd }) => id && cwd).map(({ id, cwd }) => [id, cwd]))),
+    goalInputs: () => collection('goalInputs', Object.fromEntries(
+      turns.filter(turn => turn.goalInput).map(({ id, goalInput }) => [id, goalInput]))),
+    goalCompletions: () => collection('goalCompletions', Object.fromEntries(
+      turns.filter(turn => turn.goalCompletion).map(({ id, goalCompletion }) => [id, goalCompletion]))),
+  }
+
+  function invalidateProjection() {
+    for (const key of Object.keys(project)) pending.add(key)
+  }
+
+  async function scan(filePath, changesOnly) {
     signal.throwIfAborted()
-    const file = await open(path, 'r')
+    const file = await open(filePath, 'r')
     try {
       const { size, dev, ino } = await file.stat()
       // 连接可能在等待文件状态时关闭。用已取消的信号创建读流会提前触发流错误。
       signal.throwIfAborted()
       const current = `${dev}:${ino}`
       if (identity !== current || size < offset) {
+        if (identity !== undefined) invalidateProjection()
         identity = current
         generation++
         settingsChanges = 0
@@ -228,47 +288,27 @@ export function createRolloutFacts(path, signal, threadId) {
           for (const text of lines) consume(text)
         }
       }
-      const turnPermission = turns.findLast(turn => turn.permission)?.permission
-      const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
-        ? turnPermission : legacyPermission
-      const permission = displayPermission(ownedPermission ?? latestPermission, turnPermission)
-      const latestTurnPermission = turns.at(-1)?.permission
-      const planMode = savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode
-      const cancelledToolCalls = turns.flatMap(turn => turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])
-      publishedCancelledTools ||= cancelledToolCalls.length > 0
-      const turnWorkingDirectories = Object.fromEntries(turns.filter(({ id, cwd }) => id && cwd).map(({ id, cwd }) => [id, cwd]))
-      publishedTurnDirectories ||= Object.keys(turnWorkingDirectories).length > 0
-      const goalInputs = Object.fromEntries(turns.filter(turn => turn.goalInput).map(({ id, goalInput }) => [id, goalInput]))
-      publishedGoalInputs ||= Object.keys(goalInputs).length > 0
-      const goalCompletions = Object.fromEntries(turns.filter(turn => turn.goalCompletion).map(({ id, goalCompletion }) => [id, goalCompletion]))
-      publishedGoalCompletions ||= Object.keys(goalCompletions).length > 0
-      const facts = {
-        todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
-        contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
-        settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
-        ...(permission && { permission }),
-        ...(latestTurnPermission?.turnId && { turnPermission: {
-          turnId: latestTurnPermission.turnId, permission: latestTurnPermission.permission,
-        } }),
-        ...(planMode && { planMode }),
-        ...(publishedCancelledTools && { cancelledToolCalls }),
-        ...(publishedTurnDirectories && { turnWorkingDirectories }),
-        ...(publishedGoalInputs && { goalInputs }),
-        ...(publishedGoalCompletions && { goalCompletions }),
+      // 每种记录只标记自己影响的字段。上下文用量变动时无需遍历旧轮次或序列化其元数据。
+      const changes = {}
+      for (const key of pending) {
+        const value = project[key]()
+        if (isDeepStrictEqual(value, previous[key])) continue
+        if (value === undefined) delete previous[key]
+        else previous[key] = value
+        changes[key] = value ?? null
       }
-      const serialized = JSON.stringify(facts)
-      if (serialized === previous) return null
-      previous = serialized
-      return facts
+      pending.clear()
+      if (!Object.keys(changes).length) return null
+      return changesOnly ? changes : { ...previous }
     } finally {
       await file.close()
     }
   }
 
   return {
-    read() {
+    read({ path: filePath = path, changesOnly = false } = {}) {
       // 元数据是可选的。缺失的旧文件不会中断通过 App Server 读取的聊天。
-      queue = queue.then(scan).catch(() => null)
+      queue = queue.then(() => scan(filePath, changesOnly)).catch(() => null)
       return queue
     },
   }
