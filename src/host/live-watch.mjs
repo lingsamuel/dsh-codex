@@ -10,6 +10,7 @@ import { modelSelectionOf } from '../shared/model-selection.js'
 const encoder = new TextEncoder()
 const heartbeatFrame = encoder.encode('event: heartbeat\ndata: {}\n\n')
 const maxQueuedBytes = 2 * 1024 * 1024
+const maxPendingNotifications = 512
 const chunkBytes = 64 * 1024
 const catalogMethods = new Set([
   'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
@@ -86,15 +87,6 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             for (const { consumed } of frames) consumed?.()
             frames.length = 0
           }
-          function stop() {
-            if (ended) return
-            ended = true
-            clearFrames()
-            if (!cancelled) writer.close()
-          }
-          signal.addEventListener('abort', stop, { once: true })
-          if (signal.aborted) { stop(); return }
-
           const encodeFrame = frame => encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)
           const send = frame => { if (!signal.aborted) push(encodeFrame(frame)) }
           // 历史读取串行等待当前帧发完，积压时只保留正在发送的历史帧。
@@ -122,10 +114,28 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           let wakeQueue
           let connection
           let catalogReady = false
-          let catalogQueue = Promise.resolve()
+          let readingCatalog = false
+          let pendingBytes = 0
           let mode
           let sentCursor = resumeCursor || ''
-          const early = []
+          const pendingNotifications = []
+
+          function stop() {
+            pendingNotifications.length = 0
+            clearTimeout(timer)
+            clearInterval(heartbeat)
+            if (ended) {
+              // 主动归档时只保留已排队的数据，解除正在等待写入的历史读取任务。
+              for (const { consumed } of frames) consumed?.()
+              return
+            }
+            ended = true
+            clearFrames()
+            if (!cancelled) writer.close()
+          }
+          signal.addEventListener('abort', stop, { once: true })
+          if (signal.aborted) { stop(); return }
+
           const questionObserver = observeQuestions ? questions?.observe(threadId, send, signal) : undefined
 
           function checkpoint(cursor = '') {
@@ -217,20 +227,50 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             }, 120)
           }
 
-          function notify(message) {
+          function queueNotification(message, bytes) {
+            if (pendingNotifications.length >= maxPendingNotifications
+              || (pendingNotifications.length && pendingBytes + bytes > maxQueuedBytes)) {
+              abort.abort()
+              return
+            }
+            // 原生单条大通知仍可处理，等待队列不能叠加更多数据。
+            pendingNotifications.push({ message, bytes })
+            pendingBytes += bytes
+          }
+
+          function takeNotification() {
+            const { message, bytes } = pendingNotifications.shift()
+            pendingBytes -= bytes
+            return message
+          }
+
+          async function readCatalogUpdates() {
+            if (!catalogReady || readingCatalog) return
+            readingCatalog = true
+            try {
+              while (!signal.aborted && pendingNotifications.length) {
+                try {
+                  const update = await readCatalogEvent(takeNotification(), connection.request)
+                  if (update) send(update)
+                } catch (error) {
+                  // 实体可能在读回前已删除，紧随其后的删除事件仍会同步目录。
+                  if (error.code === -32602) continue
+                  connection.close(error)
+                  return
+                }
+              }
+            } finally {
+              readingCatalog = false
+            }
+          }
+
+          function notify(message, bytes) {
             // 只处理通知。账户和服务端交互请求不进入此通道。
-            if (message.id !== undefined) return
+            if (signal.aborted || message.id !== undefined) return
             if (catalog) {
               if (!catalogMethods.has(message.method)) return
-              if (!catalogReady) early.push(message)
-              else catalogQueue = catalogQueue.then(async () => {
-                if (signal.aborted) return
-                const update = await readCatalogEvent(message, connection.request)
-                if (update) send(update)
-              }).catch(error => {
-                // 实体可能在读回前已删除，紧随其后的删除事件仍会同步目录。
-                if (error.code !== -32602) connection.close(error)
-              })
+              queueNotification(message, bytes)
+              void readCatalogUpdates()
               return
             }
             if ((message.params?.threadId ?? message.params?.thread?.id) !== (observedThread?.id ?? threadId)) return
@@ -242,7 +282,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             const settings = message.method === 'thread/settings/updated'
             const reverted = message.method === 'thread/reverted'
             if (!catalogMethods.has(message.method) && !goal && !settings && !reverted) return
-            if (!tail) { early.push(message); return }
+            if (!tail) { queueNotification(message, bytes); return }
             if (message.method === 'thread/status/changed') questionObserver?.update(message.params.status)
             if (message.method === 'thread/archived' || message.method === 'thread/deleted') questionObserver?.update(null)
             if (reverted) {
@@ -260,9 +300,11 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               return
             }
             send({ type: 'notification', notification: message })
-            if (message.method === 'thread/archived' || message.method === 'thread/unarchived') {
-              // 原生归档会移动 rollout。浏览器重连后按新路径观察，不沿用旧文件和历史游标。
-              connection.close()
+            if (!signal.aborted && (message.method === 'thread/archived' || message.method === 'thread/unarchived')) {
+              // 原生归档会移动 rollout。先把已排队的通知发完，再让浏览器按新路径观察。
+              ended = true
+              flush()
+              abort.abort()
               return
             }
             if (!goal && !settings) wake()
@@ -296,8 +338,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             if (fromCursor === itemCursor) checkpoint(itemCursor)
             else wake()
             questionObserver?.update(thread.status)
-            for (const message of early) notify(message)
-            early.length = 0
+            while (pendingNotifications.length) notify(takeNotification())
             await writing
             signal.throwIfAborted()
           }
@@ -305,6 +346,8 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           async function follow() {
             try {
               connection = await openCodexReader(socketPath, signal, notify)
+              // 初始快照可一直等待下游。原生连接的寿命独立于历史写入的进度。
+              void connection.closed.then(() => abort.abort())
               const configRead = connection.request('config/read', { includeLayers: false }).catch(() => null)
               const sqliteDirectory = config => codexSqliteHome(config, connection.initialize.codexHome)
               if (catalog) {
@@ -312,8 +355,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 signal.throwIfAborted()
                 catalogReady = true
                 send({ type: 'catalog-ready' })
-                for (const message of early) notify(message)
-                early.length = 0
+                void readCatalogUpdates()
                 watchNativeUnread(sqliteHome, send, signal)
                 if (observeBackgroundTerminals) backgroundTerminals?.watch(send, signal)
                 await connection.closed
@@ -333,12 +375,8 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             } catch {
               // 浏览器重连时重新读取一次原生尾部快照。
             } finally {
-              // App Server 正常结束时先发完已有通知，例如归档状态变化。
-              if (!signal.aborted) { ended = true; flush() }
               abort.abort()
               connection?.close()
-              clearTimeout(timer)
-              clearInterval(heartbeat)
             }
           }
           void follow()

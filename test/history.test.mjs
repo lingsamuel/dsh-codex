@@ -2715,6 +2715,56 @@ test('SSE 积压达到字节上限时释放当前连接的监听和待发数据'
   await clientClosed
 })
 
+test('目录读回阻塞时限制等待处理的原生通知', { timeout: 2000 }, async t => {
+  const reading = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  const { get, broadcast, clientClosed } = await fakeCodex(t, {
+    'thread/read': () => { reading.resolve(); return reply.promise },
+  })
+  t.after(() => reply.resolve({ result: { thread: { id: 'session' } } }))
+  const reader = (await get('/api/codex/watch?scope=catalog')).body.getReader()
+  t.after(() => reader.cancel())
+  assert.match(new TextDecoder().decode((await reader.read()).value), /catalog-ready/)
+  broadcast({ method: 'thread/status/changed', params: { threadId: 'session', status: { type: 'active' } } })
+  await reading.promise
+
+  const readState = { firstUnread: null, revision: '版本'.repeat(131_072) }
+  for (const threadId of ['first', 'second', 'third']) {
+    broadcast({ method: 'thread/readState/changed', params: { threadId, readState } })
+  }
+  assert.equal((await reader.read()).done, true)
+  await clientClosed
+})
+
+test('首个快照尚未读完时原生连接断开会立即释放观察', { timeout: 2000 }, async t => {
+  let upstream
+  const { socketPath } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'large', historyMode: 'paginated' } } }),
+    'thread/turns/list': (_, client) => {
+      upstream = client
+      return { result: { data: [{ id: 'turn', status: 'completed', items: [
+        { id: 'reply', type: 'agentMessage', text: '正文'.repeat(65_536) },
+      ] }] } }
+    },
+    'thread/items/list': () => ({ result: { data: [], backwardsCursor: 'after-snapshot' } }),
+  })
+  const released = Promise.withResolvers()
+  const route = createWatchRoute(socketPath, undefined, {
+    observe(_threadId, _send, signal) {
+      signal.addEventListener('abort', () => released.resolve(), { once: true })
+    },
+  })
+  const response = await route.fetch(new Request('http://localhost/api/codex/watch?threadId=large&questions=1'))
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const first = await reader.read()
+  assert.equal(first.done, false)
+  assert.ok(!new TextDecoder().decode(first.value).endsWith('\n\n'))
+  upstream.terminate()
+  await released.promise
+  assert.equal((await reader.read()).done, true)
+})
+
 test('SSE 大快照分块发送，续读检查点在完整快照之后到达', { timeout: 5000 }, async t => {
   const text = '大型历史正文。'.repeat(110_000)
   const { get } = await fakeCodex(t, {

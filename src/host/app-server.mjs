@@ -24,7 +24,7 @@ export async function findCodexSocket(signal) {
   return daemon.socketPath
 }
 
-/** 接收原生 RPC 回复、服务端请求与 daemon 广播，退出时取消尚未完成的请求。 */
+/** 接收原生 RPC 回复、服务端请求与 daemon 广播。onMessage 同时收到原始消息的字节数。 */
 export async function openCodexReader(socketPath, signal, onMessage = () => {}) {
   const setup = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
   const endpoint = socketPath || await findCodexSocket(setup)
@@ -61,7 +61,7 @@ export async function openCodexReader(socketPath, signal, onMessage = () => {}) 
     try {
       const message = JSON.parse(data.toString())
       if (typeof message.method === 'string') {
-        onMessage(message)
+        onMessage(message, data.byteLength)
         return
       }
       const waiter = pending.get(message.id)
