@@ -851,27 +851,118 @@ test('搜索定位只向前加载未读过的页，保留较新的聊天窗口',
   assert.equal(await history.session.findMessage({ turnId: 'older', itemId: 'missing' }), undefined)
 })
 
-test('轮次导航摘要与已加载轮次使用同一编号，跳转按原生 ID 补齐旧历史', async t => {
+test('打开与重连分页会话时只使用尾页', async t => {
   const currentSource = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const requested = []
   globalThis.fetch = async url => {
-    assert.equal(url.searchParams.get('cursor'), 'older')
-    return url.pathname.endsWith('/turn-outline')
-      ? Response.json([{ id: 'older-turn', prompt: '旧正文预览', response: '' }])
-      : Response.json({ data: [turn('older-turn', 'completed', [ask])], nextCursor: null })
+    requested.push(url.pathname)
+    return Response.json([])
   }
   const receive = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
-  await receive({ type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live', historyMode: 'paginated' })
+  const current = turn('current', 'completed', [answer])
+  const snapshot = { type: 'snapshot', page: { data: [current], nextCursor: 'older' }, mode: 'live', historyMode: 'paginated' }
+  await receive(snapshot)
+  await receive({ ...snapshot, page: { ...snapshot.page, data: [turn('new', 'completed', []), current] } })
   assert.equal(history.session.getSnapshot().historyMode, 'paginated')
-  const outline = history.session.projections.faceOf('turnOutline')
-  const [entry] = outline.getSnapshot() ?? await new Promise(resolve => {
-    const stop = outline.subscribe(() => { stop(); resolve(outline.getSnapshot()) })
-  })
-  assert.equal(entry.prompt, '旧正文预览')
-  await history.session.loadThrough(entry.seq)
-  const [start] = history.events.getSnapshot().entries
-  assert.equal(start.event.data.codexTurnId, 'older-turn')
-  assert.equal(start.event.data.turn, entry.turn)
+  assert.equal(history.session.getSnapshot().hasMore, true)
+  assert.deepEqual(requested, [])
+})
+
+test('原生加载更早暂存一页，聊天消费后才插入旧轮次', async t => {
+  const currentSource = mockTransport(t)
+  const { session, events } = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const receive = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
+  const tail = turn('current', 'completed', [answer])
+  await receive({ type: 'snapshot', page: { data: [tail], nextCursor: 'older' }, mode: 'live' })
+  const original = events.getSnapshot()
+  const cursors = []
+  const reply = Promise.withResolvers()
+  globalThis.fetch = async url => {
+    assert.equal(url.pathname, '/api/codex/turns')
+    const cursor = url.searchParams.get('cursor')
+    cursors.push(cursor)
+    return cursor === 'older' ? reply.promise : Response.json({ data: [turn('oldest', 'completed', [])], nextCursor: null })
+  }
+
+  const older = session.loadOlder({ deferConsumption: true })
+  const duplicate = session.loadOlder({ deferConsumption: true })
+  assert.equal(session.getSnapshot().loadingOlder, true)
+  reply.resolve(Response.json({ data: [turn('older', 'completed', [ask])], nextCursor: 'oldest' }))
+  await Promise.all([older, duplicate])
+  assert.equal(session.getSnapshot().historyLoadStatus, 'pendingConsumption')
+  assert.strictEqual(events.getSnapshot(), original)
+  assert.deepEqual(cursors, ['older'])
+
+  assert.equal(session.consumeOlder(), true)
+  assert.equal(session.consumeOlder(), false)
+  const expanded = events.getSnapshot()
+  assert.equal(expanded.change.kind, 'prepend')
+  assert.equal(expanded.entries[0].event.data.codexTurnId, 'older')
+  assert.strictEqual(expanded.entries.at(-1), original.entries.at(-1))
+  assert.equal(session.getSnapshot().historyLoadStatus, 'idle')
+
+  await session.loadOlder({ deferConsumption: true })
+  assert.equal(session.consumeOlder(), true)
+  assert.deepEqual(cursors, ['older', 'oldest'])
+  assert.equal(session.getSnapshot().hasMore, false)
+  assert.equal(session.getSnapshot().historyWasPartial, true)
+})
+
+test('切走时取消未完成的旧页，最近会话缓存可从同一游标重新加载', async t => {
+  const currentSource = mockTransport(t)
+  const retention = createSnapshotStore({ connectionCount: 1 })
+  const { session, events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' }, undefined, retention)
+  await Promise.resolve()
+  const snapshot = { type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live' }
+  const receive = () => currentSource().onmessage({ data: JSON.stringify(snapshot) })
+  await receive()
+  const original = events.getSnapshot()
+  const started = Promise.withResolvers()
+  const stale = Promise.withResolvers()
+  globalThis.fetch = (_, { signal }) => {
+    started.resolve(signal)
+    return stale.promise
+  }
+  const oldRequest = session.loadOlder({ deferConsumption: true })
+  const requestSignal = await started.promise
+  retention.set({})
+  assert.equal(requestSignal.aborted, true)
+  assert.strictEqual(events.getSnapshot(), original)
+
+  retention.set({ connectionCount: 1 })
+  await receive()
+  globalThis.fetch = async url => {
+    assert.equal(url.searchParams.get('cursor'), 'older')
+    return Response.json({ data: [turn('fresh', 'completed', [ask])], nextCursor: null })
+  }
+  await session.loadOlder({ deferConsumption: true })
+  stale.resolve(Response.json({ data: [turn('stale', 'completed', [])], nextCursor: null }))
+  await oldRequest
+  assert.equal(session.consumeOlder(), true)
+  assert.equal(events.getSnapshot().entries[0].event.data.codexTurnId, 'fresh')
+})
+
+test('旧页读取失败时保持会话打开，并可重试原游标', async t => {
+  const currentSource = mockTransport(t)
+  const { session, events } = createCodexHistory({ effect() {} }, { id: 'thread' })
+  await currentSource().onmessage({ data: JSON.stringify({
+    type: 'snapshot', page: { data: [turn('current', 'completed', [answer])], nextCursor: 'older' }, mode: 'live',
+  }) })
+  const original = events.getSnapshot()
+  const cursors = []
+  globalThis.fetch = async url => {
+    cursors.push(url.searchParams.get('cursor'))
+    return cursors.length === 1 ? Response.json({ error: '原生历史读取失败' }, { status: 503 })
+      : Response.json({ data: [turn('older', 'completed', [ask])], nextCursor: null })
+  }
+  await session.loadOlder({ deferConsumption: true })
+  assert.equal(session.getSnapshot().openState, 'open')
+  assert.equal(session.getSnapshot().historyLoadStatus, 'error')
+  assert.strictEqual(events.getSnapshot(), original)
+  await session.loadOlder({ deferConsumption: true })
+  assert.equal(session.consumeOlder(), true)
+  assert.deepEqual(cursors, ['older', 'older'])
 })
 
 test('a reconnect across a page gap fills that gap without discarding the existing window', async t => {
