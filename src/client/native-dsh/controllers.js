@@ -114,6 +114,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     })(),
   }, projectCatalog)
   const list = createSnapshotStore({ ...projected.getSnapshot().sessions, phase: 'pending' })
+  const startupReady = createSnapshotStore(false)
   let initialization = 'waiting'
   let handledNewThreads = 0
   const bindings = new Map()
@@ -325,8 +326,15 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     scope.effect(() => {
       const currentNavigation = scope.uiWorkspace
       navigation = currentNavigation
+      let startupBinding
+      const finishStartup = () => {
+        startupBinding = undefined
+        startupReady.set(true)
+      }
       function reconcile() {
         const { busy, selected, threads, childThreads } = catalog.store.getSnapshot()
+        // 启动期间原生目录也可能移除当前会话，不能继续等待它的历史。
+        if (startupBinding && selected?.id !== startupBinding.sessionId) finishStartup()
         if (initialization === 'ready' && selected && !localSession(selected.id) && !childThreads[selected.id]
           && !threads.some(thread => thread.id === selected.id)) {
           const next = threads.find(thread => !thread.archived)
@@ -341,9 +349,14 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
         const thread = selected ?? localSession(saved) ?? threads.find(thread => thread.id === saved)
           ?? threads.find(thread => !thread.archived && !thread.blank) ?? threads[0]
         // 原生启动恢复会保留全局面板。只有会话占据主栏时，才主动揭示初始会话。
-        if (thread && !scope.layout?.panelInfo.getSnapshot().activePanelId) currentNavigation.openSession(thread.id)
+        const activePanelId = scope.layout?.panelInfo.getSnapshot().activePanelId
+        if (thread && !activePanelId) currentNavigation.openSession(thread.id)
         initialization = 'ready'
         syncSessions()
+        // 主视图引用已经启动历史读取。空目录或全局面板可以立即显示。
+        startupBinding = activePanelId ? undefined : bindings.get(catalog.store.getSnapshot().selected?.id)?.binding
+        if (startupBinding) void startupBinding.ready.then(finishStartup)
+        else finishStartup()
       }
       reconcile()
       const stop = catalog.store.subscribe(reconcile)
@@ -354,7 +367,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     })
   })
 
-  return async threadId => {
+  async function deleteSession(threadId) {
     if (localSession(threadId)) {
       forgetLocalSession(threadId)
       if (catalog.store.getSnapshot().selected?.id === threadId) navigation?.clearMain()
@@ -363,4 +376,5 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     await writeThreadAction({ threadId, action: 'delete' })
     catalog.removeThread(threadId)
   }
+  return { deleteSession, startupReady }
 }

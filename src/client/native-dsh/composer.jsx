@@ -242,8 +242,7 @@ export function installComposer(ctx, catalog) {
       }
       function Composer(props) {
         const status = useSyncExternalStore(catalog.subscribe, () => props.sessionId === undefined ? catalog.getSnapshot() : undefined)
-        const accessory = status?.error ? <p role="alert">{status.error}</p>
-          : status?.busy && !status.selected ? <p role="status">{t('loading')}</p> : props.accessory
+        const accessory = status?.error ? <p role="alert">{status.error}</p> : props.accessory
         return <ComposerBar {...props} accessory={accessory} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')}
           skillHint={t('skillHint')} composerT={t} />
       }

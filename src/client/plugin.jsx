@@ -29,6 +29,7 @@ import { installCodexCapabilities } from './native-dsh/codex-capabilities.jsx'
 import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
 import { installWorktrees } from './native-dsh/worktree.jsx'
 import { installSidebarBrand } from './native-dsh/branding.jsx'
+import { installStartupPage } from './native-dsh/startup.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -42,7 +43,8 @@ export function apply(ctx) {
   ctx.plugin(FileUploadRuntime)
   installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
-  const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
+  const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
+  installStartupPage(ctx, startupReady)
   installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx, catalog.store)
   installThreadReferences(ctx, catalog, controller.signal)
