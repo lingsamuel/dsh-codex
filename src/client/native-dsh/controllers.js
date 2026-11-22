@@ -49,6 +49,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
       ...history.session,
       ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree),
       worktreeDraft,
+      openWorktree,
       modelDraft,
       permissionDraft,
       sessionId: thread.id,
@@ -141,8 +142,11 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        const openWorktree = ({ thread, workspacePaths, permission }) => {
-          catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, true)
+        const openWorktree = ({ thread, workspacePaths, permission }, confirmed = true) => {
+          const current = catalog.store.getSnapshot().threads.find(item => item.id === thread.id)
+          if (confirmed || !current) {
+            catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, confirmed)
+          }
           // DSH 先完成输入栏的发送交接。若用户期间已打开其他会话，保留当前视图。
           setTimeout(() => {
             if (catalog.store.getSnapshot().selected?.id === id) navigation?.openSession(thread.id)

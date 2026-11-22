@@ -97,7 +97,8 @@ test('在首次提交时以所选 Git 分支启动原生工作树会话；失败
   assert.equal((await post(conversation, { ...fields, input: [] })).status, 400)
   assert.equal((await (await lookup(list, repo)).json()).worktrees.length, 1)
   assert.equal((await post(conversation, fields)).status, 400)
-  const results = await Promise.all([post(conversation, fields), post(conversation, fields)])
+  const edited = { ...fields, input: [{ type: 'text', text: 'Revised after definite failure' }] }
+  const results = await Promise.all([post(conversation, edited), post(conversation, edited)])
   for (const response of results) {
     const result = await response.json()
     assert.equal(response.status, 200, JSON.stringify(result))
@@ -105,7 +106,9 @@ test('在首次提交时以所选 Git 分支启动原生工作树会话；失败
     assert.equal(result.thread.id, 'worktree')
   }
   assert.equal(calls.filter(call => call.method === 'thread/start').length, 1)
-  assert.equal(calls.filter(call => call.method === 'thread/queue/add').length, 2)
+  const writes = calls.filter(call => call.method === 'thread/queue/add')
+  assert.equal(writes.length, 2)
+  assert.equal(writes.at(-1).params.input[0].text, 'Revised after definite failure')
   assert.equal(editedFile, 'selected base\n')
   assert.equal(await readFile(join(repo, 'tracked.txt'), 'utf8'), 'local edits\n')
   assert.equal(await readFile(join(repo, 'private.txt'), 'utf8'), 'local private data\n')
@@ -189,9 +192,49 @@ test('工作树发送回执丢失后从原生队列确认，不重复加入消�
   const id = randomUUID()
   const fields = { action: 'prompt', mode: 'queue', input: [{ type: 'text', text: 'One message' }],
     threadId: 'draft', clientUserMessageId: id, worktree: { kind: 'existing', path: existing, id } }
-  assert.equal((await post(conversation, fields)).status, 503)
+  const dropped = await post(conversation, fields)
+  assert.equal(dropped.status, 503)
+  assert.equal((await dropped.json()).worktreeRecovery.thread.cwd, existing)
+  const editedText = { ...fields, input: [{ type: 'text', text: 'Edited message' }] }
+  const changedBeforeConfirmation = await post(conversation, editedText)
+  assert.equal(changedBeforeConfirmation.status, 409)
+  assert.equal((await changedBeforeConfirmation.json()).reason, 'worktree-input-changed')
   const retry = await post(conversation, fields)
   assert.equal(retry.status, 200, JSON.stringify(await retry.clone().json()))
   assert.equal((await retry.json()).thread.cwd, existing)
+  const editedImage = { ...fields, input: [...fields.input, { type: 'image', url: 'data:image/png;base64,AAAA' }] }
+  const changedAfterConfirmation = await post(conversation, editedImage)
+  assert.equal(changedAfterConfirmation.status, 409)
+  const conflict = await changedAfterConfirmation.json()
+  assert.equal(conflict.reason, 'worktree-input-changed')
+  assert.equal(conflict.worktreeRecovery.thread.id, 'existing-checkout-thread')
+  assert.equal(calls.filter(call => call.method === 'thread/queue/add').length, 1)
+})
+
+
+test('投递结果始终无法确认时保留可打开的原生会话，重试不再次入队', async t => {
+  const threads = new Map()
+  const { repo, existing, conversation, calls } = await fixture(t, {
+    'thread/read': ({ threadId }) => ({ thread: threads.get(threadId) }),
+    'thread/start': ({ cwd }) => {
+      const thread = { id: 'unconfirmed-native', cwd, historyMode: 'paginated', status: idle }
+      threads.set(thread.id, thread)
+      return { thread }
+    },
+    'thread/turns/list': () => ({ error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }),
+    'thread/queue/list': () => ({ data: [] }),
+    'thread/queue/add': () => 'disconnect',
+  })
+  threads.set('draft', { id: 'draft', cwd: repo, projectId: 'project', historyMode: 'paginated', status: idle })
+  const id = randomUUID()
+  const fields = { action: 'prompt', mode: 'queue', input: [{ type: 'text', text: 'One message' }],
+    threadId: 'draft', clientUserMessageId: id, worktree: { kind: 'existing', path: existing, id } }
+  assert.equal((await post(conversation, fields)).status, 503)
+  const retry = await post(conversation, fields)
+  assert.equal(retry.status, 409)
+  const result = await retry.json()
+  assert.equal(result.reason, 'worktree-delivery-unconfirmed')
+  assert.equal(result.worktreeRecovery.thread.id, 'unconfirmed-native')
+  assert.equal(result.worktreeRecovery.thread.cwd, existing)
   assert.equal(calls.filter(call => call.method === 'thread/queue/add').length, 1)
 })

@@ -141,3 +141,32 @@ test('工作树草稿失败后保留提交身份，成功时接纳并打开原�
   assert.equal(selected, undefined)
   assert.deepEqual(lifecycle, ['failed', 'accepted', 'observed', thread.id])
 })
+
+
+test('拒绝旧回执接纳已编辑草稿时保留输入和目标会话入口', async t => {
+  const worktree = { kind: 'new', id: crypto.randomUUID(), baseRef: 'refs/heads/main' }
+  const recovery = { thread: { id: 'other-native', cwd: '/worktree' }, workspacePaths: {} }
+  let selected = worktree
+  const draft = { getSnapshot: () => selected, set: value => { selected = value }, clear() { assert.fail('草稿未送达') } }
+  const model = { getSnapshot: () => undefined, clear() { assert.fail('草稿未送达') } }
+  const state = { blank: true, pendingSubmissions: [] }
+  const history = {
+    session: { getSnapshot: () => state },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe: () => () => {} },
+    queueStore: { getSnapshot: () => [], subscribe: () => () => {} },
+    updateState: edit => edit(state),
+  }
+  const originalDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = originalDocument })
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ error: '已编辑', reason: 'worktree-input-changed',
+    worktreeRecovery: recovery }, { status: 409 }))
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native-draft', history,
+    model, undefined, draft, () => assert.fail('失败时保留用户当前会话'))
+  const { requestId } = input.beginSubmission({ mode: 'queue', text: '修改后的草稿', attachments: [],
+    onAccept: () => assert.fail('原消息的回执不能接纳新草稿') })
+  const result = await input.prompt([{ type: 'text', text: '修改后的草稿' }], 'queue', undefined, requestId)
+  assert.equal(result.ok, false)
+  assert.equal(selected.id, worktree.id)
+  assert.deepEqual(selected.recovery, recovery)
+})

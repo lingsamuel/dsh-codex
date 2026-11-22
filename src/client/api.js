@@ -4,6 +4,7 @@ async function fetchResult(url, options) {
   const result = await response.json()
   if (!response.ok) throw Object.assign(new Error(result.error), {
     status: response.status, readState: result.readState, reason: result.reason, activity: result.activity,
+    worktreeRecovery: result.worktreeRecovery,
   })
   return result
 }
