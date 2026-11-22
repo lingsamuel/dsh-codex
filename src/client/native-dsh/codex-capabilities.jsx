@@ -2,11 +2,6 @@ import { installCodexPluginSettings } from './codex-plugin-settings.jsx'
 import { installCodexMcpSettings } from './codex-mcp-settings.jsx'
 
 const settingsStyles = `
-  [data-shortcut-modal="settings"] > :has([data-codex-plugins]) {
-    --dsh-scrollbar-width: 9px;
-    --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-hover-l2);
-    scrollbar-gutter: stable;
-  }
   .codex-settings {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -79,9 +74,9 @@ const settingsStyles = `
     border-end-end-radius: var(--dsw-radius-md);
   }
   .codex-settings-row:disabled { cursor: default; }
-  .codex-settings-row:focus-visible, .codex-settings-tools summary:focus-visible { outline-offset: -2px; }
+  .codex-settings-row:focus-visible { outline-offset: -2px; }
   @media (hover: hover) {
-    .codex-settings-row:enabled:hover, .codex-settings-tools summary:hover {
+    .codex-settings-row:enabled:hover {
       background: var(--dsw-alias-interactive-bg-hover);
     }
   }
@@ -98,21 +93,6 @@ const settingsStyles = `
     padding-block-start: 8px;
     border-block-start: 1px solid var(--dsw-alias-border-l2);
   }
-  .codex-settings-tools {
-    border-block-start: 1px solid var(--dsw-alias-border-l2);
-  }
-  .codex-settings-tools summary {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 32px;
-    border-radius: var(--dsw-radius-sm);
-    color: var(--dsw-alias-label-secondary);
-    font-size: 13px;
-    cursor: pointer;
-  }
-  .codex-settings-tools summary::-webkit-details-marker { display: none; }
-  .codex-settings-tools[open] summary svg { transform: rotate(90deg); }
   .codex-settings-tool-list { padding: 4px 0 0 18px; }
   .codex-settings-tool-list code { white-space: normal; }
   .codex-settings-notice {

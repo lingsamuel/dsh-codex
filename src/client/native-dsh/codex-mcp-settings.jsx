@@ -1,5 +1,5 @@
 import {
-  Button, IconApiOutlineMedium, IconChevronRightOutlineRegular, IconRefreshOutlineRegular, Tag,
+  Button, DisclosureRow, IconApiOutlineMedium, IconRefreshOutlineRegular, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage, writeCodexCapability } from '../api.js'
@@ -41,6 +41,7 @@ const runtimeTones = {
 }
 
 function McpServer({ server, threadId, login, startLogin, busy, t }) {
+  const [toolsOpen, setToolsOpen] = useState(false)
   const tools = Object.values(server.tools ?? {})
   const { name, runtimeStatus, authStatus } = server
   const canLogin = ['notLoggedIn', 'oAuth'].includes(authStatus) || runtimeStatus === 'authenticationRequired'
@@ -70,13 +71,13 @@ function McpServer({ server, threadId, login, startLogin, busy, t }) {
       {['pending', 'unknown'].includes(login.state) && <a href={login.authorizationUrl} target="_blank" rel="noopener noreferrer">{t('open')}</a>}
     </div>}
     {server.toolsError && <p role="alert" className="codex-settings-notice">{server.toolsError}</p>}
-    {tools.length > 0 && <details className="codex-settings-tools">
-      <summary><IconChevronRightOutlineRegular size={14} aria-hidden="true" />{t('tools', { count: tools.length })}</summary>
-      <ul className="codex-settings-tool-list">{tools.map((tool, index) => <li key={index}>
+    {tools.length > 0 && <DisclosureRow icon={<IconApiOutlineMedium size={16} />} title={t('tools', { count: tools.length })}
+      open={toolsOpen} expandable expandOnRowClick onToggle={() => setToolsOpen(open => !open)}>
+      {toolsOpen && <ul className="codex-settings-tool-list">{tools.map((tool, index) => <li key={index}>
         <code>{tool.name}</code>
         {tool.description && <p className="codex-settings-secondary">{tool.description}</p>}
-      </li>)}</ul>
-    </details>}
+      </li>)}</ul>}
+    </DisclosureRow>}
   </section>
 }
 
