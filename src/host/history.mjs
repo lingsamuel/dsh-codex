@@ -1,8 +1,10 @@
 import { CodexRpcError, readCodex, readCodexPages, withCodexReader } from './app-server.mjs'
 import { createCatalogReader, readArchivedCatalog, readChildThreads, readProjectPage } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
+import { readThreadTurns } from './live-history.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
+import { createConversationActionRoute } from './conversation-actions.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
@@ -46,6 +48,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
 
   return [
     createThreadActionRoute(socketPath, ownerSignal),
+    createConversationActionRoute(socketPath, ownerSignal),
     createWatchRoute(socketPath, ownerSignal),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
@@ -104,14 +107,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       const cursor = requiredParam(query, 'cursor', '缺少较早轮次的游标。')
       return withCodexReader(socketPath, signal, request => readTurnOutline(request, threadId, cursor), 90_000)
     }),
-    route('turns', native('thread/turns/list', query => {
-      return {
+    route('turns', (query, signal) => withCodexReader(socketPath, signal, request => readThreadTurns(request, {
         threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
         limit: 25,
         sortDirection: 'desc',
         itemsView: 'full',
         ...optionalParams(query, ['cursor']),
-      }
-    })),
+    }))),
   ]
 }

@@ -3,6 +3,19 @@ import { CodexRpcError, readCodexPages } from './app-server.mjs'
 const turnList = 'thread/turns/list'
 const itemList = 'thread/items/list'
 
+/** 新线程在首条消息落盘前仍然可以使用输入框。原生 CLI 对同一条错误也视为空历史。 */
+export async function readThreadTurns(request, params) {
+  try {
+    return await request(turnList, params)
+  } catch (error) {
+    if (!params.cursor && error instanceof CodexRpcError
+      && error.message.includes('thread/turns/list is unavailable before first user message')) {
+      return { data: [], nextCursor: null, backwardsCursor: null }
+    }
+    throw error
+  }
+}
+
 function same(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -43,7 +56,7 @@ export function createHistoryTail(request, thread, initialPage) {
 
   return {
     async readChanges() {
-      const head = await request(turnList, { threadId, limit: 1, sortDirection: 'desc', itemsView })
+      const head = await readThreadTurns(request, { threadId, limit: 1, sortDirection: 'desc', itemsView })
       const latest = head.data[0]
       if (!latest) return lastTurnId ? null : []
       if (latest.id !== lastTurnId && seen.has(latest.id)) return null

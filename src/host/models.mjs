@@ -40,12 +40,12 @@ export async function readModelCatalog(request) {
   }
 }
 
-/** 更新后续轮次的选择。未加载的线程保持冷态，由 CLI 决定何时恢复。 */
+/** 更新后续轮次的选择。加载由明确的继续会话操作触发。 */
 export async function updateModelSelection(request, { threadId, provider, model, reasoningEffort }) {
   const { thread } = await request('thread/read', { threadId })
   if (thread.status?.type === 'notLoaded' || thread.canAcceptDirectInput === false || thread.modelProvider !== provider) {
     const message = thread.modelProvider !== provider ? '会话的模型提供商已变化。'
-      : '请先在 Codex CLI 打开此会话，再选择模型。'
+      : '请先继续此 Codex 会话，再选择模型。'
     throw new CodexRpcError({ code: -32600, message, data: { reason: 'modelSelectionUnavailable' } })
   }
   await request('thread/settings/update', { threadId, model, ...(reasoningEffort && { effort: reasoningEffort }) })

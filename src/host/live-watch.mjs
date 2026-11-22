@@ -1,9 +1,10 @@
 import { openCodexReader } from './app-server.mjs'
 import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
-import { createHistoryTail } from './live-history.mjs'
+import { createHistoryTail, readThreadTurns } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
 import { watchNativeUnread } from './unread-watch.mjs'
+import { watchConversationQueue } from './queue-watch.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
 const encoder = new TextEncoder()
@@ -23,6 +24,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
       const params = new URL(request.url).searchParams
       const threadId = params.get('threadId')
       const catalog = params.get('scope') === 'catalog'
+      const observeQueue = params.get('queue') === '1'
       if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
       const abort = new AbortController()
       const signal = AbortSignal.any([request.signal, abort.signal, ...(ownerSignal ? [ownerSignal] : [])])
@@ -46,6 +48,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let receiptSequence = 0
           let rolloutFacts
           let settingsStamp
+          let wakeQueue
           let connection
           let catalogReady = false
           let catalogQueue = Promise.resolve()
@@ -114,7 +117,11 @@ export function createWatchRoute(socketPath, ownerSignal) {
               })
               return
             }
-            if (message.params?.threadId !== threadId) return
+            if ((message.params?.threadId ?? message.params?.thread?.id) !== threadId) return
+            if (message.method === 'thread/queue/changed') {
+              wakeQueue?.()
+              return
+            }
             const goal = goalMethods.has(message.method)
             const settings = message.method === 'thread/settings/updated'
             const reverted = message.method === 'thread/reverted'
@@ -139,7 +146,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           }
 
           async function sendSnapshot({ thread, readState }, replace = false) {
-            const page = await connection.request('thread/turns/list', {
+            const page = await readThreadTurns(connection.request, {
               threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
             })
             tail = createHistoryTail(connection.request, thread, page)
@@ -176,6 +183,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
               }, wake, signal)
               mode = watching ? 'live' : 'history'
               await sendSnapshot(reading)
+              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteDirectory(config), send, signal)
               for (const message of early) notify(message)
               early.length = 0
               void sendFacts()

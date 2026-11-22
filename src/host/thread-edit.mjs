@@ -1,5 +1,5 @@
 import { CodexRpcError, readCodexPages } from './app-server.mjs'
-import { userInputText } from '../shared/user-input.js'
+import { replaceUserInputText } from '../shared/user-input.js'
 import { questionReplies } from '../shared/question-replies.js'
 
 /** 从原生记录提取该轮首条用户输入。只替换文本，附件与引用继续使用 Codex 原对象。 */
@@ -16,14 +16,7 @@ export async function editedInput(request, threadId, turnId, itemId, text) {
 
   const { content } = message
   if (questionReplies(content)) throw new CodexRpcError({ code: -32602, message: '这是一条问答记录，可通过整轮回退重新开始。' })
-  if (text === userInputText(content)) return content
-  const edited = { type: 'text', text, text_elements: [] }
-  const firstText = content.findIndex(part => part.type === 'text')
-  const input = content.flatMap((part, index) => {
-    if (part.type !== 'text') return [part]
-    return index === firstText && text.trim() ? [edited] : []
-  })
-  if (firstText === -1 && text.trim()) input.push(edited)
+  const input = replaceUserInputText(content, text)
   if (!input.length) throw new CodexRpcError({ code: -32602, message: '请输入消息内容。' })
   return input
 }

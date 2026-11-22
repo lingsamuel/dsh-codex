@@ -1,10 +1,17 @@
-import { useLayoutEffect, useSyncExternalStore } from 'react'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 
 const bar = 'conversation.composer.bar'
+const dock = 'conversation.composer.dock'
 const locale = 'codex.composer'
 const copy = {
-  zh: { readonly: '请在 Codex CLI 发送消息', loading: '正在载入会话…', select: '选择一个 Codex 会话浏览历史', commands: '指令' },
-  en: { readonly: 'Send messages in Codex CLI', loading: 'Loading sessions…', select: 'Select a Codex session to browse its history', commands: 'Commands' },
+  zh: { readonly: '此会话无法直接发送消息', archived: '请先取消归档', notLoaded: '请先继续此会话',
+    loading: '正在载入会话…', unavailable: '会话历史未就绪',
+    select: '选择一个 Codex 会话浏览历史', commands: '指令', continueQueue: '继续队列' },
+  en: { readonly: 'Direct messages are unavailable for this session', archived: 'Unarchive the session to send messages',
+    notLoaded: 'Resume this session to send messages',
+    loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
+    select: 'Select a Codex session to browse its history', commands: 'Commands', continueQueue: 'Continue queue' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
 
@@ -15,8 +22,9 @@ function CatalogStatus({ catalog, t }) {
   return <p role="status">{t(busy ? 'loading' : 'select')}</p>
 }
 
-function ReadonlyComposer({ Native, commandsLabel, ...props }) {
+function ComposerBar({ Native, commandsLabel, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
+  const knownTurn = props.useSession(state => Boolean(state.live.activeTurnId))
   useLayoutEffect(() => {
     if (!blocked || disabled || !toggleCommandMenu) return
     const card = keyboard.editor.getRootElement()?.closest('[data-composer-card]')
@@ -42,13 +50,29 @@ function ReadonlyComposer({ Native, commandsLabel, ...props }) {
     return () => {
       button.removeEventListener('click', toggle)
       button.removeEventListener('keydown', navigate)
-      button.disabled = true
     }
   }, [blocked, commandsLabel, disabled, keyboard, toggleCommandMenu])
-  return <Native {...props} t={(key, ...args) => key === 'input.commands' && toggleCommandMenu ? commandsLabel : t(key, ...args)} />
+  return <Native {...props} stop={!blocked && knownTurn ? props.stop : undefined}
+    t={(key, ...args) => key === 'input.commands' && toggleCommandMenu ? commandsLabel : t(key, ...args)} />
 }
 
-/** 复用原生编辑器、底栏和上下文占用，由 DSH 的会话级阻止条件锁定输入。 */
+function ContinueQueue({ useSession, useProjection, startQueue, t }) {
+  const ready = useSession(state => state.openState === 'open' && !state.archived && !state.subagent
+    && state.canAcceptDirectInput !== false && state.live.status?.type === 'idle')
+  const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
+  const [starting, setStarting] = useState(false)
+  if (!ready || !queued) return null
+  return <Button size="sm" variant="outline" disabled={starting} onClick={async () => {
+    setStarting(true)
+    try {
+      await startQueue()
+    } finally {
+      setStarting(false)
+    }
+  }}>{t('continueQueue')}</Button>
+}
+
+/** 原生编辑器负责发送手势和草稿。停止后，可在原生队列下方手动继续。 */
 export function installComposer(ctx, catalog) {
   ctx.effect(() => ctx.locale.register(locale, copy))
   const t = ctx.locale.bind(locale)
@@ -61,18 +85,34 @@ export function installComposer(ctx, catalog) {
         if (!installed.has(binding)) {
           installed.add(binding)
           binding.ctx.effect(() => {
-            const sync = () => blocks.set(binding.sessionId, { reason: t('readonly') })
+            const { sessionId, session } = binding
+            const sync = () => {
+              const { archived, subagent, canAcceptDirectInput, openState, live } = session.getSnapshot()
+              const reason = archived ? 'archived' : subagent || canAcceptDirectInput === false ? 'readonly'
+                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable'
+                  : live.status?.type === 'notLoaded' ? 'notLoaded' : undefined
+              blocks.set(sessionId, reason ? { reason: t(reason) } : undefined)
+            }
             sync()
-            const unsubscribe = ctx.locale.subscribe(sync)
+            const unsubscribeLocale = ctx.locale.subscribe(sync)
+            const unsubscribeSession = session.subscribe(sync)
             return () => {
-              unsubscribe()
-              blocks.forget(binding.sessionId)
+              unsubscribeLocale()
+              unsubscribeSession()
+              blocks.forget(sessionId)
             }
           })
         }
         return {}
       },
     })
+  })
+
+  ctx.inject(['sessions'], scope => {
+    scope.slots.inject(dock, () => scope.slots.register({
+      name: dock, id: 'codex-continue-queue', order: 50, locale,
+      inject: sessionId => ({ startQueue: scope.sessions.binding(sessionId)?.session.startQueue }),
+    }, ContinueQueue))
   })
 
   ctx.effect(() => {
@@ -87,20 +127,19 @@ export function installComposer(ctx, catalog) {
       const inject = entry?.inject
       const Component = entry?.component
       if (!inject || !Component) return
-      // RC2 的 Stop 独立于输入锁。保留真实 running 供聊天进度使用，仅撤下输入栏的停止回调。
-      const injectReadonly = (sessionId, ...args) => ({
+      const injectComposer = (sessionId, ...args) => ({
         ...inject(sessionId, ...args),
+        // 此阶段只开放文本输入，Codex 的通用附件流尚未接入。
         addFiles: undefined,
-        stop: undefined,
         ...(sessionId === undefined ? { accessory: <CatalogStatus catalog={catalog} t={t} /> } : {}),
       })
       function Composer(props) {
-        return <ReadonlyComposer {...props} Native={Component} commandsLabel={t('commands')} />
+        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} />
       }
-      entry.inject = injectReadonly
+      entry.inject = injectComposer
       entry.component = Composer
       restore = () => {
-        if (entry.inject === injectReadonly) entry.inject = inject
+        if (entry.inject === injectComposer) entry.inject = inject
         if (entry.component === Composer) entry.component = Component
       }
     }

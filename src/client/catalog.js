@@ -174,6 +174,10 @@ export function createHistoryCatalog(signal) {
     acceptThread(thread, workspacePaths) {
       receive({ type: 'thread', id: thread.id, thread, workspacePaths })
     },
+    acceptProject(project, workspacePaths) {
+      const projects = mergePages(store.getSnapshot().projects, [project])
+      receive({ type: 'projects', projects, workspacePaths })
+    },
     removeThread(id) {
       receive({ type: 'thread', id, thread: null })
     },

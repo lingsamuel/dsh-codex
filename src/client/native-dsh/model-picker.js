@@ -70,7 +70,7 @@ export function installModelPicker(ctx, signal) {
       const selectModel = replaceMethod(remote, 'selectModel', async ({ sessionId, provider, model, reasoningEffort }) => {
         const session = scope.sessions.binding(sessionId)?.session
         if (!session || !canChangeModel(session.getSnapshot())) {
-          return { ok: false, error: remoteFailure('请先在 Codex CLI 打开此会话，再选择模型。') }
+          return { ok: false, error: remoteFailure('请先继续此 Codex 会话，再选择模型。') }
         }
         try {
           const projection = session.projections.faceOf('modelSelection')

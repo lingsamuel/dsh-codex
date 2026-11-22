@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { WebSocketServer } from 'ws'
 import { readCodex } from '../src/host/app-server.mjs'
+import { createConversationActionRoute } from '../src/host/conversation-actions.mjs'
 import { createHistoryRoutes } from '../src/host/history.mjs'
 
 async function fakeCodex(t, methods) {
@@ -53,6 +54,91 @@ async function fakeCodex(t, methods) {
     },
   }
 }
+
+test('网页会话创建和显式加载沿用原生配置，普通发送只进入队列', async t => {
+  const thread = { id: 'native-thread', cwd: '/mock', status: { type: 'notLoaded' } }
+  const input = [{ type: 'text', text: '请继续', text_elements: [] }]
+  const queuedSubmission = { id: 'queued-id', clientUserMessageId: 'browser-id', input }
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/start': () => ({ result: { thread } }),
+    'thread/resume': () => {
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/queue/add': () => ({ result: { queuedSubmission } }),
+    'turn/steer': ({ expectedTurnId }) => expectedTurnId === 'active-turn' ? { result: { turnId: 'active-turn' } }
+      : { error: { code: -32600, message: 'expected active turn id `stale-turn` but found `active-turn`' } },
+    'turn/interrupt': () => ({ result: {} }),
+  })
+  const route = createConversationActionRoute(socketPath)
+  const post = (action, fields) => route.fetch(new Request('http://local/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...fields }),
+  }))
+
+  assert.equal((await post('thread/start', { cwd: thread.cwd })).status, 400)
+  assert.deepEqual((await (await post('create', { cwd: thread.cwd, projectId: 'project-id', approvalPolicy: 'never' })).json()).thread, thread)
+  assert.equal((await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })).status, 409)
+  assert.equal((await post('resume', { threadId: thread.id, path: '/another-rollout' })).status, 200)
+  assert.equal((await post('resume', { threadId: thread.id })).status, 200)
+  assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })).json(), { queuedSubmission })
+  assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id' })).json(), { queuedSubmission })
+  assert.deepEqual(await (await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id', expectedTurnId: 'stale-turn' })).json(), { queuedSubmission })
+  assert.equal((await post('prompt', { threadId: thread.id, mode: 'steer', input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' })).status, 200)
+  assert.equal((await post('cancel', { threadId: thread.id, turnId: 'active-turn' })).status, 200)
+  assert.deepEqual(messages.filter(({ method }) => /^(thread|turn)\//.test(method) && method !== 'thread/read')
+    .map(({ method, params }) => [method, params]), [
+    ['thread/start', { cwd: thread.cwd, historyMode: 'paginated', projectId: 'project-id' }],
+    ['thread/resume', { threadId: thread.id, excludeTurns: true }],
+    ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
+    ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
+    ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'stale-turn' }],
+    ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
+    ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' }],
+    ['turn/interrupt', { threadId: thread.id, turnId: 'active-turn' }],
+  ])
+})
+
+test('队列编辑保留原生附件，显式插话拒绝后保留待发文本', async t => {
+  const threadId = 'native-thread'
+  const attachment = { type: 'localImage', path: '/mock/image.png' }
+  const text = value => ({ type: 'text', text: value, text_elements: [] })
+  const item = { id: 'queued-id', clientUserMessageId: 'browser-id', input: [text('before'), attachment] }
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/queue/list': ({ cursor }) => ({ result: { data: cursor ? [item] : [], nextCursor: cursor ? null : 'next' } }),
+    'thread/queue/update': ({ input }) => {
+      item.input = input
+      return { result: { queuedSubmission: item } }
+    },
+    'thread/queue/delete': ({ queuedSubmissionId }) => ({ result: { deleted: queuedSubmissionId === item.id } }),
+    'turn/steer': () => ({ error: { code: -32600, message: 'no active turn to steer' } }),
+    'thread/queue/add': () => ({ result: { queuedSubmission: { ...item, id: 'restored-id' } } }),
+    'thread/queue/start': () => ({ result: { turn: { id: 'resumed-turn' } } }),
+  })
+  const route = createConversationActionRoute(socketPath)
+  const queue = (operation, fields) => route.fetch(new Request('http://local/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation, threadId, ...fields }),
+  }))
+
+  assert.deepEqual(await (await queue('list')).json(), { data: [item] })
+  const edited = await queue('edit', { queuedSubmissionId: item.id, text: 'after' })
+  assert.equal(edited.status, 200)
+  assert.deepEqual((await edited.json()).queuedSubmission.input, [text('after'), attachment])
+  const missing = await queue('remove', { queuedSubmissionId: 'already-claimed' })
+  assert.equal(missing.status, 409)
+  assert.equal((await missing.json()).reason, 'queue-item-not-found')
+  const refused = await queue('steer', { queuedSubmissionId: item.id, expectedTurnId: 'completed-turn' })
+  assert.equal(refused.status, 409)
+  assert.equal((await refused.json()).reason, 'steer-unavailable')
+  assert.deepEqual(messages.filter(({ method }) => ['thread/queue/add', 'turn/steer'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['turn/steer', { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId, expectedTurnId: 'completed-turn' }],
+    ['thread/queue/add', { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId }],
+  ])
+  assert.deepEqual(await (await queue('start')).json(), { turn: { id: 'resumed-turn' } })
+  assert.deepEqual(messages.at(-1).params, { threadId })
+})
 
 test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', async t => {
   const latest = { revision: 'new', firstUnread: { type: 'turn', turnId: 'second' } }
@@ -572,6 +658,69 @@ test('回退通知在同一 SSE 连接替换历史尾部和游标', { timeout: 5
   assert.deepEqual(snapshot.page, { data: [kept], nextCursor: 'kept' })
   assert.equal(fixture.messages.filter(({ method }) => method === 'initialize').length, 1)
   await reader.cancel()
+})
+
+test('网页从原生队列变更推送只读队列快照，并保持线程未加载', { timeout: 5000 }, async t => {
+  const threadId = 'stored'
+  const queued = { id: 'native-id', clientUserMessageId: 'browser-input', input: [{ type: 'text', text: '等下一轮' }] }
+  let entries = []
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'notLoaded' } } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ result: { data: entries, nextCursor: null } }),
+  })
+  const response = await fixture.get(`/api/codex/watch?threadId=${threadId}&queue=1`)
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal((await read()).status.type, 'notLoaded')
+  assert.deepEqual(await read(), { type: 'queue', submissions: [] })
+  entries = [queued]
+  await writeFile(join(fixture.directory, 'queue_1.sqlite-wal'), 'native queue mutation')
+  assert.deepEqual(await read(), { type: 'queue', submissions: [queued] })
+  assert.equal(fixture.messages.some(({ method }) => method === 'thread/resume' || method === 'thread/queue/start'), false)
+  await reader.cancel()
+})
+
+test('等待首条消息的原生新会话可以打开为空历史', { timeout: 5000 }, async t => {
+  const threadId = 'fresh'
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'idle' }, historyMode: 'paginated' } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ error: { code: -32600,
+      message: `thread ${threadId} is not materialized yet; thread/turns/list is unavailable before first user message`,
+    } }),
+  })
+  const history = await fixture.get(`/api/codex/turns?threadId=${threadId}`)
+  assert.equal(history.status, 200)
+  assert.deepEqual((await history.json()).data, [])
+  const reader = (await fixture.get(`/api/codex/watch?threadId=${threadId}`)).body.getReader()
+  const snapshot = JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal(snapshot.status.type, 'idle')
+  assert.deepEqual(snapshot.page.data, [])
+  await reader.cancel()
+})
+
+test('首个工作目录使用原生项目，重复选择同一路径复用它', async t => {
+  const cwd = '/fixture/workspace'
+  const project = { id: 'native-project', name: 'workspace', roots: [{ path: cwd }] }
+  const projects = []
+  const { get, messages } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: projects, nextCursor: null } }),
+    'project/create': ({ name, roots, idempotencyKey }) => {
+      assert.equal(name, project.name)
+      assert.deepEqual(roots, project.roots)
+      assert.ok(idempotencyKey)
+      projects.push(project)
+      return { result: { project } }
+    },
+  })
+  const open = () => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'project', cwd }),
+  })
+  for (const response of await Promise.all([open(), open()])) assert.deepEqual((await response.json()).project, project)
+  assert.deepEqual((await (await open()).json()).project, project)
+  assert.equal(messages.filter(({ method }) => method === 'project/create').length, 1)
 })
 
 test('新回执在它对应的历史增量之后才进入会话阅读面', { timeout: 5000 }, async t => {

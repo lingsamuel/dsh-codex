@@ -3,7 +3,7 @@ import { mergePages } from '../../shared/pages.js'
 import { readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
 import { readInlineCodexAttachments } from '../native-chat/attachments.js'
-import { projectCodexTurns } from '../native-chat/events.js'
+import { projectCodexTurns, userBlock } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
@@ -19,7 +19,7 @@ function pageBounds(entry) {
   return entry && { beforeSeq: entry.event.seq, beforeTurn: entry.event.data.turn }
 }
 
-/** 给原版聊天渲染器提供由会话引用持有的历史窗口和只读实时状态。 */
+/** 给原版聊天渲染器提供由会话引用持有的原生历史、状态和待发送队列。 */
 export function createCodexHistory(ctx, thread, catalog) {
   const controller = new AbortController()
   const { signal } = controller
@@ -56,8 +56,11 @@ export function createCodexHistory(ctx, thread, catalog) {
   const outline = createSnapshotStore(undefined)
   const todos = createSnapshotStore(undefined)
   const contextPressure = createSnapshotStore(undefined)
+  const queueStore = createSnapshotStore([])
+  const inbox = createSnapshotStore({ 'next-turn': [], 'next-step': [] })
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
-  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['modelSelection', modelSelection]])
+  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
+    ['modelSelection', modelSelection], ['inbox', inbox]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -88,21 +91,28 @@ export function createCodexHistory(ctx, thread, catalog) {
   }
 
   function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
-    const lastTurnStatus = transcript.getTurn(rows.at(-1)?.id)?.status
+    const lastTurn = transcript.getTurn(rows.at(-1)?.id)
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
       if (status !== undefined) current.live.status = status
       if (historyMode !== undefined) current.historyMode = historyMode
       if (canAcceptDirectInput !== undefined) current.canAcceptDirectInput = canAcceptDirectInput
       if (archived !== undefined) current.archived = Boolean(archived)
-      current.live.lastTurnStatus = lastTurnStatus
-      current.running = current.live.mode === 'live' && current.live.status?.type === 'active'
+      current.live.lastTurnStatus = lastTurn?.status
+      current.live.activeTurnId = lastTurn?.status === 'inProgress' ? lastTurn.id : undefined
+      current.running = (current.live.mode === 'live' || current.live.mode === 'history') && current.live.status?.type === 'active'
       current.hasMore = Boolean(nextCursor)
       if (opened) {
         current.openState = 'open'
         current.openError = null
       }
     })
+  }
+
+  function applyThread(native) {
+    publishState(native)
+    publishModel(modelSelectionOf(native))
+    if (native.status) catalog?.setStatus(thread.id, native.status)
   }
 
   function publishReadingReceipt(readState) {
@@ -280,6 +290,14 @@ export function createCodexHistory(ctx, thread, catalog) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
+      if (frame.type === 'queue') {
+        const { submissions } = frame
+        queueStore.set(submissions)
+        inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
+          source: { kind: 'user', rpcId: clientUserMessageId }, content: input.map(part => userBlock(part)),
+        })), 'next-step': [] })
+        return
+      }
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
         return
@@ -296,7 +314,9 @@ export function createCodexHistory(ctx, thread, catalog) {
         publishState()
       } else if (frame.type === 'notification') {
         const { method, params } = frame.notification
-        if (method === 'thread/status/changed') {
+        if (method === 'thread/started' && params.thread?.id === thread.id) {
+          applyThread(params.thread)
+        } else if (method === 'thread/status/changed') {
           if (params.threadId === thread.id) publishState({ status: params.status })
           catalog?.setStatus(params.threadId, params.status)
         } else if (method === 'thread/readState/changed') {
@@ -407,10 +427,14 @@ export function createCodexHistory(ctx, thread, catalog) {
       hasAttachments: message.content.some(part => part.type !== 'text') }
   }
 
-  openLiveWatch(thread.id, { receive, changeMode }, signal)
+  openLiveWatch(thread.id, { receive, changeMode, queue: true }, signal)
   return {
     events,
     ready,
+    activeTurnId: () => state.getSnapshot().live.activeTurnId,
+    applyThread,
+    queueStore,
+    updateState: edit => state.update(edit),
     session: {
       getSnapshot: state.getSnapshot,
       subscribe: state.subscribe,

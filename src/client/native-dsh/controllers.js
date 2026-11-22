@@ -1,8 +1,9 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { observe, projectCatalog, remoteFailure } from './catalog.js'
 import { createCodexHistory } from './session-events.js'
+import { createSessionInput } from './session-input.js'
 import { subagentAddress } from './subagents.js'
-import { writeThreadAction } from '../api.js'
+import { writeConversationAction, writeThreadAction } from '../api.js'
 
 const searchResultLimit = 20
 const unsupported = '此操作暂未开放，请使用 Codex CLI。'
@@ -11,9 +12,8 @@ async function rejectWrite() {
   throw new Error(unsupported)
 }
 
-function readonlyBinding(ctx, thread, catalog) {
+function codexBinding(ctx, thread, catalog) {
   const history = createCodexHistory(ctx, thread, catalog)
-  const interactionUnavailable = async () => ({ ok: false, error: remoteFailure(unsupported) })
   return {
     ctx,
     sessionId: thread.id,
@@ -21,10 +21,8 @@ function readonlyBinding(ctx, thread, catalog) {
     ready: history.ready,
     session: {
       ...history.session,
+      ...createSessionInput(ctx, thread.id, history, catalog.acceptThread),
       sessionId: thread.id,
-      prompt: interactionUnavailable,
-      cancel: interactionUnavailable,
-      updateQueue: interactionUnavailable,
       async rename(title) {
         try {
           await writeThreadAction({ threadId: thread.id, action: 'rename', name: title })
@@ -83,7 +81,7 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: readonlyBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog), fiber }
+        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }
@@ -113,7 +111,15 @@ export function provideCodexControllers(ctx, catalog) {
       }
       return { sessionId: id, binding, ready: binding.ready.then(() => binding), release, [Symbol.dispose]: release }
     },
-    create: rejectWrite,
+    async create({ workspaceId, cwd } = {}) {
+      const workspace = workspaces.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
+      const directory = cwd ?? workspace?.path
+      if (!directory) throw new Error('请先选择新会话的工作目录。')
+      const projectId = workspace?.workspaceId.startsWith('project:') ? workspace.workspaceId.slice('project:'.length) : undefined
+      const { thread, workspacePaths } = await writeConversationAction({ action: 'create', cwd: directory, projectId })
+      catalog.acceptThread(thread, workspacePaths)
+      return thread.id
+    },
     async fork({ sessionId: threadId, atSeq, onCreated }) {
       const lastTurnId = atSeq === undefined ? undefined : sessions.binding(threadId)?.session.turnAtEnd(atSeq)
       if (atSeq !== undefined && !lastTurnId) throw new Error('找不到可分支的 Codex 轮次。')
@@ -136,7 +142,13 @@ export function provideCodexControllers(ctx, catalog) {
   const workspaces = {
     list: observe(projected, state => state.workspaces),
     initializeDefault: async () => undefined,
-    create: rejectWrite,
+    async create({ path }) {
+      const existing = workspaces.list.getSnapshot().items.find(item => item.path === path)
+      if (existing) return existing
+      const { project, workspacePaths } = await writeConversationAction({ action: 'project', cwd: path })
+      catalog.acceptProject(project, workspacePaths)
+      return workspaces.list.getSnapshot().items.find(item => item.workspaceId === `project:${project.id}`)
+    },
     rename: rejectWrite,
     delete: rejectWrite,
     insertBefore: rejectWrite,

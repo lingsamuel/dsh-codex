@@ -16,7 +16,16 @@ export function readPage(collection, parameters, signal) {
 
 /** 通过 DSH 同源入口提交明确的会话管理动作。 */
 export function writeThreadAction(parameters, signal) {
-  const url = new URL('api/codex/thread-action', document.baseURI)
+  return writeAction('thread-action', parameters, signal)
+}
+
+/** 发送、继续、停止和队列操作沿用项目已有的同源传输。 */
+export function writeConversationAction(parameters, signal) {
+  return writeAction('conversation-action', parameters, signal)
+}
+
+function writeAction(route, parameters, signal) {
+  const url = new URL(`api/codex/${route}`, document.baseURI)
   return fetchResult(url, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parameters), signal,
   })

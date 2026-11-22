@@ -39,6 +39,24 @@ function turn(id, status, items) {
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
 
+test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', async t => {
+  const active = { type: 'active', activeFlags: [] }
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'history', status: active })
+  await emit({ type: 'queue', submissions: [{ id: 'codex-q', clientUserMessageId: 'pending-input',
+    input: [{ type: 'text', text: 'queued text' }] }] })
+  assert.equal(history.activeTurnId(), 'current')
+  assert.equal(history.session.getSnapshot().running, true)
+  assert.deepEqual(history.session.projections.faceOf('inbox').getSnapshot(), {
+    'next-turn': [{ id: 'codex-q', role: 'user', source: { kind: 'user', rpcId: 'pending-input' },
+      content: [{ type: 'text', text: 'queued text' }] }], 'next-step': [],
+  })
+  await emit({ type: 'change', turn: { id: 'current', status: 'completed' }, items: [] })
+  assert.equal(history.activeTurnId(), undefined)
+})
+
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {
   const currentSource = mockTransport(t)
   const received = []
