@@ -282,16 +282,6 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         return failure(error)
       }
     },
-    async viewQueue() {
-      try {
-        const accept = history.captureQueueView()
-        const { data } = await native('queue', { operation: 'list', unarchive: true })
-        await accept(data)
-        return { ok: true, value: { empty: queueStore.getSnapshot().length === 0 } }
-      } catch (error) {
-        return failure(error)
-      }
-    },
     startQueue() {
       const model = modelDraft.getSnapshot()
       const profileId = permissionDraft?.getSnapshot()

@@ -4,6 +4,7 @@ import { userInputText } from '../../shared/user-input.js'
 
 const dock = 'conversation.input.dock'
 const locale = 'codex.queue.images'
+const readOnlyQueue = { address: { mode: 'unknown' } }
 const copy = {
   zh: { edit: '编辑待发图片消息', message: '待发消息', image: '图片', text: '消息文字',
     cancel: '取消', save: '保存', failed: '无法保存待发消息' },
@@ -84,7 +85,11 @@ export function installQueueImages(ctx) {
         } }
       }
       function Queue(props) {
-        return <><Component {...props} /><QueueImageEdit {...props} t={t} /></>
+        // DSH 的队列组件通过会话地址判断只读状态。此映射只传给队列组件。
+        function useQueueSession(select) {
+          return props.useSession(state => select(state.archived && !state.subagent ? { ...state, subagent: readOnlyQueue } : state))
+        }
+        return <><Component {...props} useSession={useQueueSession} /><QueueImageEdit {...props} t={t} /></>
       }
       entry.inject = injectQueue
       entry.component = Queue

@@ -1051,28 +1051,25 @@ test('另一客户端已恢复归档会话并清空队列时，不提交草稿�
     ['thread/read', 'thread/list', 'thread/read', 'thread/queue/list'])
 })
 
-test('查看归档会话的队列只在确认后取消归档，保持运行时未加载', async t => {
+test('旧版查看队列请求也不能解除归档', async t => {
   const thread = { id: 'archive-queue-view', status: { type: 'notLoaded' } }
-  const target = { id: 'queued', input: [{ type: 'text', text: '待发送' }] }
   let archived = true
   const { get, messages } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread } }),
     'thread/list': () => ({ result: { data: archived ? [thread] : [] } }),
     'thread/unarchive': () => { archived = false; return { result: { thread } } },
     'thread/queue/list': () => archived ? { error: { code: -32600, message: 'session is archived' } }
-      : { result: { data: [target], nextCursor: null } },
+      : { result: { data: [], nextCursor: null } },
   })
   const list = unarchive => get('/api/codex/conversation-action', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
       action: 'queue', operation: 'list', threadId: thread.id, unarchive,
     }),
   })
-  assert.equal((await list(false)).status, 400)
+  assert.equal((await list(true)).status, 400)
   assert.equal(archived, true)
-  assert.deepEqual(await (await list(true)).json(), { data: [target] })
-  assert.equal(archived, false)
   assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
-    ['thread/queue/list', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/queue/list'])
+    ['thread/queue/list'])
 })
 
 test('继续归档会话的队列先取消归档，再确认目标消息', async t => {
@@ -2341,6 +2338,42 @@ test('网页从原生队列变更推送只读队列快照，并保持线程未�
   await writeFile(join(fixture.directory, 'queue_1.sqlite-wal'), 'native queue mutation')
   assert.deepEqual(await read(), { type: 'queue', submissions: [queued] })
   assert.equal(fixture.messages.some(({ method }) => method === 'thread/resume' || method === 'thread/queue/start'), false)
+  await reader.cancel()
+})
+
+test('归档队列按原生顺序只读显示，并跟随队列清空', { timeout: 4000 }, async t => {
+  const threadId = 'archived-with-queue'
+  const status = { type: 'notLoaded' }
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status } } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ error: { code: -32600,
+      message: `session ${threadId} is archived. Run \`codex unarchive ${threadId}\` to unarchive it first.`,
+    } }),
+  })
+  using db = new DatabaseSync(join(fixture.directory, 'queue_1.sqlite'))
+  db.exec(`PRAGMA journal_mode = WAL;
+    CREATE TABLE queued_items (id TEXT PRIMARY KEY, thread_id TEXT, payload_json TEXT, queue_order INTEGER)`)
+  const insert = db.prepare('INSERT INTO queued_items VALUES (?, ?, ?, ?)')
+  const message = { type: 'text', text: '首条消息', text_elements: [] }
+  const url = 'data:image/png;base64,AA=='
+  const payload = (client_id, content) => JSON.stringify({ UserInput: { client_id, content } })
+  insert.run('last', threadId, payload('client-last', [{ type: 'text', text: '末条消息' }]), 1)
+  insert.run('first', threadId, payload('client-first', [message, { type: 'image', image_url: url }]), 0)
+  insert.run('other', 'other-thread', payload('client-other', [message]), 0)
+
+  const result = await fixture.get(`/api/codex/watch?threadId=${threadId}&queue=1`, { signal: t.signal })
+  const reader = result.body.getReader()
+  t.after(() => reader.cancel())
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.deepEqual((await read()).status, status)
+  assert.deepEqual(await read(), { type: 'queue', submissions: [
+    { id: 'first', clientUserMessageId: 'client-first', input: [message, { type: 'image', url }] },
+    { id: 'last', clientUserMessageId: 'client-last', input: [{ type: 'text', text: '末条消息' }] },
+  ] })
+  db.prepare('DELETE FROM queued_items WHERE thread_id = ?').run(threadId)
+  assert.deepEqual(await read(), { type: 'queue', submissions: [] })
+  assert.equal(fixture.messages.some(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/queue/start'].includes(method)), false)
   await reader.cancel()
 })
 

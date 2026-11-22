@@ -208,14 +208,8 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text, unarchive }) {
-  if (operation === 'list') {
-    if (unarchive === true) {
-      const thread = await addressableThread(request, threadId, true)
-      await unarchiveForSubmission(request, thread)
-    }
-    return { data: await readConversationQueue(request, threadId) }
-  }
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }) {
+  if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
   if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
@@ -426,11 +420,11 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        const { operation, unarchive } = fields
+        const { operation } = fields
         const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
           ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle)
           : queueAction(rpc, threadId, fields))
-        const serial = operation === 'start' || operation === 'steer' || (operation === 'list' && unarchive === true)
+        const serial = operation === 'start' || operation === 'steer'
         return json(await (serial ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {

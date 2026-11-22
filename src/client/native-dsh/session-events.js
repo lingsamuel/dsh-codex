@@ -97,7 +97,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let opened = false
   let triedFallback = false
   let outlineRevision = 0
-  let archiveRevision = 0
   let liveQuestions = []
   let watchingInteractions = false
   let itemCursor
@@ -123,7 +122,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
-    if (archived !== undefined) archiveRevision++
     const lastTurn = transcript.getTurn(rows.at(-1)?.id)
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
@@ -454,21 +452,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     publishQuestions()
   }
 
-  /** 主动查看带回原生队列。重连尚未送达时补齐界面，原生较新的推送仍优先。 */
-  function captureQueueView() {
-    const queueBefore = queueStore.getSnapshot()
-    const archiveBefore = archiveRevision
-    const catalogBefore = catalogArchiveRevision
-    return submissions => enqueue(async () => {
-      const summary = catalogThread(visibleCatalog?.getSnapshot())
-      if ((archiveRevision !== archiveBefore && state.getSnapshot().archived)
-        || (catalogArchiveRevision !== catalogBefore && summary?.archived)) return
-      if (state.getSnapshot().archived) publishState({ archived: false })
-      if (summary?.archived) catalog.acceptThread({ ...summary, archived: false })
-      if (queueStore.getSnapshot() === queueBefore) await publishQueue(submissions, signal)
-    })
-  }
-
   function receive(frame, lifetime) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame, lifetime)
@@ -668,18 +651,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   const visibleCatalog = catalog?.store
-  const catalogThread = snapshot => snapshot?.childThreads?.[thread.id] ?? snapshot?.threads?.find(summary => summary.id === thread.id)
-  let catalogArchived = Boolean(catalogThread(visibleCatalog?.getSnapshot())?.archived)
-  let catalogArchiveRevision = 0
   let watch
   function syncWatch() {
     if (signal.aborted) return
     const snapshot = visibleCatalog?.getSnapshot()
-    const archived = Boolean(catalogThread(snapshot)?.archived)
-    if (archived !== catalogArchived) {
-      catalogArchived = archived
-      catalogArchiveRevision++
-    }
     const connected = !retention || Boolean(retention.getSnapshot().connectionCount)
     const selected = connected && (!visibleCatalog || snapshot?.selected?.id === thread.id)
     if (Boolean(watch) === connected && selected === watchingInteractions) return
@@ -720,7 +695,6 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     ready,
     activeTurnId: () => state.getSnapshot().running ? state.getSnapshot().live.activeTurnId : undefined,
     queueStore,
-    captureQueueView,
     updateState: edit => state.update(edit),
     session: {
       getSnapshot: state.getSnapshot,

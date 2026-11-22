@@ -1,4 +1,4 @@
-import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 import { isComposerImageType } from '../../shared/composer-images.js'
@@ -14,16 +14,12 @@ const copy = {
     changingPlan: '正在等待 Codex 确认计划模式…',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
     commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
-    viewQueue: '查看队列', unarchiveAndView: '取消归档并查看', queueEmpty: '没有待发消息。',
-    viewQueueDescription: '查看队列需要先取消归档。待发消息继续由你手动启动。', cancel: '取消', close: '关闭',
     imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
     goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
     changingPlan: 'Waiting for Codex to confirm Plan mode…',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
     commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
-    viewQueue: 'View queue', unarchiveAndView: 'Unarchive and view', queueEmpty: 'No queued messages.',
-    viewQueueDescription: 'Viewing the queue unarchives this session. You can start pending messages manually.', cancel: 'Cancel', close: 'Close',
     imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
@@ -87,8 +83,7 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
   const ready = useSession(canUseQueue)
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
   const [starting, setStarting] = useState(false)
-  // Codex 在取消归档前不允许查询此会话的原生队列。
-  if (!ready || (!archived && !queued)) return null
+  if (!ready || !queued) return null
   return <Button size="sm" variant="outline" disabled={starting} onClick={async () => {
     setStarting(true)
     try {
@@ -97,42 +92,6 @@ function ContinueQueue({ useSession, useProjection, startQueue, t }) {
       setStarting(false)
     }
   }}>{t(archived ? 'unarchiveAndContinue' : 'continueQueue')}</Button>
-}
-
-function ViewArchivedQueue({ useSession, useProjection, viewQueue, t }) {
-  const archived = useSession(state => state.archived)
-  const ready = useSession(canUseQueue)
-  const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
-  const [open, setOpen] = useState(false)
-  const [pending, setPending] = useState(false)
-  const [empty, setEmpty] = useState(false)
-  const [error, setError] = useState('')
-  const close = () => { if (!pending) setOpen(false) }
-  async function confirm() {
-    setPending(true)
-    setError('')
-    try {
-      const result = await viewQueue()
-      if (result.ok) {
-        setEmpty(result.value.empty)
-        setOpen(false)
-      } else setError(result.error.message)
-    } finally {
-      setPending(false)
-    }
-  }
-  return <>
-    {archived && ready && <Button size="sm" variant="outline" onClick={() => { setError(''); setOpen(true) }}>{t('viewQueue')}</Button>}
-    {empty && !archived && !queued && <span role="status">{t('queueEmpty')}</span>}
-    {open && <Modal open title={t('viewQueue')} description={t('viewQueueDescription')} onClose={close} closeLabel={t('close')}
-      footer={<>
-        <Button variant="outline" disabled={pending} onClick={close}>{t('cancel')}</Button>
-        <Button variant="primary" disabled={pending} onClick={confirm}>{t('unarchiveAndView')}</Button>
-      </>}>
-      {pending && <p role="status">{t('loading')}</p>}
-      {error && <p role="alert">{error}</p>}
-    </Modal>}
-  </>
 }
 
 /** 原生编辑器负责发送手势和草稿。停止后，可在原生队列下方手动继续。 */
@@ -180,10 +139,6 @@ export function installComposer(ctx, catalog) {
   })
 
   ctx.inject(['sessions'], scope => {
-    scope.slots.inject(dock, () => scope.slots.register({
-      name: dock, id: 'codex-view-archive-queue', order: 45, locale,
-      inject: sessionId => ({ viewQueue: scope.sessions.binding(sessionId)?.session.viewQueue }),
-    }, ViewArchivedQueue))
     scope.slots.inject(dock, () => scope.slots.register({
       name: dock, id: 'codex-continue-queue', order: 50, locale,
       inject: sessionId => ({ startQueue: scope.sessions.binding(sessionId)?.session.startQueue }),
