@@ -12,6 +12,7 @@ import { addressableThread, createThreadSubmissionQueue, readConversationQueue, 
   unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 import { createThreadTitleScheduler } from './thread-titles.mjs'
 import { resolveInputSkills } from './skills.mjs'
+import { resolveWorktreeCwd, validateWorktreeSelection, worktreeConflict } from './git-worktrees.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -275,7 +276,65 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
 export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions) {
   const creatingProjects = new Map()
+  const worktreeStarts = new Map()
   const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
+
+  function withThreadCreation(signal, create) {
+    return permissions ? permissions.withThreadCreation(signal, create) : withCodexReader(socketPath, signal, create)
+  }
+
+  async function startDraft(rpc, cwd, projectId, retainDraft) {
+    const started = await rpc('thread/start', {
+      cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...await permissions?.startOptions(rpc, cwd),
+    })
+    const permission = retainDraft?.(started)
+    return { ...await workspaceThread({ ...started.thread, blank: true }), ...(permission && { permission }) }
+  }
+
+  async function worktreeStart(sourceId, selection, signal) {
+    const key = `${sourceId}:${selection.id}`
+    const chosen = JSON.stringify(selection)
+    let start = worktreeStarts.get(key)
+    if (start) {
+      if (start.chosen !== chosen) throw badRequest('工作树选项已变化，请重新选择。')
+      return start
+    }
+    const native = await withThreadCreation(signal, async (rpc, retainDraft) => {
+      const source = await addressableThread(rpc, sourceId)
+      if (!await reusableDraft(rpc, sourceId, source.cwd, source.projectId)) {
+        throw worktreeConflict('worktree-draft-unavailable', '此草稿已不再适合启动工作树会话。')
+      }
+      const cwd = await resolveWorktreeCwd(source.cwd, selection, signal)
+      const projectId = source.projectId ?? (await openProject(rpc, source.cwd)).project.id
+      return startDraft(rpc, cwd, projectId, retainDraft)
+    })
+    // Git 检出和 thread/start 都可能先于发送失败。保留原生目标，让重试继续原会话。
+    start = { chosen, native }
+    worktreeStarts.set(key, start)
+    if (worktreeStarts.size > 128) worktreeStarts.delete(worktreeStarts.keys().next().value)
+    return start
+  }
+
+  async function recoverWorktreePrompt(rpc, thread, clientUserMessageId, signal) {
+    // Codex 队列不会按 clientUserMessageId 去重。回执丢失时只确认原消息，不再次写入。
+    const deadline = performance.now() + 750
+    do {
+      const queuedSubmission = (await readConversationQueue(rpc, thread.id)).find(item => item.clientUserMessageId === clientUserMessageId)
+      if (queuedSubmission) {
+        const started = await startOnlyQueuedMessage(rpc, thread.id, queuedSubmission.id)
+        scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
+        return { queuedSubmission }
+      }
+      const turn = await readLatestTurn(rpc, thread.id, 'full')
+      if (turn?.items?.some(item => item.type === 'userMessage' && item.clientId === clientUserMessageId)) {
+        scheduleTitle(thread, clientUserMessageId, turn.id)
+        return { turn }
+      }
+      await delay(50, undefined, { signal })
+    } while (performance.now() < deadline)
+    throw worktreeConflict('worktree-delivery-unconfirmed', '无法确认工作树会话是否已收到消息，请查看该会话后再继续。')
+  }
+
   return {
     path: '/api/codex/conversation-action',
     methods: ['POST'],
@@ -303,40 +362,55 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           async function create(rpc, retainDraft) {
             const reused = await reusableDraft(rpc, reuseThreadId, cwd, projectId)
             if (reused) return workspaceThread({ ...reused, blank: true })
-            const started = await rpc('thread/start', {
-              cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...await permissions?.startOptions(rpc, cwd),
-            })
-            const permission = retainDraft?.(started)
-            return { ...await workspaceThread({ ...started.thread, blank: true }), ...(permission && { permission }) }
+            return startDraft(rpc, cwd, projectId, retainDraft)
           }
-          return json(permissions ? await permissions.withThreadCreation(signal, create) : await withCodexReader(socketPath, signal, create))
+          return json(await withThreadCreation(signal, create))
         }
         if (!['prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')
         required(threadId, '缺少 Codex 线程 ID。')
         if (action === 'prompt') {
           if (mode !== 'queue' && mode !== 'steer') throw badRequest('无效的发送方式。')
-          const params = { threadId, input: promptInput(input), clientUserMessageId: required(clientUserMessageId, '缺少消息 ID。') }
+          const parts = promptInput(input)
+          required(clientUserMessageId, '缺少消息 ID。')
+          const worktree = fields.worktree === undefined ? undefined : validateWorktreeSelection(fields.worktree)
+          if (worktree && (mode !== 'queue' || worktree.id !== clientUserMessageId || fields.unarchive === true)) {
+            throw badRequest('工作树会话需要通过新会话的首条消息启动。')
+          }
           if (mode === 'steer' && expectedTurnId !== undefined) required(expectedTurnId, '当前轮次 ID 无效。')
-          return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
-            const thread = await submissionThread(rpc, threadId, fields, permissions)
-            const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
-            params.input = await resolveInputSkills(rpc, params.input, () => runtime.cwd ?? thread.cwd)
-            if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
-              try {
-                const result = await steerTurn(rpc, { ...params, expectedTurnId })
-                return permission ? { ...result, permission } : result
-              } catch (error) {
-                if (error.data?.reason !== 'steer-unavailable') throw error
+          return json(await submit(threadId, async () => {
+            const start = worktree && await worktreeStart(threadId, worktree, signal)
+            if (start?.accepted) return start.accepted
+            const destination = start?.native.thread.id ?? threadId
+            const params = { threadId: destination, input: parts, clientUserMessageId }
+            const run = () => withCodexReader(socketPath, signal, async rpc => {
+              if (start?.uncertain) return recoverWorktreePrompt(rpc, start.native.thread, clientUserMessageId, signal)
+              const thread = await submissionThread(rpc, destination, fields, permissions)
+              const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
+              params.input = await resolveInputSkills(rpc, params.input, () => runtime.cwd ?? thread.cwd)
+              if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
+                try {
+                  const result = await steerTurn(rpc, { ...params, expectedTurnId })
+                  return permission ? { ...result, permission } : result
+                } catch (error) {
+                  if (error.data?.reason !== 'steer-unavailable') throw error
+                }
               }
-            }
-            // turn/start 也能向活动轮次插话，普通发送交由会检查空闲状态的原生队列。
-            const result = await rpc('thread/queue/add', params)
-            const queuedId = result.queuedSubmission?.id
-            const started = queuedId ? await startOnlyQueuedMessage(rpc, threadId, queuedId) : undefined
-            scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
-            if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, threadId, signal)
-            return permission ? { ...result, permission } : result
-          })))
+              // turn/start 也能向活动轮次插话，普通发送交由会检查空闲状态的原生队列。
+              const result = await rpc('thread/queue/add', params).catch(error => {
+                if (start && !(error instanceof CodexRpcError)) start.uncertain = true
+                throw error
+              })
+              const queuedId = result.queuedSubmission?.id
+              const started = queuedId ? await startOnlyQueuedMessage(rpc, destination, queuedId) : undefined
+              scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
+              if (thread.status?.type === 'notLoaded') await waitForThreadActivity(rpc, destination, signal)
+              return permission ? { ...result, permission } : result
+            })
+            const result = await (start ? submit(destination, run) : run())
+            if (!start) return result
+            start.accepted = { ...start.native, ...result, thread: { ...start.native.thread, blank: false } }
+            return start.accepted
+          }))
         }
         if (action === 'cancel') {
           required(turnId, '缺少当前轮次 ID。')

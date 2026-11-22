@@ -36,17 +36,17 @@ function questionMarkdown(questions) {
   }).join('\n\n')
 }
 
-function renderChatMarkdown(text, item) {
-  return projectFileLinks(item.type === 'agentMessage' ? projectVisualizeReferences(text) : text)
+function renderChatMarkdown(text, item, cwd) {
+  return projectFileLinks(item.type === 'agentMessage' ? projectVisualizeReferences(text) : text, cwd)
 }
 
-function assistantBlock(item, renderMarkdown) {
+function assistantBlock(item, cwd, renderMarkdown) {
   if (item.type === 'reasoning') {
     const text = item.summary?.join('\n\n')
     return text?.trim() ? { type: 'reasoning', text } : undefined
   }
   const nativeText = item.review ?? item.text
-  const text = nativeText?.trim() ? renderMarkdown(nativeText, item) : undefined
+  const text = nativeText?.trim() ? renderMarkdown(nativeText, item, cwd) : undefined
   const questions = item.type === 'agentMessage' ? item.questions : undefined
   if (!questions?.length) return text && textBlock(text)
 
@@ -94,7 +94,7 @@ function mergeCancelledToolCalls(items, cancelled) {
   return [...merged, ...recovered.slice(index)]
 }
 
-function turnEvents(turn, number, source, createdAt, attachments, cancelled, renderMarkdown) {
+function turnEvents(turn, number, source, createdAt, attachments, cancelled, cwd, renderMarkdown) {
   const events = []
   function emit(type, time, data, surfaceOp) {
     events.push({ type, time, data, ...(surfaceOp && { surfaceOp }) })
@@ -119,7 +119,7 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, ren
     const replies = isUser ? questionReplies(item.content) : undefined
     const reviewPhase = item.type === 'enteredReviewMode' ? 'commentary' : item.type === 'exitedReviewMode' ? 'final_answer' : undefined
     const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan' || reviewPhase != null
-    const block = isAssistant ? assistantBlock(item, renderMarkdown) : undefined
+    const block = isAssistant ? assistantBlock(item, cwd, renderMarkdown) : undefined
     if (isAssistant && !block) continue
 
     const start = item.startedAtMs ?? item.completedAtMs ?? lastTime
@@ -172,7 +172,7 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled, ren
       continue
     }
 
-    const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies) : projectTool(item)
+    const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies) : projectTool(item, cwd)
     emit('tool/call', start, { ...coordinates(), callId: item.id, name, arguments: JSON.stringify(args) })
     if (item.status === 'inProgress') continue
     emit('tool/result', end, {
@@ -210,12 +210,13 @@ export function projectCodexTurns(turns, {
   createdAt,
   attachments,
   cancelledToolCalls,
+  turnWorkingDirectories,
   renderMarkdown = renderChatMarkdown,
 } = {}) {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
-  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt,
-    attachments, cancelledToolCalls?.get(turn.id), renderMarkdown))
+  const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments,
+    cancelledToolCalls?.get(turn.id), turnWorkingDirectories?.[turn.id], renderMarkdown))
   const start = firstSeq ?? beforeSeq - events.length
   return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

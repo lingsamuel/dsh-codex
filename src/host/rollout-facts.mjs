@@ -42,6 +42,7 @@ export function createRolloutFacts(path, signal, threadId) {
   let followsOwner = false
   let permissionSequence = 0
   let publishedCancelledTools = false
+  let publishedTurnDirectories = false
   let previous = '{}'
   let queue = Promise.resolve()
 
@@ -63,13 +64,20 @@ export function createRolloutFacts(path, signal, threadId) {
     if (record.type === 'turn_context') {
       const permission = recordPermission(value)
       if (permission) currentTurn().permission = permission
+      const turn = currentTurn()
+      if (typeof value?.cwd === 'string' && isAbsolute(value.cwd)
+        && (!value.turn_id || !turn.id || value.turn_id === turn.id)) {
+        // 旧记录靠开始事件确定归属，新记录也可用自己的轮次 ID 核对。
+        if (value.turn_id) turn.id ??= value.turn_id
+        turn.cwd = value.cwd
+      }
       const mode = planModeOf(value)
       if (mode) currentTurn().planMode = mode
       return
     }
     if (record.type === 'event_msg') {
       if (value?.type === 'task_started' || value?.type === 'turn_started') {
-        turns.push({ id: value.turn_id })
+        if (!value.turn_id || turns.at(-1)?.id !== value.turn_id) turns.push({ id: value.turn_id })
         pendingPlans.clear()
         pendingToolCalls.clear()
       } else if (value?.type === 'thread_rolled_back' && Number.isSafeInteger(value.num_turns) && value.num_turns > 0) {
@@ -163,6 +171,8 @@ export function createRolloutFacts(path, signal, threadId) {
       const planMode = savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode
       const cancelledToolCalls = turns.flatMap(turn => turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])
       publishedCancelledTools ||= cancelledToolCalls.length > 0
+      const turnWorkingDirectories = Object.fromEntries(turns.filter(({ id, cwd }) => id && cwd).map(({ id, cwd }) => [id, cwd]))
+      publishedTurnDirectories ||= Object.keys(turnWorkingDirectories).length > 0
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
@@ -170,6 +180,7 @@ export function createRolloutFacts(path, signal, threadId) {
         ...(permission && { permission }),
         ...(planMode && { planMode }),
         ...(publishedCancelledTools && { cancelledToolCalls }),
+        ...(publishedTurnDirectories && { turnWorkingDirectories }),
       }
       const serialized = JSON.stringify(facts)
       if (serialized === previous) return null

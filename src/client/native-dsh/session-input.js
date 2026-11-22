@@ -13,7 +13,7 @@ function failure(error) {
 }
 
 /** DSH 决定发送模式和草稿恢复，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft) {
+export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree) {
   const { session, events, queueStore, updateState, activeTurnId } = history
   const submissions = new Map()
 
@@ -101,13 +101,14 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   return {
     acceptSubmittedSettings,
     beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
-      const requestId = crypto.randomUUID()
-      const { running, archived } = session.getSnapshot()
+      const { running, archived, blank } = session.getSnapshot()
+      const worktree = blank && !archived ? worktreeDraft?.getSnapshot() : undefined
+      const requestId = worktree?.id ?? crypto.randomUUID()
       const expectedTurnId = mode === 'steer' ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { onAccept, onRetire, expectedTurnId,
+      submissions.set(requestId, { onAccept, onRetire, expectedTurnId, worktree,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
       updateState(state => {
         state.pendingSubmissions.push({ requestId, placement, time: Date.now(), text, attachments })
@@ -134,9 +135,14 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           throw new Error('当前仅支持发送文本和图片。')
         })
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
-          expectedTurnId, modelDraft: selection, permissionDraft: profileId,
+          expectedTurnId, modelDraft: selection, permissionDraft: profileId, worktree: submission?.worktree,
           ...(unarchive && { unarchive: true }) }, signal)
-        acceptSubmittedSettings(selection, profileId, before, result)
+        if (submission?.worktree && result.thread) {
+          // 原生目标是新会话。先让 DSH 清除已送达的原草稿，再切换显示会话。
+          worktreeDraft.clear(submission.worktree)
+          retire(requestId, observedSubmission)
+          openWorktree(result)
+        } else acceptSubmittedSettings(selection, profileId, before, result)
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。

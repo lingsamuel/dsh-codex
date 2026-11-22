@@ -1,4 +1,5 @@
 import { toDiffHunks } from '../file-change.js'
+import { scopeTurnFile } from './file-links.js'
 
 function command(item) {
   const { command, cwd, aggregatedOutput, exitCode } = item
@@ -12,15 +13,16 @@ function command(item) {
   }
 }
 
-function fileChange(item) {
+function fileChange(item, cwd) {
   const output = item.changes.map(({ path, diff }) => `${path}\n${diff}`).join('\n\n')
-  const hunks = item.changes.map(toDiffHunks)
+  const changes = item.changes.map(change => ({ ...change, path: scopeTurnFile(change.path, cwd) }))
+  const hunks = changes.map(toDiffHunks)
   const [first] = hunks[0] ?? []
   const isError = item.status === 'failed' || item.status === 'declined'
   const meta = {
     codexStatus: item.status,
     // 回合总览和工具行共享同一批解析结果，同时保留无法解析的原生补丁。
-    codexFileChanges: item.changes.map(({ path, diff }, index) => ({
+    codexFileChanges: changes.map(({ path, diff }, index) => ({
       path, diffs: hunks[index] ?? [], raw: hunks[index] ? undefined : diff,
     })),
   }
@@ -34,7 +36,7 @@ function fileChange(item) {
       isError,
     }
   }
-  return { name: item.type, args: { paths: item.changes.map(change => change.path) }, output, meta, isError }
+  return { name: item.type, args: { paths: changes.map(change => change.path) }, output, meta, isError }
 }
 
 /** 原生问答事件本身已经记载问题和回答，使用 DSH 已安装的只读问答工具卡。 */
@@ -63,7 +65,7 @@ function agentWait(item) {
 }
 
 /** 将原生命令、文件变更和工具输出交给 DSH 已注册的工具行。 */
-export function projectTool(item) {
+export function projectTool(item, cwd) {
   if (item.type === 'collabAgentToolCall' && item.tool === 'wait') return agentWait(item)
   switch (item.type) {
     case 'cancelledToolCall':
@@ -71,7 +73,7 @@ export function projectTool(item) {
     case 'commandExecution':
       return command(item)
     case 'fileChange':
-      return fileChange(item)
+      return fileChange(item, cwd)
     case 'webSearch':
       return { name: 'web_search', args: { query: item.query }, output: item.query, isError: false }
     default: {

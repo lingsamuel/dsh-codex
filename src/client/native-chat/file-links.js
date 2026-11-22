@@ -42,9 +42,18 @@ function lineAnchor(start, end) {
   return `#L${start}${end && Number(end) >= Number(start) ? `-L${end}` : ''}`
 }
 
+/** 用原生轮次的绝对目录固定文件引用，避免切换会话目录后相对路径指向另一份文件。 */
+export function scopeTurnFile(path, cwd, markdown = false) {
+  if (!cwd || !path || /^(?:[\/\\#?]|[a-z][a-z\d+.-]*:)/i.test(path)) return path
+  const directory = cwd.replaceAll('\\', '/').replace(/\/$/, '')
+  const root = markdown ? directory.split('/').map(part => windowsDrive.test(`${part}/`) ? part
+    : encodeURIComponent(part).replace(/[()]/g, character => character === '(' ? '%28' : '%29')).join('/') : directory
+  return `${root}/${path}`
+}
+
 /** 只改 Markdown 解析器识别出的目标位置，让 DSH 自己渲染、打开文件和定位行号。 */
-export function projectFileLinks(markdown) {
-  if (!/(?:file:\/|sandbox:\/|:\d|#\d|#L\d+C)/i.test(markdown)) return markdown
+export function projectFileLinks(markdown, cwd) {
+  if (!cwd && !/(?:file:\/|sandbox:\/|:\d|#\d|#L\d+C)/i.test(markdown)) return markdown
   const events = postprocess(parse().document().write(preprocess()(markdown, undefined, true)))
   const pieces = []
   let offset = 0
@@ -53,7 +62,7 @@ export function projectFileLinks(markdown) {
     const start = token.start.offset
     const end = token.end.offset
     const original = markdown.slice(start, end)
-    const destination = fileDestination(original)
+    const destination = scopeTurnFile(fileDestination(original), cwd, true)
     if (original === destination) continue
     pieces.push(markdown.slice(offset, start), destination)
     offset = end
