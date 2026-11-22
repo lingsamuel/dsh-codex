@@ -17,6 +17,7 @@ function itemIsOlder(previous, item) {
 export function createLiveTranscript() {
   const byId = new Map()
 
+  /** 合并原生条目。投影失败时，可在下一次合并前回退本次修改。 */
   function reconcile(turn, updates = turn.items ?? []) {
     const record = byId.get(turn.id)
     const { items = [], ...previous } = record?.turn ?? {}
@@ -29,22 +30,37 @@ export function createLiveTranscript() {
 
     const ids = record?.ids ?? new Map()
     const changes = new Map()
-    let firstChanged = Infinity
-    for (const update of updates) {
-      const item = nativeItem(update)
-      const index = ids.get(item.id) ?? items.length
-      const current = items[index]
-      if (current && (itemIsOlder(current, item) || JSON.stringify(current) === JSON.stringify(item))) continue
-      if (!changes.has(index)) changes.set(index, current)
-      firstChanged = Math.min(firstChanged, index)
-      ids.set(item.id, index)
-      items[index] = item
+    const originalLength = items.length
+    function rollback() {
+      for (const [index, previous] of changes) {
+        if (index < originalLength) items[index] = previous
+        else ids.delete(items[index].id)
+      }
+      items.length = originalLength
+      if (record) byId.set(turn.id, record)
+      else byId.delete(turn.id)
     }
-    if (record && !changes.size && JSON.stringify(next) === JSON.stringify(previous)) return
 
-    const merged = { ...next, items }
-    byId.set(turn.id, { turn: merged, ids })
-    return { turn: merged, firstChanged, changes: [...changes].map(([index, previous]) => ({ item: items[index], previous })) }
+    let firstChanged = Infinity
+    try {
+      for (const update of updates) {
+        const item = nativeItem(update)
+        const index = ids.get(item.id) ?? items.length
+        const current = items[index]
+        if (current && (itemIsOlder(current, item) || JSON.stringify(current) === JSON.stringify(item))) continue
+        if (!changes.has(index)) changes.set(index, current)
+        firstChanged = Math.min(firstChanged, index)
+        ids.set(item.id, index)
+        items[index] = item
+      }
+      if (record && !changes.size && JSON.stringify(next) === JSON.stringify(previous)) return
+      const merged = { ...next, items }
+      byId.set(turn.id, { turn: merged, ids })
+      return { turn: merged, firstChanged, changes: [...changes].map(([index, previous]) => ({ item: items[index], previous })), rollback }
+    } catch (error) {
+      rollback()
+      throw error
+    }
   }
 
   return { reconcile, getTurn: id => byId.get(id)?.turn, forgetTurn: id => byId.delete(id) }

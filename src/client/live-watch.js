@@ -1,3 +1,5 @@
+import { EventSourceParserStream } from 'eventsource-parser/stream'
+
 const idleTimeoutMs = 45_000
 const retryDelayMs = 3_000
 
@@ -11,60 +13,76 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
   if (threadId && questions) url.searchParams.set('questions', '1')
   if (threadId && itemCursor) url.searchParams.set('itemCursor', itemCursor)
   if (!threadId && backgroundTerminals) url.searchParams.set('backgroundTerminals', '1')
-  let source
-  let idleTimer
+  let connection
+  let retryTimer
 
-  function connect() {
+  async function connect() {
     if (signal.aborted) return
-    const connection = new EventSource(url)
-    source = connection
+    const attempt = new AbortController()
+    connection = attempt
+    let idleTimer
 
-    function recordActivity() {
-      if (source !== connection) return
+    function waitForBytes() {
       clearTimeout(idleTimer)
-      // EventSource 只会在底层确认断开后重连。连续错过三次心跳时主动重新读取原生尾部。
-      idleTimer = setTimeout(() => {
-        connection.close()
-        changeMode?.('disconnected')
-        connect()
-      }, idleTimeoutMs)
+      idleTimer = setTimeout(() => attempt.abort(), idleTimeoutMs)
     }
 
-    connection.onopen = () => {
-      if (source !== connection) return
-      recordActivity()
-      return changeMode?.('connecting')
+    function stopWaiting() {
+      clearTimeout(idleTimer)
+      idleTimer = undefined
     }
-    connection.onerror = () => {
-      if (source !== connection) return
-      // HTTP 错误可能直接关闭 EventSource。只有仍在 CONNECTING 的连接会由浏览器重试。
-      if (connection.readyState === EventSource.CLOSED) {
-        clearTimeout(idleTimer)
-        idleTimer = setTimeout(connect, retryDelayMs)
+
+    try {
+      waitForBytes()
+      const response = await fetch(url, { cache: 'no-store', signal: attempt.signal })
+      stopWaiting()
+      const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
+      if (!response.ok || !response.body || contentType !== 'text/event-stream') throw new Error('无法打开 Codex 实时同步。')
+      attempt.signal.throwIfAborted()
+      if (await changeMode?.('connecting', attempt.signal) === false) throw new Error('无法初始化 Codex 实时投影。')
+      attempt.signal.throwIfAborted()
+      const bytes = response.body.pipeThrough(new TransformStream({
+        transform(chunk, stream) {
+          // 大帧可能跨多个网络块。只在等待网络时按收到的字节续期，投影耗时不计入空闲。
+          if (idleTimer !== undefined) waitForBytes()
+          stream.enqueue(chunk)
+        },
+      }))
+      const frames = bytes.pipeThrough(new TextDecoderStream()).pipeThrough(new EventSourceParserStream())
+      waitForBytes()
+      for await (const { event, data, id } of frames) {
+        stopWaiting()
+        attempt.signal.throwIfAborted()
+        if (event === 'history-checkpoint') {
+          // 只有先前帧成功投影并保存检查点后，后续连接才可以从这里续读。
+          const cursor = id ?? ''
+          if (await checkpoint?.(cursor, attempt.signal) === false) break
+          attempt.signal.throwIfAborted()
+          if (cursor) url.searchParams.set('itemCursor', cursor)
+          else url.searchParams.delete('itemCursor')
+        } else if (event === undefined || event === 'message') {
+          if (await receive(JSON.parse(data), attempt.signal) === false) break
+        }
+        attempt.signal.throwIfAborted()
+        waitForBytes()
       }
-      return changeMode?.('disconnected')
+    } catch {
+      // 网络和投影失败都从最后成功应用的检查点恢复。
+    } finally {
+      stopWaiting()
+      attempt.abort()
+      connection = undefined
     }
-    connection.onmessage = event => {
-      if (source !== connection) return
-      recordActivity()
-      return receive(JSON.parse(event.data))
-    }
-    connection.addEventListener('history-checkpoint', event => {
-      if (source !== connection) return
-      // 浏览器自动重连会附带 Last-Event-ID。主动重建也要沿用同一个游标。
-      if (event.lastEventId) url.searchParams.set('itemCursor', event.lastEventId)
-      else url.searchParams.delete('itemCursor')
-      recordActivity()
-      checkpoint?.(event.lastEventId)
-    })
-    connection.addEventListener('heartbeat', recordActivity)
-    recordActivity()
+
+    if (signal.aborted) return
+    retryTimer = setTimeout(connect, retryDelayMs)
+    // 首次断开可补读 HTTP 历史。让补读跟随观察器，避免上一次连接终止时取消补读。
+    await changeMode?.('disconnected', signal)
   }
 
-  connect()
   signal.addEventListener('abort', () => {
-    clearTimeout(idleTimer)
-    source?.close()
-    source = undefined
+    clearTimeout(retryTimer)
+    connection?.abort()
   }, { once: true })
+  void connect()
 }

@@ -95,6 +95,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const rows = []
   const rowsById = new Map()
   const liveTurns = new Map()
+  const pendingRolloutTurns = new Set()
   let windowEntries = []
   let appendedEntries = []
   let rebuildWindow = false
@@ -221,10 +222,20 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       objective: goal.objective, phase: blocked ? 'blocked' : goal.status } } : null)
   }
 
-  async function collectAttachments(turns) {
-    const loaded = await readInlineCodexAttachments(turns, signal)
-    signal.throwIfAborted()
-    for (const [id, entry] of loaded) attachments.set(id, entry)
+  function cacheAttachments(images, replace = false) {
+    const previous = new Map()
+    for (const [id, entry] of images) {
+      const cached = attachments.get(id)
+      if (cached && !replace) continue
+      previous.set(id, cached)
+      attachments.set(id, entry)
+    }
+    return () => {
+      for (const [id, cached] of previous) {
+        if (cached) attachments.set(id, cached)
+        else attachments.delete(id)
+      }
+    }
   }
 
   function projectionOptions(bounds) {
@@ -235,11 +246,20 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   function addOlderPage(page, images) {
     const turns = mergePages([], page.data.toReversed())
       .filter(turn => !transcript.getTurn(turn.id))
-      .map(turn => transcript.reconcile(turn).turn)
-    for (const [id, entry] of images) {
-      if (!attachments.has(id)) attachments.set(id, entry)
+    const rollbackAttachments = cacheAttachments(images)
+    let pageEntries
+    try {
+      const merged = turns.map(turn => transcript.reconcile(turn).turn)
+      pageEntries = projectCodexTurns(merged, projectionOptions(pageBounds(rows[0]?.entries[0])))
+    } catch (error) {
+      // 页未发布时撤回本次新合并的轮次，重连仍能从原生记录重建。
+      for (const { id } of turns) {
+        transcript.forgetTurn(id)
+        liveTurns.delete(id)
+      }
+      rollbackAttachments()
+      throw error
     }
-    const pageEntries = projectCodexTurns(turns, projectionOptions(pageBounds(rows[0]?.entries[0])))
     const older = []
     for (const entry of pageEntries) {
       if (entry.event.type === 'turn/start') {
@@ -257,13 +277,26 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   async function updateTurn(turn, updates = turn.items ?? []) {
     const merged = transcript.reconcile(turn, updates)
     if (!merged) return
-    const { turn: next, firstChanged, changes } = merged
-    const items = changes.flatMap(({ item }) => item.type === 'userMessage' ? [item] : [])
-    if (items.length) await collectAttachments([{ items }])
+    const { turn: next, firstChanged, changes, rollback } = merged
+    let rollbackAttachments
+    try {
+      const items = changes.flatMap(({ item }) => item.type === 'userMessage' ? [item] : [])
+      if (items.length) {
+        const images = await readInlineCodexAttachments([{ items }], signal)
+        signal.throwIfAborted()
+        rollbackAttachments = cacheAttachments(images, true)
+      }
+      renderTurn(next, firstChanged)
+    } catch (error) {
+      // 投影可能已推进轮次内的事件位置。撤回原生合并，让重放重新生成该轮事件。
+      liveTurns.delete(next.id)
+      rollbackAttachments?.()
+      rollback()
+      throw error
+    }
     if (asyncQuestionInputs?.turnId === next.id && changes.some(({ item, previous }) => questionItem(item) || questionItem(previous))) {
       asyncQuestionInputs = undefined
     }
-    renderTurn(next, firstChanged)
   }
 
   function renderTurn(next, firstChanged) {
@@ -315,56 +348,48 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }
   }
 
-  function publishCancelledToolCalls(calls) {
+  function updateCancelledToolCalls(calls) {
     if (!calls) return
-    const previous = cancelledToolCalls
-    cancelledToolCalls = Map.groupBy(calls, call => call.turnId)
-    let changed = false
-    for (const id of new Set([...previous.keys(), ...cancelledToolCalls.keys()])) {
-      const known = previous.get(id)
-      if (JSON.stringify(known) === JSON.stringify(cancelledToolCalls.get(id))) {
-        cancelledToolCalls.set(id, known)
-        continue
-      }
-      const turn = transcript.getTurn(id)
-      if (!turn) continue
-      renderTurn(turn)
-      changed = true
+    const next = Map.groupBy(calls, call => call.turnId)
+    for (const id of new Set([...cancelledToolCalls.keys(), ...next.keys()])) {
+      const known = cancelledToolCalls.get(id)
+      if (JSON.stringify(known) === JSON.stringify(next.get(id))) next.set(id, known)
+      else if (rowsById.has(id)) pendingRolloutTurns.add(id)
     }
-    if (changed) publish()
+    cancelledToolCalls = next
   }
 
-  function publishTurnDirectories(directories) {
+  function updateTurnDirectories(directories) {
     const updates = directories ? Object.entries(directories) : Object.keys(turnWorkingDirectories).map(id => [id, null])
-    let changed = false
     for (const [id, cwd] of updates) {
       if (turnWorkingDirectories[id] === (cwd ?? undefined)) continue
       if (cwd === null) delete turnWorkingDirectories[id]
       else turnWorkingDirectories[id] = cwd
-      const turn = transcript.getTurn(id)
-      if (!turn) continue
-      renderTurn(turn)
-      changed = true
+      if (rowsById.has(id)) pendingRolloutTurns.add(id)
     }
-    if (changed) publish()
   }
 
-  function publishGoalHistory(inputs = goalInputs, savedCompletions = savedGoalCompletions) {
-    const before = goalInputs
-    const previousCompletions = goalCompletions
+  function updateGoalHistory(inputs = goalInputs, savedCompletions = savedGoalCompletions) {
+    const completions = { ...Object.fromEntries(announcedGoalCompletions), ...savedCompletions }
+    for (const id of new Set([...Object.keys(goalInputs), ...Object.keys(inputs), ...Object.keys(goalCompletions), ...Object.keys(completions)])) {
+      if (JSON.stringify(goalInputs[id]) === JSON.stringify(inputs[id])
+        && goalCompletions[id]?.timeUsedSeconds === completions[id]?.timeUsedSeconds) continue
+      if (rowsById.has(id)) pendingRolloutTurns.add(id)
+    }
     goalInputs = inputs
     savedGoalCompletions = savedCompletions
-    goalCompletions = { ...Object.fromEntries(announcedGoalCompletions), ...savedCompletions }
-    let changed = false
-    for (const id of new Set([...Object.keys(before), ...Object.keys(inputs), ...Object.keys(previousCompletions), ...Object.keys(goalCompletions)])) {
-      if (JSON.stringify(before[id]) === JSON.stringify(inputs[id])
-        && previousCompletions[id]?.timeUsedSeconds === goalCompletions[id]?.timeUsedSeconds) continue
+    goalCompletions = completions
+  }
+
+  function publishRolloutTurns() {
+    if (!pendingRolloutTurns.size) return
+    // 补充事实可先于事件更新。投影失败时保留受影响轮次，重连仍会重新投影。
+    for (const id of pendingRolloutTurns) {
       const turn = transcript.getTurn(id)
-      if (!turn) continue
-      renderTurn(turn)
-      changed = true
+      if (turn) renderTurn(turn)
     }
-    if (changed) publish()
+    publish()
+    pendingRolloutTurns.clear()
   }
 
   function publishGoalCompletion(goal, turnId) {
@@ -381,7 +406,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }
     if (turnId == null || announcedGoalCompletions.get(turnId)?.timeUsedSeconds === completion.timeUsedSeconds) return
     announcedGoalCompletions.set(turnId, completion)
-    publishGoalHistory()
+    updateGoalHistory()
+    publishRolloutTurns()
   }
 
   async function loadPage(cursor, lifetime = signal) {
@@ -399,6 +425,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     transcript.forgetTurn(id)
     rowsById.delete(id)
     liveTurns.delete(id)
+    pendingRolloutTurns.delete(id)
     if (asyncQuestionInputs?.turnId === id) asyncQuestionInputs = undefined
     rebuildWindow = true
   }
@@ -481,8 +508,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function enqueue(operation, lifetime = signal) {
-    queue = queue.then(() => { if (!lifetime.aborted) return operation() }).catch(error => {
+    queue = queue.then(() => {
+      if (lifetime.aborted) return false
+      return operation()
+    }).catch(error => {
       if (!lifetime.aborted) fail(error)
+      // 传输收到失败后从已确认游标续读，后续会话操作仍可在这个队列执行。
+      return false
     })
     return queue
   }
@@ -564,9 +596,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (frame.type === 'rollout-facts') {
         if ('todos' in frame) todos.set(frame.todos ?? undefined)
         if ('contextPressure' in frame) contextPressure.set(frame.contextPressure ?? undefined)
-        publishCancelledToolCalls(frame.cancelledToolCalls)
-        if (frame.turnWorkingDirectories) publishTurnDirectories(frame.turnWorkingDirectories)
-        if (frame.goalInputs || frame.goalCompletions) publishGoalHistory(frame.goalInputs, frame.goalCompletions)
+        updateCancelledToolCalls(frame.cancelledToolCalls)
+        if (frame.turnWorkingDirectories) updateTurnDirectories(frame.turnWorkingDirectories)
+        if (frame.goalInputs || frame.goalCompletions) updateGoalHistory(frame.goalInputs, frame.goalCompletions)
+        publishRolloutTurns()
         if ('turnPermission' in frame) {
           recordedTurnPermission = frame.turnPermission ?? undefined
           publishState()
@@ -597,7 +630,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         if (frame.onlyIfLoaded && !transcript.getTurn(frame.turn.id)) return
         await updateTurn(frame.turn, frame.items)
         publish()
-        publishState()
+        if (!lifetime.aborted) publishState()
       } else if (frame.type === 'notification') {
         const { method, params } = frame.notification
         if (method === 'thread/started' && params.thread?.id === thread.id) {
@@ -626,9 +659,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     return enqueue(async () => {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
-        publishCancelledToolCalls([])
-        publishTurnDirectories()
-        publishGoalHistory({}, {})
+        updateCancelledToolCalls([])
+        updateTurnDirectories()
+        updateGoalHistory({}, {})
+        publishRolloutTurns()
         recordedTurnPermission = undefined
         lastSavedPlanMode = undefined
         planRevisionAtConnect = state.getSnapshot().planRevision
@@ -829,13 +863,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       return
     }
     if (!selected) publishQuestions()
-    // 队列可能还在等上一帧的异步读取。让已排队的帧携带自己的连接寿命，防止切回时显示旧审批。
     const lifetime = AbortSignal.any([signal, nextWatch.signal])
     openLiveWatch(thread.id, {
-      receive: frame => receive(frame, lifetime), changeMode: mode => changeMode(mode, lifetime),
-      queue: true, questions: selected, itemCursor,
-      // 暂停后只从已完成投影的条目继续，仍在排队的旧帧会随旧连接取消。
-      checkpoint: cursor => enqueue(() => { itemCursor = cursor }, lifetime),
+      receive, changeMode, queue: true, questions: selected, itemCursor,
+      // 队列可能在等其他操作。只有当前连接的检查点可以推进会话游标。
+      checkpoint: (cursor, connection) => enqueue(() => { itemCursor = cursor }, connection),
     }, lifetime)
   }
   if (visibleCatalog || retention) {

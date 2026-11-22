@@ -17,9 +17,14 @@ const storeModule = `data:text/javascript,${encodeURIComponent(`
       update(edit) { const next = structuredClone(value); edit(next); set(next) } }
   }
 `)}`
+const liveWatchModule = `data:text/javascript,${encodeURIComponent(`
+  export let openLiveWatch
+  export function mockOpenLiveWatch(watch) { openLiveWatch = watch }
+`)}`
 const hook = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
+    if (specifier === './live-watch.js' || specifier === '../live-watch.js') return { shortCircuit: true, url: liveWatchModule }
     const source = {
       '@deepseek-ai/dsh-client-ui-primitives': 'export const Button = null, InlineEditor = null, Modal = null, Toast = null',
       react: `export const createElement = (type, props, ...children) => ({ type, props, children });
@@ -47,19 +52,27 @@ const { SubagentReadOnlyComposer } = await import('@deepseek-ai/dsh-client-ui-su
 const { zh: subagentCopy } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/locales.ts')
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
+const { mockOpenLiveWatch } = await import(liveWatchModule)
 
 function mockTransport(t, sources = []) {
-  const original = { window: globalThis.window, document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
+  const original = { window: globalThis.window, document: globalThis.document, fetch: globalThis.fetch }
   globalThis.window = new EventTarget()
   globalThis.document = { baseURI: 'http://127.0.0.1:3190/' }
-  globalThis.EventSource = class extends EventTarget {
-    static CLOSED = 2
-    readyState = 0
-    constructor(url) { super(); this.url = url; sources.push(this) }
-    close() { this.closed = true }
-  }
+  mockOpenLiveWatch((threadId, options, lifetime) => {
+    sources.push({
+      threadId, options,
+      get closed() { return lifetime.aborted || undefined },
+      onmessage: ({ data }) => options.receive(JSON.parse(data), lifetime),
+      onopen: () => options.changeMode?.('connecting', lifetime),
+      onerror: () => options.changeMode?.('disconnected', lifetime),
+      checkpoint: cursor => options.checkpoint?.(cursor, lifetime),
+    })
+  })
   t.mock.timers.enable({ apis: ['setTimeout'] })
-  t.after(() => Object.assign(globalThis, original))
+  t.after(() => {
+    mockOpenLiveWatch(undefined)
+    Object.assign(globalThis, original)
+  })
   return () => sources.at(-1)
 }
 
@@ -184,7 +197,7 @@ test('最近会话和草稿只保留缓存，视图重开时续读原生历史',
   const first = sessions.retain('first', main)
   await Promise.resolve()
   await emit(nativeTurn)
-  currentSource().dispatchEvent(new MessageEvent('history-checkpoint', { lastEventId: 'seen-items' }))
+  await currentSource().checkpoint('seen-items')
   const binding = await first.ready
   const cached = binding.eventSource.getSnapshot()
   const recent = sessions.retain('first', { source: 'recentViews' })
@@ -192,7 +205,7 @@ test('最近会话和草稿只保留缓存，视图重开时续读原生历史',
   const second = sessions.retain('second', main)
   first.release()
   await Promise.resolve()
-  const openThreads = () => sources.filter(source => !source.closed).map(source => source.url.searchParams.get('threadId'))
+  const openThreads = () => sources.filter(source => !source.closed).map(source => source.threadId)
   assert.deepEqual(openThreads(), ['second'])
   assert.strictEqual(recent.binding.eventSource.getSnapshot(), cached)
 
@@ -202,15 +215,15 @@ test('最近会话和草稿只保留缓存，视图重开时续读原生历史',
 
   const side = sessions.retain('first', { source: 'sidebarChat', facets: { conversation: true } })
   assert.deepEqual(openThreads(), ['second', 'first'])
-  assert.equal(currentSource().url.searchParams.has('questions'), false)
+  assert.equal(currentSource().options.questions, false)
   side.release()
   assert.deepEqual(openThreads(), ['second'])
 
   const reopened = sessions.retain('first', main)
   second.release()
   assert.deepEqual(openThreads(), ['first'])
-  assert.equal(currentSource().url.searchParams.get('questions'), '1')
-  assert.equal(currentSource().url.searchParams.get('itemCursor'), 'seen-items')
+  assert.equal(currentSource().options.questions, true)
+  assert.equal(currentSource().options.itemCursor, 'seen-items')
   assert.strictEqual(reopened.binding, binding)
   await emit(turn('while-away', 'completed', [{ ...ask, id: 'new-ask' }]), nativeTurn)
   assert.ok(binding.eventSource.getSnapshot().entries.some(({ event }) => event.data.codexTurnId === 'while-away'))
@@ -692,6 +705,33 @@ test('目录增量保留其他轮次的文件引用，删除与重连清除旧�
   assert.equal(reply('first'), text)
 })
 
+test('初始化清理补录时投影失败，下次连接仍移除失效事件', async t => {
+  const source = mockTransport(t)
+  const { events } = createCodexHistory({ effect: activate => t.after(activate()) }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const round = turn('current', 'inProgress', [ask])
+  const call = { turnId: round.id, id: 'cancelled', name: 'exec', input: 'pwd', output: 'aborted by user', completedAtMs: 100_020 }
+  await emit({ type: 'snapshot', page: { data: [round] }, mode: 'live' })
+  await emit({ type: 'rollout-facts', cancelledToolCalls: [call] })
+  const hasCancelled = () => events.getSnapshot().entries.some(({ event }) => event.type === 'tool/result'
+    && event.data.message.content[0].text === call.output)
+  assert.equal(hasCancelled(), true)
+
+  const stringify = JSON.stringify
+  let failOnce = true
+  t.mock.method(JSON, 'stringify', (value, ...options) => {
+    if (failOnce && value?.event?.type === 'turn/start') {
+      failOnce = false
+      throw new Error('轮次投影失败')
+    }
+    return stringify(value, ...options)
+  })
+  assert.equal(await source().onopen(), false)
+  assert.equal(hasCancelled(), true)
+  await source().onopen()
+  assert.equal(hasCancelled(), false)
+})
+
 test('实时问题使用原生请求身份，原生确认完成后清理当前投影', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
@@ -700,7 +740,7 @@ test('实时问题使用原生请求身份，原生确认完成后清理当前�
   const request = { requestId: 41, itemId: 'item-native', isBlocking: true,
     questions: [{ id: 'native-question', question: '选哪个？', options: [{ label: '第一个' }] }],
   }
-  assert.equal(source().url.searchParams.get('questions'), '1')
+  assert.equal(source().options.questions, true)
   await emit([request])
   assert.deepEqual(pending.getSnapshot(), [request])
   await emit([])
@@ -738,7 +778,7 @@ test('快速切走再返回会话时，已排入队列的旧审批不会出现�
   const approvals = history.session.projections.faceOf('codexApprovals')
   const first = source()
   const emit = (from, key) => from.onmessage({ data: JSON.stringify({ type: 'approvals', requests: [{ key }] }) })
-  assert.equal(first.url.searchParams.get('questions'), '1')
+  assert.equal(first.options.questions, true)
   await emit(first, 'shown')
   assert.deepEqual(approvals.getSnapshot(), [{ key: 'shown' }])
 
@@ -746,7 +786,7 @@ test('快速切走再返回会话时，已排入队列的旧审批不会出现�
   catalog.store.set({ selected: { id: 'different' } })
   const passive = source()
   assert.equal(first.closed, true)
-  assert.equal(passive.url.searchParams.has('questions'), false)
+  assert.equal(passive.options.questions, false)
   catalog.store.set({ selected: thread })
   assert.equal(passive.closed, true)
   await stale
@@ -821,7 +861,7 @@ test('stock window appends native tail changes, prepends older history, and keep
   })
   const source = currentSource()
   const emit = frame => source.onmessage({ data: JSON.stringify(frame) })
-  assert.equal(source.url.searchParams.get('threadId'), 'thread')
+  assert.equal(source.threadId, 'thread')
 
   const active = { type: 'active', activeFlags: [] }
   const readState = { firstUnread: null, revision: 'one' }
@@ -1174,7 +1214,7 @@ test('从活动打开的未展开子会话仍跟随原生目录更新与删除',
   await assert.rejects(catalog.resolveSubagent(child.id, lifetime.signal), /会话已删除/)
 })
 
-test('实时流关闭后主动重连，补读历史期间持续提示，收到快照后恢复', async t => {
+test('实时流重连与补读历史期间持续提示，收到快照后恢复', async t => {
   const currentSource = mockTransport(t)
   let historyRequests = 0
   const first = turn('first', 'completed', [ask])
@@ -1185,7 +1225,6 @@ test('实时流关闭后主动重连，补读历史期间持续提示，收到�
   }
   const history = createCodexHistory({ effect: activate => t.after(activate()) }, { id: 'thread' })
   const source = currentSource()
-  source.readyState = EventSource.CLOSED
   await source.onerror()
   await source.onerror()
   await history.ready
@@ -1194,14 +1233,50 @@ test('实时流关闭后主动重连，补读历史期间持续提示，收到�
   assert.equal(history.session.getSnapshot().live.reconnecting, true)
   assert.ok(history.events.getSnapshot().entries.some(entry => entry.event.type === 'user/message'))
 
-  t.mock.timers.tick(3000)
-  const retry = currentSource()
-  assert.notEqual(retry, source)
-  await retry.onopen()
+  await source.onopen()
   assert.equal(history.session.getSnapshot().live.reconnecting, true)
-  await retry.onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live', page: { data: [first] } }) })
+  await source.onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live', page: { data: [first] } }) })
   assert.equal(history.session.getSnapshot().live.reconnecting, false)
 })
+
+test('历史投影失败时通知传输，随后仍能恢复会话', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect: activate => t.after(activate()) }, { id: 'thread' })
+  const snapshot = page => source().onmessage({ data: JSON.stringify({ type: 'snapshot', page, mode: 'live' }) })
+
+  assert.equal(await snapshot(null), false)
+  assert.equal(history.session.getSnapshot().openState, 'error')
+  await snapshot({ data: [turn('first', 'completed', [ask])] })
+  assert.equal(history.session.getSnapshot().openState, 'open')
+  assert.ok(history.events.getSnapshot().entries.some(({ event }) => event.type === 'user/message'))
+})
+
+for (const type of ['snapshot', 'change']) {
+  test(`${type} 合并后投影失败，重放相同记录仍能生成事件`, async t => {
+    const source = mockTransport(t)
+    const history = createCodexHistory({ effect: activate => t.after(activate()) }, { id: 'thread' })
+    const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+    const command = { id: 'cmd', type: 'commandExecution', command: 'echo ready', status: 'completed' }
+    const round = turn('first', 'inProgress', [ask])
+    const snapshot = items => ({ type: 'snapshot', mode: 'live', page: { data: [{ ...round, items }] } })
+    if (type === 'change') await emit(snapshot([ask]))
+    const frame = type === 'snapshot' ? snapshot([ask, command]) : { type, turn: { id: round.id }, items: [command] }
+
+    const stringify = JSON.stringify
+    let failOnce = true
+    t.mock.method(JSON, 'stringify', (value, ...options) => {
+      if (failOnce && value?.description === command.command) {
+        failOnce = false
+        throw new Error('工具投影失败')
+      }
+      return stringify(value, ...options)
+    })
+    assert.equal(await emit(frame), false)
+    assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.data.callId === command.id), false)
+    await emit(frame)
+    assert.ok(history.events.getSnapshot().entries.some(({ event }) => event.data.callId === command.id))
+  })
+}
 
 test('搜索定位只向前加载未读过的页，保留较新的聊天窗口', async t => {
   const currentSource = mockTransport(t)
