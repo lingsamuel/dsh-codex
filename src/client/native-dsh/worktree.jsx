@@ -55,7 +55,7 @@ function SwitchDirectory({ thread, path, shownPath, name, idleBlock, publishThre
       <Button variant="primary" disabled={switching || Boolean(idleBlock)} onClick={confirm}>{t('select')}</Button>
     </>}>
     {name && <div>{name}</div>}
-    <div title={path} style={{ overflowWrap: 'anywhere' }}>{shownPath}</div>
+    <div title={shownPath} style={{ overflowWrap: 'anywhere' }}>{shownPath}</div>
     {idleBlock && <p role="status">{t(idleBlock)}</p>}
     {error && <p role="alert">{error}</p>}
   </Modal>
@@ -72,7 +72,7 @@ function checkoutName(checkout, t) {
   return checkout?.branchLabel ?? (checkout?.head && t('detached', { commit: checkout.head.slice(0, 7) }))
 }
 
-function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDraft, publishThread, disabled, t }) {
+function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDraft, publishThread, openWorktree, disabled, t }) {
   const [open, setOpen] = useState(false)
   const [choices, setChoices] = useState(undefined)
   const [error, setError] = useState('')
@@ -90,7 +90,7 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
     return () => controller.abort()
   }, [open, thread.cwd])
 
-  const formatPath = path => abbreviateHomePath(relativizeToCwd(path, project ?? choices?.local?.path ?? thread.cwd), home)
+  const formatPath = path => abbreviateHomePath(relativizeToCwd(path, project ?? thread.cwd), home)
   const checkouts = choices ? [choices.local, ...choices.worktrees].filter(Boolean) : []
   const current = checkoutName(checkouts.find(tree => tree.path === thread.cwd), t)
   const localLabel = name => name ? `${t('local')} · ${name}` : t('local')
@@ -154,17 +154,17 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
     }
   }
 
-  const label = t(draft ? choice?.kind ?? 'local' : 'switch')
+  const label = t(draft ? choice?.kind ?? 'local' : 'title')
   const choiceName = draft && checkoutName(checkouts.find(tree => tree.path === choice?.path) ?? choice, t)
   const triggerLabel = choiceName ? `${label} · ${choiceName}` : label
+  const tooltip = draft && choice?.kind === 'new' ? choiceName : formatPath((draft && choice?.path) || thread.cwd)
   const target = destination && checkouts.find(tree => tree.path === destination)
   return <>
-    <Menu open={open} portal autoFocus dense maxVisibleRows={8} side={draft ? 'top' : 'bottom'} align={draft ? 'start' : 'end'}
+    <Menu open={open} portal autoFocus dense maxVisibleRows={8} side="top"
       items={entries} selectedId={draft ? choice?.kind ?? 'local' : thread.cwd} submenuBackLabel={t('back')}
       onClose={() => setOpen(false)} onSelect={select}
       anchor={<Button ref={trigger} size="sm" variant="ghost" aria-haspopup="menu" aria-expanded={open}
-        style={draft ? composerTriggerStyle : undefined}
-        title={draft ? choice?.path ?? choice?.baseRef ?? thread.cwd : thread.cwd} disabled={disabled} onClick={() => {
+        style={composerTriggerStyle} title={tooltip} disabled={disabled} onClick={() => {
           if (!open) {
             setChoices(undefined)
             setError('')
@@ -173,49 +173,46 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
         }}>
         <span style={triggerLabelStyle}>{triggerLabel}</span><IconChevronDownOutlineRegular size={12} aria-hidden="true" />
       </Button>} />
+    {draft && choice?.recovery && <Button size="sm" variant="ghost" style={composerTriggerStyle} disabled={disabled}
+      title={formatPath(choice.recovery.thread.cwd)} onClick={() => openWorktree(choice.recovery, false)}>{t('recover')}</Button>}
     {destination && <SwitchDirectory {...{ thread, idleBlock, publishThread, t }}
       path={destination} shownPath={formatPath(destination)} name={checkoutName(target, t)}
       close={() => setDestination(null)} />}
   </>
 }
 
-function WorktreeButton({ draft, sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory, useWorkspaces, useHost,
+function WorktreeButton({ sessionId, useSession, useProjection, useWorktreeDraft, useCodexHistory, useWorkspaces, useHost,
   useBackgroundTerminals, setDraft, publishThread, openWorktree, t }) {
   const choice = useWorktreeDraft(value => value)
   const thread = useCodexHistory(snapshot => snapshot.threads.find(value => value.id === sessionId))
-  const project = useWorkspaces(snapshot => snapshot.items.find(item =>
-    item.workspaceId.startsWith('project:') && item.sessionIds.includes(sessionId))?.path)
+  const project = useWorkspaces(snapshot => snapshot.items.find(item => item.sessionIds.includes(sessionId))?.path)
   const home = useHost(facts => facts?.home)
-  const blank = useSession(state => state.blank)
+  const draft = useSession(state => Boolean(state.blank))
   const canChange = useSession(state => state.openState === 'open' && !state.archived && !state.subagent && state.canAcceptDirectInput !== false)
   const active = useSession(state => state.live?.status?.type === 'active' || Boolean(state.pendingSubmissions?.length))
   const queued = useProjection('inbox', inbox => Boolean(inbox?.['next-turn']?.length))
   const background = useBackgroundTerminals(value => Boolean(value.get(sessionId)?.length))
-  if (!thread?.cwd || !canChange || Boolean(blank) !== draft) return null
+  if (!thread?.cwd || !canChange) return null
   const idleBlock = active ? 'active' : queued ? 'queue' : background ? 'background' : undefined
-  return <>
-    <WorktreePicker key={thread.cwd} {...{ thread, draft, choice, project, home, setDraft, publishThread, t }}
-      idleBlock={draft ? undefined : idleBlock} disabled={draft && active} />
-    {draft && choice?.recovery && <Button size="sm" variant="ghost" style={composerTriggerStyle} disabled={active}
-      title={choice.recovery.thread.cwd} onClick={() => openWorktree(choice.recovery, false)}>{t('recover')}</Button>}
-  </>
+  return <WorktreePicker key={JSON.stringify([sessionId, thread.cwd, draft])}
+    {...{ thread, draft, choice, project, home, setDraft, publishThread, openWorktree, t }}
+    idleBlock={draft ? undefined : idleBlock} disabled={draft && active} />
 }
 
-/** 新会话在输入栏保存工作树选择，已有会话从标题栏切换确认后的工作目录。 */
+/** 输入栏为新会话保存启动目录，为已有会话发起目录切换确认。 */
 export function installWorktrees(ctx, catalog) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.inject(['sessions', 'remote'], scope => {
     const host = { getSnapshot: () => scope.remote.$host, subscribe: listener => scope.on('connection/reset', listener) }
-    for (const [name, draft] of [['conversation.input.left', true], ['conversation.session.header.utilities', false]]) {
-      ctx.slots.inject(name, () => ctx.slots.register({
-        name, id: 'codex-worktrees', order: 30, locale,
-        inject: sessionId => {
-          const { worktreeDraft, openWorktree } = scope.sessions.binding(sessionId).session
-          return { draft, openWorktree, setDraft: worktreeDraft.set, hooks: { worktreeDraft, host, backgroundTerminals: catalog.backgroundTerminals },
-            publishThread: ({ thread, workspacePaths }) => catalog.acceptThread(thread, workspacePaths),
-          }
-        },
-      }, WorktreeButton))
-    }
+    const name = 'conversation.input.left'
+    ctx.slots.inject(name, () => ctx.slots.register({
+      name, id: 'codex-worktrees', order: 30, locale,
+      inject: sessionId => {
+        const { worktreeDraft, openWorktree } = scope.sessions.binding(sessionId).session
+        return { openWorktree, setDraft: worktreeDraft.set, hooks: { worktreeDraft, host, backgroundTerminals: catalog.backgroundTerminals },
+          publishThread: ({ thread, workspacePaths }) => catalog.acceptThread(thread, workspacePaths),
+        }
+      },
+    }, WorktreeButton))
   })
 }
