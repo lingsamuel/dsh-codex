@@ -789,35 +789,100 @@ test('长轮次逐条接收工具结果时只转换新增条目', async t => {
   })
 
   const measurements = []
-  for (const count of [100, 200, 400]) {
+  const cases = [100, 200, 400].map(count => ({ count, withCancellation: false }))
+  cases.push({ count: 400, withCancellation: true }, { count: 400, withCancellation: true, trailing: true })
+  for (const { count, withCancellation, trailing = false } of cases) {
     const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
     const emit = frame => source().onmessage({ data: stringify(frame) })
     const head = turn('head', 'inProgress', [ask])
     const older = turn('older', 'completed', [{ ...answer, id: 'earlier-answer' }])
     await emit({ type: 'snapshot', page: { data: [head, older], nextCursor: null }, mode: 'live' })
+    const facts = { type: 'rollout-facts', cancelledToolCalls: [{ turnId: head.id, id: 'cancelled', name: 'exec',
+      input: 'pwd', output: 'aborted by user', completedAtMs: 100_020 }] }
+    if (withCancellation) await emit(facts)
     const initial = events.getSnapshot()
     projected = 0
     compared = 0
     for (let index = 0; index < count; index++) {
+      if (withCancellation && index === 10) await emit(facts)
       await emit({ type: 'change', turn: { id: head.id }, items: [{
         type: 'dynamicToolCall', id: `tool-${index}`, status: 'completed', tool: 'test-tool',
         arguments: { auditToolOrdinal: index }, output: `output-${index}`,
+        ...(withCancellation && !trailing && { completedAtMs: 100_030 + index }),
       }] })
     }
     const current = events.getSnapshot()
-    assert.equal(current.change.kind, 'append')
-    assert.deepEqual(current.change.entries.map(entry => entry.event.type), ['tool/call', 'tool/result'])
-    assert.equal(initial.entries.at(-1).event.type, 'user/message')
+    assert.equal(current.change.kind, trailing ? 'replace' : 'append')
+    assert.equal(initial.entries.at(-1).event.type, withCancellation ? 'tool/result' : 'user/message')
+    if (trailing) {
+      assert.equal(current.entries.at(-1).event.data.message.id, 'codex:cancelled:cancelled')
+    } else {
+      assert.deepEqual(current.change.entries.map(entry => entry.event.type), ['tool/call', 'tool/result'])
+      assert.strictEqual(current.entries[initial.entries.length - 1], initial.entries.at(-1))
+    }
     assert.equal(current.entries.length, initial.entries.length + count * 2)
     assert.strictEqual(current.entries[0], initial.entries[0])
-    assert.equal(current.entries.at(-1).event.data.message.content[0].text, `output-${count - 1}`)
-    measurements.push({ count, projected, compared })
+    assert.equal(current.entries.at(trailing ? -3 : -1).event.data.message.content[0].text, `output-${count - 1}`)
+    measurements.push({ count, withCancellation, trailing, projected, compared })
   }
   t.diagnostic(JSON.stringify(measurements))
-  for (const { count, projected, compared } of measurements) {
-    assert.equal(projected, count, '工具参数只在首次转换该条目时序列化')
-    assert.equal(compared, 0, '纯追加不需要序列化历史事件来比较内容')
+  for (const { count, trailing, projected, compared } of measurements) {
+    assert.equal(projected, count, '原生工具参数只在首次转换该条目时序列化')
+    if (trailing) assert.ok(compared <= count * 4, '补录移位只需要比较受影响的事件')
+    else assert.equal(compared, 0, '纯追加不需要序列化历史事件来比较内容')
   }
+})
+
+test('取消补录随条目时间移动，并在同 ID 的原生命令到达时合并', async t => {
+  const source = mockTransport(t)
+  const { events } = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const turnId = 'active'
+  const cancelled = { turnId, id: 'early', name: 'exec', input: 'pwd', output: 'aborted by user', completedAtMs: 100_020 }
+  const unchanged = { ...cancelled, id: 'unchanged', completedAtMs: 100_010 }
+  const trailing = { ...cancelled, id: 'late', completedAtMs: 100_080 }
+  const anchor = { id: 'anchor', type: 'dynamicToolCall', status: 'completed', output: 'anchor',
+    arguments: { auditAnchor: true }, completedAtMs: 100_050 }
+  const untimed = { id: 'untimed', type: 'dynamicToolCall', status: 'completed', output: 'untimed' }
+  const snapshot = () => events.getSnapshot()
+  const results = () => snapshot().entries.filter(({ event }) => event.type === 'tool/result')
+  const ids = () => results().map(({ event }) => event.data.message.id)
+  const change = item => emit({ type: 'change', turn: { id: turnId }, items: [item] })
+  await emit({ type: 'snapshot', page: { data: [turn(turnId, 'inProgress', [ask, anchor])] }, mode: 'live' })
+  await emit({ type: 'rollout-facts', cancelledToolCalls: [trailing, cancelled, unchanged] })
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'codex:cancelled:early', 'anchor', 'codex:cancelled:late'])
+  const [, early, anchored] = results()
+
+  await change(untimed)
+  assert.equal(snapshot().change.kind, 'replace')
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'codex:cancelled:early', 'anchor', 'untimed', 'codex:cancelled:late'])
+  assert.strictEqual(results()[1], early)
+  assert.strictEqual(results()[2], anchored)
+
+  const command = { id: cancelled.id, type: 'commandExecution', command: 'pwd', status: 'inProgress', aggregatedOutput: '/workspace' }
+  await change(command)
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'anchor', 'untimed', 'early', 'codex:cancelled:late'])
+  assert.match(results()[3].event.data.message.content[0].text, /\/workspace\naborted by user/)
+
+  await change({ ...command, status: 'completed', completedAtMs: 100_100, exitCode: 0 })
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'anchor', 'untimed', 'codex:cancelled:late', 'early'])
+  assert.equal(results().at(-1).event.data.message.content[0].text, '/workspace\n[exit code: 0]')
+
+  let anchorProjections = 0
+  const stringify = JSON.stringify
+  t.mock.method(JSON, 'stringify', (value, ...args) => {
+    if (value?.auditAnchor) anchorProjections++
+    return stringify(value, ...args)
+  })
+  await change({ ...command, id: trailing.id })
+  assert.equal(anchorProjections, 0, '轮尾补录合并时保留前面的工具结果')
+  assert.deepEqual(ids(), ['codex:cancelled:unchanged', 'anchor', 'untimed', 'early', 'late'])
+
+  await emit({ type: 'rollout-facts', cancelledToolCalls: [] })
+  assert.deepEqual(ids(), ['anchor', 'untimed', 'early'])
+  await change({ ...anchor, id: 'after-clear', completedAtMs: 100_150 })
+  assert.equal(snapshot().change.kind, 'append')
+  assert.deepEqual(ids(), ['anchor', 'untimed', 'early', 'after-clear'])
 })
 
 test('增量改写时间、目标提示和压缩完成后的事件与整轮回放一致', async t => {
