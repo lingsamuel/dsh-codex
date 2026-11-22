@@ -140,9 +140,13 @@ test('回退检查原生线程状态，并以所选轮次为排除边界', async
     body: JSON.stringify({ threadId: thread.id, action: 'revert', beforeTurnId }),
   })
   assert.equal((await post(undefined)).status, 400)
-  assert.equal((await post('earlier')).status, 409)
+  const running = await post('earlier')
+  assert.equal(running.status, 409)
+  assert.match((await running.json()).error, /停止当前轮次/)
   thread.status.type = 'notLoaded'
-  assert.equal((await post('earlier')).status, 409)
+  const cold = await post('earlier')
+  assert.equal(cold.status, 409)
+  assert.match((await cold.json()).error, /尚未加载/)
   thread.status.type = 'idle'
   assert.equal((await post('earlier')).status, 200)
   assert.deepEqual(messages.filter(({ method }) => method === 'thread/revert').map(({ params }) => params), [

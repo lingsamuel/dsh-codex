@@ -4,6 +4,7 @@ import { installLiveStatus } from './native-dsh/live-status.jsx'
 import { installMessageSearch } from './native-dsh/message-search.jsx'
 import { installArchiveView } from './native-dsh/archive-view.jsx'
 import { installTurnChanges } from './native-dsh/turn-changes.jsx'
+import { installTurnFork } from './native-dsh/turn-fork.jsx'
 import { installTurnRevert } from './native-dsh/turn-revert.jsx'
 import { installMessageEdit } from './native-dsh/message-edit.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
@@ -25,6 +26,7 @@ export function apply(ctx) {
   installMessageSearch(ctx)
   installArchiveView(ctx, deleteSession)
   installTurnChanges(ctx)
+  installTurnFork(ctx)
   installTurnRevert(ctx)
   installMessageEdit(ctx)
   installModelPicker(ctx, controller.signal)

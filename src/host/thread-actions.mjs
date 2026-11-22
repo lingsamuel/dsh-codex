@@ -76,9 +76,14 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
               if (activity.length) return json({ reason: 'archiveActive', activity, error: '会话仍有运行中的操作。' }, 409)
             }
             // 回退会替换运行时。先查当前状态，避免在浏览时自动恢复线程或中断已开始的 CLI 轮次。
-            if (modifiesHistory && (thread.status?.type !== 'idle' || thread.historyMode !== 'paginated'
-              || thread.archived || thread.ephemeral || thread.canAcceptDirectInput === false)) {
-              return json({ error: '回退需要在 Codex 中已加载、空闲且支持分页历史的会话。' }, 409)
+            if (modifiesHistory) {
+              const status = thread.status?.type
+              if (status === 'notLoaded') return json({ error: 'Codex 尚未加载此会话。请先在 CLI 中打开。' }, 409)
+              if (status === 'active') return json({ error: '会话仍在运行。请在 Codex CLI 中停止当前轮次，或等待它结束。' }, 409)
+              if (status !== 'idle' || thread.historyMode !== 'paginated' || thread.archived
+                || thread.ephemeral || thread.canAcceptDirectInput === false) {
+                return json({ error: '修改历史需要一个支持分页历史且可直接操作的空闲会话。' }, 409)
+              }
             }
             if (!replacement) return json(await request(method, params))
             try {
