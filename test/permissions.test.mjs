@@ -151,6 +151,9 @@ test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确�
   const owner = new AbortController()
   const thread = { id: 'draft', cwd: directory, status: { type: 'idle' }, historyMode: 'paginated', preview: '' }
   const initial = { activePermissionProfile: { id: ':read-only' }, approvalPolicy: 'on-request', sandbox: { type: 'readOnly' } }
+  const fullAccess = { activePermissionProfile: { id: ':danger-full-access' }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'dangerFullAccess' } }
+  const expected = { profileId: ':danger-full-access', approvalPolicy: 'on-request', sandbox: 'dangerFullAccess', source: 'runtime' }
+  const threads = new Map([[thread.id, thread]])
   let creator
   const applied = Promise.withResolvers()
   const update = Promise.withResolvers()
@@ -161,10 +164,15 @@ test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确�
     const notify = (method, params) => creator?.send(JSON.stringify({ method, params }))
     if (method === 'initialize') return reply({})
     if (method === 'thread/start') {
+      if (params.permissions === ':danger-full-access') {
+        const draft = { ...thread, id: `draft-${threads.size}` }
+        threads.set(draft.id, draft)
+        return reply({ thread: draft, ...fullAccess })
+      }
       creator = client
       return reply({ thread, ...initial })
     }
-    if (method === 'thread/read') return reply({ thread })
+    if (method === 'thread/read') return reply({ thread: threads.get(params.threadId) })
     if (method === 'thread/queue/list') return reply({ data: [] })
     if (method === 'permissionProfile/list') return reply({ data: [{ id: ':danger-full-access', allowed: true }] })
     if (method === 'thread/turns/list') {
@@ -173,9 +181,7 @@ test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确�
     if (method === 'thread/settings/update') {
       reply({})
       update.resolve(params)
-      void applied.promise.then(() => notify('thread/settings/updated', { threadId: thread.id, threadSettings: {
-        activePermissionProfile: { id: params.permissions }, approvalPolicy: 'on-request', sandboxPolicy: { type: 'dangerFullAccess' },
-      } }))
+      void applied.promise.then(() => notify('thread/settings/updated', { threadId: thread.id, threadSettings: fullAccess }))
       return
     }
     assert.fail(`unexpected ${method}`)
@@ -193,8 +199,8 @@ test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确�
   })
 
   const routes = createHistoryRoutes(socket, owner.signal)
-  function post(path, fields, signal) {
-    const route = routes.find(route => route.path === `/api/codex/${path}`)
+  function post(path, fields, signal, source = routes) {
+    const route = source.find(route => route.path === `/api/codex/${path}`)
     return route.fetch(new Request(`http://localhost${route.path}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(fields), signal,
     }))
@@ -206,15 +212,29 @@ test('网页新建草稿在首条消息前收到 Codex 实际应用权限的确�
   assert.equal((await created.json()).permission.profileId, ':read-only')
   request.abort()
   const reopened = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: thread.id })
-  assert.equal((await reopened.json()).thread.id, thread.id)
+  const reopenedDraft = await reopened.json()
+  assert.equal(reopenedDraft.thread.id, thread.id)
+  assert.equal(reopenedDraft.permission.profileId, ':read-only')
+
+  const otherHost = createHistoryRoutes(socket, owner.signal)
+  for (const source of [routes, otherHost]) {
+    const saved = await post('permission-action', { action: 'default', profileId: ':danger-full-access' }, undefined, source)
+    assert.equal(saved.status, 200)
+    const next = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: thread.id }, undefined, source)
+    assert.equal(next.status, 200)
+    const draft = await next.json()
+    assert.notEqual(draft.thread.id, thread.id)
+    assert.deepEqual(draft.permission, expected)
+    const same = await post('conversation-action', { action: 'create', cwd: directory, reuseThreadId: draft.thread.id }, undefined, source)
+    const sameDraft = await same.json()
+    assert.equal(sameDraft.thread.id, draft.thread.id)
+    assert.deepEqual(sameDraft.permission, expected)
+  }
   const selection = post('permission-action', { action: 'select', threadId: thread.id, profileId: ':danger-full-access' })
   assert.deepEqual(await update.promise, { threadId: thread.id, permissions: ':danger-full-access' })
   applied.resolve()
   const response = await selection
   assert.equal(response.status, 200)
-  const expected = {
-    profileId: ':danger-full-access', approvalPolicy: 'on-request', sandbox: 'dangerFullAccess', source: 'runtime',
-  }
   assert.deepEqual((await response.json()).permission, expected)
   const catalog = routes.find(route => route.path === '/api/codex/permissions')
   const loaded = await catalog.fetch(new Request(`http://localhost${catalog.path}?threadId=${thread.id}`))

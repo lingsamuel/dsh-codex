@@ -49,8 +49,8 @@ async function requireActiveThread(request, threadId) {
   if (thread.status?.type !== 'active') throw conflict('turn-unavailable', '原轮次已结束或不再运行。')
 }
 
-async function workspaceThread(thread) {
-  return { thread, workspacePaths: await resolveWorkspacePaths([thread.cwd]) }
+async function workspaceThread(thread, permission) {
+  return { thread, workspacePaths: await resolveWorkspacePaths([thread.cwd]), ...(permission && { permission }) }
 }
 
 /** DSH 提名的草稿只有仍是原生空线程、且不含待发内容时才能复用。 */
@@ -283,12 +283,12 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
     return permissions ? permissions.withThreadCreation(signal, create) : withCodexReader(socketPath, signal, create)
   }
 
-  async function startDraft(rpc, cwd, projectId, retainDraft) {
+  async function startDraft(rpc, cwd, projectId, retainDraft, options) {
     const started = await rpc('thread/start', {
-      cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...await permissions?.startOptions(rpc, cwd),
+      cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...options,
     })
     const permission = retainDraft?.(started)
-    return { ...await workspaceThread({ ...started.thread, blank: true }), ...(permission && { permission }) }
+    return workspaceThread({ ...started.thread, blank: true }, permission)
   }
 
   async function worktreeStart(sourceId, selection, signal) {
@@ -306,7 +306,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       }
       const cwd = await resolveWorktreeCwd(source.cwd, selection, signal)
       const projectId = source.projectId ?? (await openProject(rpc, source.cwd)).project.id
-      return startDraft(rpc, cwd, projectId, retainDraft)
+      return startDraft(rpc, cwd, projectId, retainDraft, await permissions?.startOptions(rpc, cwd))
     })
     // Git 检出和 thread/start 都可能先于发送失败。保留原生目标，让重试继续原会话。
     start = { chosen, native }
@@ -361,9 +361,14 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           if (projectId !== undefined) required(projectId, '项目 ID 无效。')
           if (reuseThreadId !== undefined) required(reuseThreadId, '草稿会话 ID 无效。')
           async function create(rpc, retainDraft) {
+            const options = await permissions?.startOptions(rpc, cwd)
             const reused = await reusableDraft(rpc, reuseThreadId, cwd, projectId)
-            if (reused) return workspaceThread({ ...reused, blank: true })
-            return startDraft(rpc, cwd, projectId, retainDraft)
+            const permission = reused && permissions?.readDraftPermission(reused.id)
+            // 有网页默认预设时，仅复用 Codex 已确认权限匹配的草稿，避免改动其他会话的设置。
+            if (reused && (!options?.permissions || permission?.profileId === options.permissions)) {
+              return workspaceThread({ ...reused, blank: true }, permission)
+            }
+            return startDraft(rpc, cwd, projectId, retainDraft, options)
           }
           return json(await withThreadCreation(signal, create))
         }

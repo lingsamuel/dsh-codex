@@ -108,6 +108,10 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     return storePermission(threadId, permissionOf(settings))
   }
 
+  function readDraftPermission(threadId) {
+    return drafts.get(threadId)?.permission
+  }
+
   /** 保留网页草稿的创建订阅，空线程尚不能经 resume 接收原生设置确认。 */
   async function withThreadCreation(signal, create) {
     const creation = new AbortController()
@@ -210,6 +214,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     withThreadCreation,
     observeDraftSettings,
     readDraftSettings: threadId => drafts.get(threadId)?.settings,
+    readDraftPermission,
     validateSelection: requireProfile,
     switchPermission,
     async startOptions(request, cwd) {
@@ -224,7 +229,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
         const thread = threadId ? (await rpc('thread/read', { threadId })).thread : undefined
         const [profiles, defaultProfile] = await Promise.all([permissionProfiles(rpc, thread?.cwd), preference.get()])
         const cached = known.get(threadId)
-        const permission = drafts.get(threadId)?.permission
+        const permission = readDraftPermission(threadId)
           ?? (cached?.source === 'runtime' ? { ...cached, source: 'saved' } : cached)
         return { profiles, defaultProfile, ...(permission && { permission }) }
       })
