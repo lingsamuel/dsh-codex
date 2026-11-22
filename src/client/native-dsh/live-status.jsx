@@ -22,7 +22,15 @@ const dictionaries = {
 }
 
 const styles = `
+  /* 与 DSH 输入栏用相同的侧边留白，让卡片宽度在同样大的容器内计算。 */
+  .codex-sync-notice-wrap {
+    padding-inline: var(--dsh-composer-side-clearance);
+  }
   .codex-sync-notice {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: var(--dsh-composer-card-max-width);
+    margin-inline: auto;
     display: flex;
     align-items: flex-start;
     gap: 8px;
@@ -53,9 +61,11 @@ function SessionLiveStatus({ useSession, t }) {
 function ReconnectNotice({ useSession, t }) {
   const reconnecting = useSession(state => state.live?.reconnecting)
   if (!reconnecting) return null
-  return <div className="codex-sync-notice" role="status">
-    <IconWarningOutlineRegular aria-hidden="true" size={16} />
-    <span>{t('reconnecting')}</span>
+  return <div className="codex-sync-notice-wrap">
+    <div className="codex-sync-notice" role="status">
+      <IconWarningOutlineRegular aria-hidden="true" size={16} />
+      <span>{t('reconnecting')}</span>
+    </div>
   </div>
 }
 
