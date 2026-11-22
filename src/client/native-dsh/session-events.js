@@ -54,7 +54,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     goalRevision: 0,
     planMode: planModeOf(thread),
     planRevision: 0,
-    live: { mode: 'connecting', status: thread.status, lastTurnStatus: undefined },
+    live: { mode: 'connecting', reconnecting: false, status: thread.status, lastTurnStatus: undefined },
   })
   const events = createSnapshotStore({
     entries: [],
@@ -141,10 +141,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     events.set({ get entries() { return readEntries() }, hasMore, revision: previous.revision + 1, change })
   }
 
-  function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
+  function publishState({ mode, reconnecting, status, historyMode, canAcceptDirectInput, archived } = {}) {
     const lastTurn = transcript.getTurn(rows.at(-1)?.id)
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
+      if (reconnecting !== undefined) current.live.reconnecting = reconnecting
       if (status !== undefined) current.live.status = status
       if (historyMode !== undefined) current.historyMode = historyMode
       if (canAcceptDirectInput !== undefined) {
@@ -410,7 +411,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace, reconnecting }, lifetime = signal) {
     if (!opened || replace) {
       const images = await readInlineCodexAttachments(page.data, lifetime)
       lifetime.throwIfAborted()
@@ -449,7 +450,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     publish()
     // 已开始合并的轮次保留在缓存中，旧连接不能在释放后更新实时状态或阅读回执。
     if (lifetime.aborted) return
-    publishState({ mode, status, historyMode, canAcceptDirectInput, archived })
+    publishState({ mode, reconnecting, status, historyMode, canAcceptDirectInput, archived })
     if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
     if (planMode && planMode !== state.getSnapshot().planMode) publishPlanMode(planMode)
@@ -543,7 +544,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
 
   function receive(frame, lifetime) {
     return enqueue(async () => {
-      if (frame.type === 'snapshot') return receiveSnapshot({ ...frame, canAcceptDirectInput: frame.canAcceptDirectInput ?? null }, lifetime)
+      // SSE 快照合并后才表示会话恢复，HTTP 补读只提供可查看的历史。
+      if (frame.type === 'snapshot') return receiveSnapshot({ ...frame, canAcceptDirectInput: frame.canAcceptDirectInput ?? null,
+        reconnecting: false }, lifetime)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
       if (frame.type === 'questions' && watchingInteractions) {
         liveQuestions = frame.requests
@@ -636,7 +639,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         codexApprovals.set([])
         codexMcpRequests.set([])
       }
-      publishState({ mode })
+      publishState({ mode, reconnecting: mode === 'disconnected' ? true : undefined })
       if (mode !== 'disconnected' || opened || triedFallback) return
       triedFallback = true
       try {
@@ -822,7 +825,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       codexMcpRequests.set([])
     }
     if (!nextWatch) {
-      publishState({ mode: 'disconnected' })
+      publishState({ mode: 'disconnected', reconnecting: false })
       return
     }
     if (!selected) publishQuestions()

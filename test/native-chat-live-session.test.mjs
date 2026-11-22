@@ -53,6 +53,8 @@ function mockTransport(t, sources = []) {
   globalThis.window = new EventTarget()
   globalThis.document = { baseURI: 'http://127.0.0.1:3190/' }
   globalThis.EventSource = class extends EventTarget {
+    static CLOSED = 2
+    readyState = 0
     constructor(url) { super(); this.url = url; sources.push(this) }
     close() { this.closed = true }
   }
@@ -1172,22 +1174,33 @@ test('从活动打开的未展开子会话仍跟随原生目录更新与删除',
   await assert.rejects(catalog.resolveSubagent(child.id, lifetime.signal), /会话已删除/)
 })
 
-test('one initial history request keeps the view usable when SSE cannot open', async t => {
+test('实时流关闭后主动重连，补读历史期间持续提示，收到快照后恢复', async t => {
   const currentSource = mockTransport(t)
   let historyRequests = 0
+  const first = turn('first', 'completed', [ask])
   globalThis.fetch = async url => {
     assert.equal(url.pathname, '/api/codex/turns')
     historyRequests++
-    return Response.json({ data: [turn('first', 'completed', [ask])], nextCursor: null })
+    return Response.json({ data: [first], nextCursor: null })
   }
-  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const history = createCodexHistory({ effect: activate => t.after(activate()) }, { id: 'thread' })
   const source = currentSource()
+  source.readyState = EventSource.CLOSED
   await source.onerror()
   await source.onerror()
   await history.ready
   assert.equal(historyRequests, 1)
   assert.equal(history.session.getSnapshot().openState, 'open')
+  assert.equal(history.session.getSnapshot().live.reconnecting, true)
   assert.ok(history.events.getSnapshot().entries.some(entry => entry.event.type === 'user/message'))
+
+  t.mock.timers.tick(3000)
+  const retry = currentSource()
+  assert.notEqual(retry, source)
+  await retry.onopen()
+  assert.equal(history.session.getSnapshot().live.reconnecting, true)
+  await retry.onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live', page: { data: [first] } }) })
+  assert.equal(history.session.getSnapshot().live.reconnecting, false)
 })
 
 test('搜索定位只向前加载未读过的页，保留较新的聊天窗口', async t => {

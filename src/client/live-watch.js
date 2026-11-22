@@ -1,4 +1,5 @@
 const idleTimeoutMs = 45_000
+const retryDelayMs = 3_000
 
 /** 打开认证后的 SSE。侧栏的连接独立于当前会话的历史连接。 */
 export function openLiveWatch(threadId, { receive, changeMode, queue, questions, backgroundTerminals, itemCursor, checkpoint }, signal) {
@@ -35,7 +36,13 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
       return changeMode?.('connecting')
     }
     connection.onerror = () => {
-      if (source === connection) return changeMode?.('disconnected')
+      if (source !== connection) return
+      // HTTP 错误可能直接关闭 EventSource。只有仍在 CONNECTING 的连接会由浏览器重试。
+      if (connection.readyState === EventSource.CLOSED) {
+        clearTimeout(idleTimer)
+        idleTimer = setTimeout(connect, retryDelayMs)
+      }
+      return changeMode?.('disconnected')
     }
     connection.onmessage = event => {
       if (source !== connection) return

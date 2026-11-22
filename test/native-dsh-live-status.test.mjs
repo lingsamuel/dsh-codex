@@ -67,14 +67,16 @@ test('向 DSH 发布等待状态，后续更新和移除会清理原提醒', () 
   assert.equal(changed, undefined)
 })
 
-test('标题栏保留连接提示与异常结果，常规状态由 DSH 侧栏显示', () => {
-  for (const mode of ['connecting', 'history', 'disconnected']) {
+test('标题栏保留初次连接、历史与异常结果，重连时由输入区提示', () => {
+  for (const mode of ['connecting', 'history']) {
     assert.deepEqual(describeLiveStatus({
       mode,
       status: { type: 'active', activeFlags: ['waitingOnApproval'] },
       lastTurnStatus: 'inProgress',
     }), { mode, activity: undefined })
+    assert.deepEqual(describeLiveStatus({ mode, reconnecting: true }), { mode: undefined, activity: undefined })
   }
+  assert.deepEqual(describeLiveStatus({ mode: 'disconnected' }), { mode: undefined, activity: undefined })
   assert.deepEqual(describeLiveStatus({
     mode: 'history', status: { type: 'notLoaded' }, lastTurnStatus: 'failed',
   }), { mode: 'history', activity: 'failed' })

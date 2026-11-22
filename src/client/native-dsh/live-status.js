@@ -31,10 +31,10 @@ export function installUnreadStatus(status, catalog) {
   return () => Object.assign(status, { getSnapshot, subscribe })
 }
 
-/** 只在标题栏补充 DSH 侧栏状态点没有表达的连接和异常信息。 */
-export function describeLiveStatus({ mode = 'history', status, lastTurnStatus } = {}) {
+/** 标题栏保留初次连接、历史和异常结果，实时同步中断由输入区提示。 */
+export function describeLiveStatus({ mode = 'history', reconnecting, status, lastTurnStatus } = {}) {
   const turnOutcome = lastTurnStatus === 'failed' ? lastTurnStatus : undefined
-  if (mode !== 'live') return { mode, activity: turnOutcome }
+  if (mode !== 'live') return { mode: reconnecting || mode === 'disconnected' ? undefined : mode, activity: turnOutcome }
   if (status?.type === 'systemError') return { activity: 'systemError' }
   return { mode: undefined, activity: status?.type === 'active' ? undefined : turnOutcome }
 }
