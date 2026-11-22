@@ -147,16 +147,16 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
           })
           return await (modifiesHistory ? submit(threadId, run) : run())
         }
-        const restoreForFork = action === 'fork' && input.unarchive === true
+        const restoreArchived = (action === 'fork' || action === 'rename') && input.unarchive === true
         const run = () => withCodexReader(socketPath, signal, async request => {
-          if (restoreForFork) {
+          if (restoreArchived) {
             const { thread } = await request('thread/read', { threadId })
             await unarchiveForSubmission(request, thread)
           }
-          // 分叉只需要可读取的原生历史。源线程不需要恢复运行时。
+          // 分叉和改名只需要原生记录，源线程可以保持未加载。
           return request(method, params)
         })
-        const result = await (action === 'rename' || restoreForFork ? submit(threadId, run) : run())
+        const result = await (action === 'rename' || restoreArchived ? submit(threadId, run) : run())
         if (action === 'fork' || action === 'unarchive') {
           return json({ ...result, workspacePaths: await resolveWorkspacePaths([result.thread.cwd]) })
         }

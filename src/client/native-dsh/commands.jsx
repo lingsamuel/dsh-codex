@@ -12,7 +12,6 @@ import { commandUnavailable } from './command-action.jsx'
 const overlay = 'conversation.input.overlay'
 const planSlot = 'conversation.input.plan'
 const goalSlot = 'conversation.input.left'
-const renameMenu = 'sidebar.workspaces.session.menu.item'
 const locale = 'codex.commands'
 const copy = {
   zh: {
@@ -101,7 +100,7 @@ export function installCommands(ctx) {
   const t = ctx.locale.bind(locale)
   installGoalBar(ctx, t)
 
-  ctx.inject(['commandUi', 'sessions', 'conversation'], scope => {
+  ctx.inject(['commandUi', 'sessions', 'conversation', 'contextMenus', 'remoteAccess'], scope => {
     const { commandUi, sessions } = scope
     scope.effect(() => {
       // RC2 的客户端命令也会读取 DSH Agent 的命令目录。该 Profile 中的会话都由 Codex 持有。
@@ -126,7 +125,6 @@ export function installCommands(ctx) {
       }
       return controls.get(binding)
     }
-    const rename = () => ctx.slots.entries(renameMenu).find(entry => entry.options.id === 'rename')?.inject().requestSessionRename
     const available = ({ sessionId }) => Boolean(sessions.binding(sessionId))
     const modeAvailable = ({ sessionId }) => {
       const state = sessions.binding(sessionId)?.session.getSnapshot()
@@ -157,10 +155,23 @@ export function installCommands(ctx) {
       { name: 'export', icon: IconDownloadOutlineRegular },
       {
         name: 'rename', icon: IconEditOutlineRegular,
-        available: session => available(session) && Boolean(rename()),
-        run({ sessionId }) {
+        available: session => available(session)
+          && scope.remoteAccess.source('session', session.sessionId, 'session/rename').getSnapshot(),
+        async run({ sessionId }) {
           const summary = sessions.list.getSnapshot().byId[sessionId]
-          rename()?.(sessionId, summary?.displayTitle ?? '')
+          const menu = scope.contextMenus.resolve({ kind: 'session', value: { sessionId, displayTitle: summary?.displayTitle ?? '' } })
+          try {
+            // 和右键菜单使用同一动作及弹窗，也沿用原生的改名权限检查。
+            const findRename = () => menu.source.getSnapshot().find(item => item.commandId === 'session.rename')
+            let action = findRename()
+            if (!action) {
+              await menu.ready
+              action = findRename()
+            }
+            if (action) menu.select(action.id)
+          } finally {
+            menu.dispose()
+          }
         },
       },
     ]

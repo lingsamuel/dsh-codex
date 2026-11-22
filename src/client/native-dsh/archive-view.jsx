@@ -1,6 +1,6 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, IconPinFillRegular, IconTrashOutlineRegular, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 const locale = 'codex.archive'
 const row = 'sidebar.workspaces.session.row.action'
@@ -10,11 +10,13 @@ const overlay = 'shell.overlay'
 const labels = {
   zh: {
     archived: '已归档', delete: '永久删除', title: '永久删除会话', cancel: '取消', close: '关闭',
+    unarchiveAndRename: '取消归档并改名',
     description: '将永久删除「{title}」及其子代理会话的历史。此操作无法撤销，工作区文件会保留。',
     pending: '正在删除会话…',
   },
   en: {
     archived: 'Archived', delete: 'Permanently delete', title: 'Permanently delete session', cancel: 'Cancel', close: 'Close',
+    unarchiveAndRename: 'Unarchive and rename',
     description: 'The history for “{title}” and its subagent conversations will be permanently deleted. This action cannot be undone. Workspace files will be kept.',
     pending: 'Deleting session…',
   },
@@ -110,6 +112,40 @@ function registerArchivedPinMenu(ctx) {
   }, ArchivedPinIndicator))
 }
 
+/** 原生改名弹窗负责收集标题。归档时用同一个保存动作确认取消归档。 */
+function adaptRenameDialog(ctx) {
+  const t = ctx.locale.bind(locale)
+  const workspaces = ctx.workspaces.list
+  async function renameArchived(sessionId, title) {
+    const result = await ctx.sessions.using(sessionId, { source: 'workspaceOperation' },
+      reference => reference.binding.session.rename(title, true))
+    if (!result.ok) throw new Error(result.error.message)
+  }
+  let entry
+  let restore
+  function sync() {
+    const next = ctx.slots.entries(overlay).find(item => item.options.id === 'workspace.session-rename')
+    if (next === entry) return
+    restore?.()
+    entry = next
+    restore = undefined
+    const Native = entry?.component
+    if (!Native) return
+    function RenameDialog(props) {
+      const request = props.useRenameRequest(value => value)
+      const { archivedSessionIds } = useSyncExternalStore(workspaces.subscribe, workspaces.getSnapshot)
+      if (!request || !archivedSessionIds.includes(request.sessionId)) return <Native {...props} />
+      return <Native {...props} renameSession={renameArchived}
+        t={(key, ...args) => key === 'rename' || key === 'rename.session.title' ? t('unarchiveAndRename') : props.t(key, ...args)} />
+    }
+    entry.component = RenameDialog
+    restore = () => { if (next.component === RenameDialog) next.component = Native }
+  }
+  const stop = ctx.slots.subscribe(overlay, sync)
+  sync()
+  return () => { stop(); restore?.() }
+}
+
 function DeleteMenuAction({ useMenuOpenState, sessionId, displayTitle, requestDelete, t }) {
   const [, setOpen] = useMenuOpenState()
   return <MenuItemButton danger icon={<IconTrashOutlineRegular size={14} />} onSelect={() => {
@@ -167,6 +203,7 @@ export function installArchiveView(ctx, deleteSession) {
     }, ArchivedRowNavigation))
   })
   ctx.inject(['uiWorkspace', 'workspaces', 'contextMenus', 'remoteAccess'], registerArchivedPinMenu)
+  ctx.inject(['sessions', 'workspaces'], scope => scope.effect(() => adaptRenameDialog(scope)))
   ctx.slots.inject(menu, () => ctx.slots.register({
     name: menu, id: 'codex-delete-session', order: 500, locale,
     inject: () => ({ requestDelete: request => deleteRequest.set(request) }),

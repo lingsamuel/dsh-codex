@@ -55,9 +55,9 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
       modelDraft,
       permissionDraft,
       sessionId: thread.id,
-      async rename(title) {
+      async rename(title, unarchive = false) {
         try {
-          await writeThreadAction({ threadId: thread.id, action: 'rename', name: title })
+          await writeThreadAction({ threadId: thread.id, action: 'rename', name: title, ...(unarchive && { unarchive: true }) })
           return { ok: true, value: { title } }
         } catch (error) {
           return { ok: false, error: remoteFailure(error.message) }

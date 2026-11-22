@@ -1322,6 +1322,36 @@ test('会话生命周期使用原生归档、删除和按轮次分支', async t 
   ])
 })
 
+test('归档会话明确提交改名时才取消归档，保持原线程未加载', async t => {
+  const thread = { id: 'archived-rename', name: '旧名称', status: { type: 'notLoaded' } }
+  let archived = true
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': ({ archived: onlyArchived, includedThreadIds }) => ({ result: {
+      data: archived && onlyArchived && includedThreadIds.includes(thread.id) ? [thread] : [],
+    } }),
+    'thread/unarchive': () => { archived = false; return { result: { thread } } },
+    'thread/name/set': ({ name }) => {
+      if (archived) return { error: { code: -32600, message: 'no rollout found for thread id' } }
+      thread.name = name
+      return { result: {} }
+    },
+  })
+  const rename = unarchive => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      threadId: thread.id, action: 'rename', name: '新名称', ...(unarchive && { unarchive: true }),
+    }),
+  })
+  assert.equal((await rename(false)).status, 400)
+  assert.equal(archived, true)
+  assert.equal(thread.name, '旧名称')
+  assert.equal((await rename(true)).status, 200)
+  assert.equal(archived, false)
+  assert.equal(thread.name, '新名称')
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
+    ['thread/name/set', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/name/set'])
+})
+
 test('已归档源会话收到明确确认后才取消归档，并直接使用原生分叉', async t => {
   const source = { id: 'archived-source', cwd: '/mock', status: { type: 'notLoaded' } }
   const branch = { id: 'forked-thread', cwd: source.cwd, forkedFromId: source.id }

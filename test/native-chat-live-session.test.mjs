@@ -573,6 +573,20 @@ test('异步问答随当前轮次的原生条目弹出，即使没有等待状�
   assert.deepEqual(displayed(), [])
 })
 
+test('归档会话的异步题目和选项保留在历史中，查看时不发布问答面板', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'archived', archived: true })
+  const question = { id: 'archived-question', type: 'agentMessage', delivery: 'async', text: '',
+    questions: [{ title: '部署到哪里？', options: ['测试环境', '正式环境'] }] }
+  await source().onmessage({ data: JSON.stringify({ type: 'snapshot', archived: true,
+    page: { data: [turn('saved-question', 'completed', [ask, question])] }, mode: 'history', status: { type: 'notLoaded' },
+  }) })
+  const reply = history.events.getSnapshot().entries.find(({ event }) => event.type === 'assistant/message')
+  assert.equal(reply.event.data.message.content[0].text, '**部署到哪里？**\n\n- 测试环境\n- 正式环境')
+  assert.deepEqual(history.session.projections.faceOf('codexQuestions').getSnapshot(), [])
+  assert.equal(history.session.getSnapshot().archived, true)
+})
+
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {
   const currentSource = mockTransport(t)
   const received = []
