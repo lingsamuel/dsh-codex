@@ -22,12 +22,19 @@ async function collectPages(read) {
 async function loadCatalog(socketPath, signal, complete) {
   const { projects, threads } = await withCodexReader(socketPath, signal, async request => {
     const projects = await collectPages(params => readProjectPage(request, params))
-    const threads = await collectPages(params => request('thread/list', {
-      ...params,
-      modelProviders: [],
-      sortKey: 'updated_at',
-      useStateDbOnly: !complete,
-    }))
+    const threads = await collectPages(async params => {
+      const page = await request('thread/list', {
+        ...params,
+        modelProviders: [],
+        sortKey: 'updated_at',
+        useStateDbOnly: !complete,
+      })
+      if (!page.readStates) return page
+      return { ...page, data: page.data.map(thread => {
+        const readState = page.readStates[thread.id]
+        return readState ? { ...thread, readState } : thread
+      }) }
+    })
     return { projects, threads }
   }, complete ? 90_000 : 15_000)
 

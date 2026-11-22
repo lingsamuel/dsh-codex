@@ -3,6 +3,7 @@ import { once } from 'node:events'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { test } from 'node:test'
 import { WebSocketServer } from 'ws'
 import { readCodex } from '../src/host/app-server.mjs'
@@ -134,6 +135,19 @@ test('先发布索引项目，完整清单共享一次扫描，后台补齐旧�
   assert.equal(messages.some(m => m.method.startsWith('thread/turns')), false)
 })
 
+test('原生清单保留跨页已读和未读位置', async t => {
+  const unread = { firstUnread: { type: 'turn', turnId: 'answer' }, revision: 'first' }
+  const read = { firstUnread: null, revision: 'second' }
+  const { get } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': ({ cursor }) => ({ result: cursor
+      ? { data: [{ id: 'read' }], readStates: { read }, nextCursor: null }
+      : { data: [{ id: 'unread' }], readStates: { unread }, nextCursor: 'page-two' } }),
+  })
+  const { threads } = await (await get('/api/codex/catalog?complete=1')).json()
+  assert.deepEqual(threads, [{ id: 'unread', readState: unread }, { id: 'read', readState: read }])
+})
+
 test('Host 重启可以先返回磁盘清单，随后重新从 Codex 确认', async t => {
   let thread = { id: 'original', name: '旧标题', cwd: '/projects/example', status: { type: 'active' } }
   const { socketPath, directory, messages } = await fakeCodex(t, {
@@ -237,4 +251,28 @@ test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线
   assert.equal(fixture.messages[0].params.clientInfo.name, 'codex_app_server_daemon')
   await reader.cancel()
   await fixture.clientClosed
+})
+
+test('原生未读只推送变化，其他会话的已读更新无需刷新对话或清单', { timeout: 5000 }, async t => {
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'selected' }, readState: { firstUnread: null, revision: 'one' } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+  })
+  const db = new DatabaseSync(join(fixture.directory, 'state_5.sqlite'))
+  t.after(() => db.close())
+  db.exec(`PRAGMA journal_mode = WAL;
+    CREATE TABLE thread_read_receipts (thread_id TEXT PRIMARY KEY, first_unread_turn TEXT);
+    INSERT INTO thread_read_receipts VALUES ('other', 'previous-turn');`)
+  const response = await fixture.get('/api/codex/watch?threadId=selected')
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.deepEqual((await read()).readState, { firstUnread: null, revision: 'one' })
+  assert.deepEqual(await read(), { type: 'unread', replace: true, added: ['other'], removed: [] })
+  db.exec(`UPDATE thread_read_receipts SET first_unread_turn = NULL WHERE thread_id = 'other';
+    INSERT INTO thread_read_receipts VALUES ('new', '');`)
+  assert.deepEqual(await read(), { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
+  assert.deepEqual(fixture.messages.map(message => message.method).sort(),
+    ['initialize', 'initialized', 'thread/read', 'config/read', 'thread/turns/list'].sort())
+  await reader.cancel()
 })

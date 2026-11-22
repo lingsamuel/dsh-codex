@@ -8,7 +8,7 @@ Host 连接 WSL 中已经运行的 Codex App Server，通过 `project/list`、`t
 
 在当前 Codex 版本，直接订阅未保存的逐字增量需要恢复线程并改变会话的客户端状态。只读 Host 通过常规只读请求取得原生记录和全局状态，保持 CLI 自己的审批和问答流程。连接中断后重新取得一次尾部快照以补齐间隔。
 
-首次状态及后续广播都更新 DSH 会话列表。DSH 根据 `running` 的变化管理后台完成提醒，Codex 等待状态通过 `uiSession.registerPendingInteraction` 提供给原生侧栏。打开会话仅清除浏览器中的 DSH 完成提醒。
+首次状态及后续广播都更新 DSH 会话列表，Codex 等待状态通过 `uiSession.registerPendingInteraction` 提供给原生侧栏。DSH 的 `completionUnread` 投影自 Codex 的 `firstUnread`。清单和线程快照附带原生回执。App Server 的回执事件仅发给线程订阅者，因此被动浏览在本机额外观察原生回执数据库，只读未读 ID，初次同步后只推送差量。网页打开和切换会话时保留 Codex 的原生阅读状态。
 
 浏览器通过 DSH 的同源 API 访问 Host，继续使用 DSH 默认的访问令牌和 Cookie。独立 Profile 使用项目本地目录，与日常 DSH 服务并行运行。项目和聊天历史由 Codex 持有。首次运行时 Host 先读取 Codex 的状态库清单，再在后台补齐尚未收进清单的旧会话。列表缓存保存在项目的运行目录，包含原生 ID、路径、标题、时间和 Codex 列表提供的预览。重启时可以先展示清单，再从原来的 Codex 端点刷新。完整消息和工具记录在打开会话时按需读取。
 

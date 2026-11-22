@@ -41,15 +41,25 @@ test('stock window appends native tail changes, prepends older history, and keep
   const currentSource = mockTransport(t)
   const received = []
   let dispose
-  const history = createCodexHistory({ effect(callback) { dispose = callback() } }, { id: 'thread' }, (...update) => received.push(update))
+  const reading = []
+  const history = createCodexHistory({ effect(callback) { dispose = callback() } }, { id: 'thread' }, {
+    setStatus: (...update) => received.push(update),
+    setReadState: (...update) => reading.push(update),
+    applyUnread: update => reading.push(update),
+  })
   const source = currentSource()
   const emit = frame => source.onmessage({ data: JSON.stringify(frame) })
   assert.equal(source.url.searchParams.get('threadId'), 'thread')
 
   const active = { type: 'active', activeFlags: [] }
-  await emit({ type: 'snapshot', page: { data: [turn('new', 'inProgress', [ask])], nextCursor: 'older' }, status: active, mode: 'live' })
+  const readState = { firstUnread: null, revision: 'one' }
+  await emit({ type: 'snapshot', page: { data: [turn('new', 'inProgress', [ask])], nextCursor: 'older' }, status: active, readState, mode: 'live' })
   await history.ready
   assert.deepEqual(received, [['thread', active]])
+  const unread = { type: 'unread', replace: true, added: ['background'], removed: [] }
+  await emit(unread)
+  await emit({ type: 'notification', notification: { method: 'thread/readState/changed', params: { threadId: 'background', readState } } })
+  assert.deepEqual(reading, [['thread', readState], unread, ['background', readState]])
   const initial = history.events.getSnapshot()
   assert.equal(history.session.getSnapshot().running, true)
   assert.equal(initial.change.kind, 'replace')

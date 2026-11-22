@@ -1,4 +1,4 @@
-import { describeLiveStatus, publishPendingStatus } from './live-status.js'
+import { describeLiveStatus, installUnreadStatus, publishPendingStatus } from './live-status.js'
 
 const slot = 'conversation.session.header.utilities'
 const locale = 'codex.session.status'
@@ -33,6 +33,7 @@ function SessionLiveStatus({ useSession, t }) {
 /** 沿用 DSH 侧栏状态，标题栏补充连接与异常信息。 */
 export function installLiveStatus(ctx, catalog) {
   ctx.inject(['uiSession'], scope => {
+    scope.effect(() => installUnreadStatus(scope.uiSession.sessionStatus, catalog))
     const publish = scope.uiSession.registerPendingInteraction(() => 0)
     scope.effect(() => publishPendingStatus(catalog, publish))
   })

@@ -1,10 +1,11 @@
 import { openCodexReader } from './app-server.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail } from './live-history.mjs'
+import { watchNativeUnread } from './unread-watch.mjs'
 
 const encoder = new TextEncoder()
 const catalogMethods = new Set([
-  'thread/started', 'thread/status/changed', 'thread/name/updated', 'thread/project/updated',
+  'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
   'thread/archived', 'thread/unarchived', 'thread/deleted', 'project/changed',
 ])
 
@@ -62,28 +63,29 @@ export function createWatchRoute(socketPath, ownerSignal) {
             if (message.id !== undefined || !catalogMethods.has(message.method)) return
             if (!tail) early.push(message)
             else send({ type: 'notification', notification: message })
-            if (message.params?.threadId === threadId) wake()
+            if (message.params?.threadId === threadId && message.method !== 'thread/readState/changed') wake()
           }
 
           async function follow() {
             try {
               connection = await openCodexReader(socketPath, signal, notify)
-              const [{ thread }, config] = await Promise.all([
+              const [{ thread, readState }, config] = await Promise.all([
                 connection.request('thread/read', { threadId }),
                 connection.request('config/read', { includeLayers: false }).catch(() => null),
               ])
+              const sqliteHome = config?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || connection.initialize.codexHome
               const watching = watchNativeHistory({
                 thread,
-                codexHome: connection.initialize.codexHome,
-                sqliteHome: config?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || undefined,
+                sqliteHome,
               }, wake, signal)
               const page = await connection.request('thread/turns/list', {
                 threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
               })
               tail = createHistoryTail(connection.request, thread, page)
-              send({ type: 'snapshot', page, status: thread.status, mode: watching ? 'live' : 'history' })
+              send({ type: 'snapshot', page, status: thread.status, readState, mode: watching ? 'live' : 'history' })
               for (const message of early) send({ type: 'notification', notification: message })
               early.length = 0
+              watchNativeUnread(sqliteHome, send, signal)
               if (dirty) wake()
               await connection.closed
             } catch {

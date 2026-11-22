@@ -12,7 +12,7 @@ function pageBounds(entry) {
 }
 
 /** 给原版聊天渲染器提供由会话引用持有的历史窗口和只读实时状态。 */
-export function createCodexHistory(ctx, thread, setStatus) {
+export function createCodexHistory(ctx, thread, catalog) {
   const controller = new AbortController()
   const { signal } = controller
   const state = createSnapshotStore({
@@ -146,7 +146,7 @@ export function createCodexHistory(ctx, thread, setStatus) {
     return page
   }
 
-  async function receiveSnapshot({ page, status, mode }) {
+  async function receiveSnapshot({ page, status, mode, readState }) {
     if (!opened) {
       await addOlderPage(page)
       opened = true
@@ -177,7 +177,8 @@ export function createCodexHistory(ctx, thread, setStatus) {
     }
     publish()
     publishState({ mode, status })
-    if (status) setStatus?.(thread.id, status)
+    if (status) catalog?.setStatus(thread.id, status)
+    if (readState !== undefined) catalog?.setReadState(thread.id, readState)
     markReady()
   }
 
@@ -198,15 +199,19 @@ export function createCodexHistory(ctx, thread, setStatus) {
   function receive(frame) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
+      if (frame.type === 'unread') return catalog?.applyUnread(frame)
       if (frame.type === 'change') {
         await updateTurn(frame.turn, frame.items)
         publish()
         publishState()
       } else if (frame.type === 'notification') {
         const { method, params } = frame.notification
-        if (method !== 'thread/status/changed') return
-        if (params.threadId === thread.id) publishState({ status: params.status })
-        setStatus?.(params.threadId, params.status)
+        if (method === 'thread/status/changed') {
+          if (params.threadId === thread.id) publishState({ status: params.status })
+          catalog?.setStatus(params.threadId, params.status)
+        } else if (method === 'thread/readState/changed') {
+          catalog?.setReadState(params.threadId, params.readState)
+        }
       }
     })
   }

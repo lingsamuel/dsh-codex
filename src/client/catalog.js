@@ -6,6 +6,7 @@ export function createHistoryCatalog(signal) {
   const store = createSnapshotStore({
     projects: [],
     threads: [],
+    unreadIds: [],
     workspacePaths: {},
     selected: null,
     busy: true,
@@ -13,6 +14,8 @@ export function createHistoryCatalog(signal) {
   })
   let refreshing = false
   const observedStatuses = new Map()
+  const observedReadStates = new Map()
+  let followsLocalReceipts = false
 
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
@@ -20,6 +23,10 @@ export function createHistoryCatalog(signal) {
       state.threads = threads.map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
+      if (!followsLocalReceipts) {
+        state.unreadIds = threads.filter(({ id, readState }) =>
+          (observedReadStates.get(id) ?? readState?.firstUnread != null)).map(thread => thread.id)
+      }
       state.workspacePaths = workspacePaths
       state.selected = state.threads.find(thread => thread.id === state.selected?.id) ?? state.selected
       state.busy = false
@@ -53,6 +60,24 @@ export function createHistoryCatalog(signal) {
       store.update(state => {
         const thread = state.threads.find(item => item.id === threadId)
         if (thread) thread.status = status
+      })
+    },
+    setReadState(threadId, readState) {
+      if (followsLocalReceipts) return
+      const unread = readState?.firstUnread != null
+      observedReadStates.set(threadId, unread)
+      store.update(state => {
+        if (unread && !state.unreadIds.includes(threadId)) state.unreadIds.push(threadId)
+        if (!unread) state.unreadIds = state.unreadIds.filter(id => id !== threadId)
+      })
+    },
+    applyUnread({ replace, added, removed }) {
+      followsLocalReceipts = true
+      store.update(state => {
+        const ids = new Set(replace ? [] : state.unreadIds)
+        for (const id of removed) ids.delete(id)
+        for (const id of added) ids.add(id)
+        state.unreadIds = [...ids]
       })
     },
     select(thread) {
