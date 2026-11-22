@@ -1,4 +1,4 @@
-import { readCodexPages } from './app-server.mjs'
+import { CodexRpcError, readCodexPages } from './app-server.mjs'
 
 const turnList = 'thread/turns/list'
 const itemList = 'thread/items/list'
@@ -45,17 +45,19 @@ export function createHistoryTail(request, thread, initialPage) {
     async readChanges() {
       const head = await request(turnList, { threadId, limit: 1, sortDirection: 'desc', itemsView })
       const latest = head.data[0]
-      if (!latest) {
-        if (lastTurnId) throw new Error('Codex 历史已变更，需要重新同步。')
-        return []
+      if (!latest) return lastTurnId ? null : []
+      if (latest.id !== lastTurnId && seen.has(latest.id)) return null
+      let turns = [latest]
+      if (latest.id !== lastTurnId) {
+        try {
+          turns = await readThrough(request, turnList, { threadId, limit: 100, sortDirection: 'asc', itemsView }, tailCursor)
+        } catch (error) {
+          // 原生已发出的游标变为无效，通常是回退删去了它的锚点。
+          if (tailCursor && error instanceof CodexRpcError && error.code === -32602) return null
+          throw error
+        }
       }
-      if (latest.id !== lastTurnId && seen.has(latest.id)) {
-        throw new Error('Codex 历史尾部已回退，需要重新同步。')
-      }
-      const turns = latest.id === lastTurnId
-        ? [latest]
-        : await readThrough(request, turnList, { threadId, limit: 100, sortDirection: 'asc', itemsView }, tailCursor)
-      if (!turns.some(turn => turn.id === latest.id)) throw new Error('Codex 历史尾部已变更，需要重新同步。')
+      if (!turns.some(turn => turn.id === latest.id)) return null
 
       const changes = []
       for (const { items, ...turn } of turns) {

@@ -2,7 +2,9 @@ async function fetchResult(url, options) {
   const response = await fetch(url, options)
   if (response.status === 401) throw new Error('网页访问已过期，请从 DSH 的启动链接重新打开。')
   const result = await response.json()
-  if (!response.ok) throw Object.assign(new Error(result.error), { status: response.status, readState: result.readState })
+  if (!response.ok) throw Object.assign(new Error(result.error), {
+    status: response.status, readState: result.readState, reason: result.reason, activity: result.activity,
+  })
   return result
 }
 

@@ -4,6 +4,8 @@ import { installLiveStatus } from './native-dsh/live-status.jsx'
 import { installMessageSearch } from './native-dsh/message-search.jsx'
 import { installArchiveView } from './native-dsh/archive-view.jsx'
 import { installTurnChanges } from './native-dsh/turn-changes.jsx'
+import { installTurnRevert } from './native-dsh/turn-revert.jsx'
+import { installMessageEdit } from './native-dsh/message-edit.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
@@ -18,11 +20,13 @@ export function apply(ctx) {
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   installComposer(ctx, catalog.store)
-  provideCodexControllers(ctx, catalog)
+  const deleteSession = provideCodexControllers(ctx, catalog)
   installLiveStatus(ctx, catalog.store)
   installMessageSearch(ctx)
-  installArchiveView(ctx)
+  installArchiveView(ctx, deleteSession)
   installTurnChanges(ctx)
+  installTurnRevert(ctx)
+  installMessageEdit(ctx)
   installModelPicker(ctx, controller.signal)
   installCommands(ctx)
   installReadReceipts(ctx, catalog)

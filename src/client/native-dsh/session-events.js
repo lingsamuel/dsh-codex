@@ -9,6 +9,7 @@ import { remoteFailure } from './catalog.js'
 import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
+import { userInputText } from '../../shared/user-input.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
@@ -86,13 +87,14 @@ export function createCodexHistory(ctx, thread, catalog) {
     events.set({ entries, hasMore, revision: previous.revision + 1, change })
   }
 
-  function publishState({ mode, status, historyMode, canAcceptDirectInput } = {}) {
+  function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
     const lastTurnStatus = transcript.getTurn(rows.at(-1)?.id)?.status
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
       if (status !== undefined) current.live.status = status
       if (historyMode !== undefined) current.historyMode = historyMode
       if (canAcceptDirectInput !== undefined) current.canAcceptDirectInput = canAcceptDirectInput
+      if (archived !== undefined) current.archived = Boolean(archived)
       current.live.lastTurnStatus = lastTurnStatus
       current.running = current.live.mode === 'live' && current.live.status?.type === 'active'
       current.hasMore = Boolean(nextCursor)
@@ -205,8 +207,15 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput }) {
-    if (!opened) {
+  function clearHistory() {
+    for (const { id } of rows) transcript.forgetTurn(id)
+    rows.length = 0
+    attachments.clear()
+  }
+
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, replace }) {
+    if (!opened || replace) {
+      if (replace) clearHistory()
       await addOlderPage(page)
       opened = true
     } else {
@@ -222,7 +231,11 @@ export function createCodexHistory(ctx, thread, catalog) {
       const start = recent.findIndex(turn => transcript.getTurn(turn.id))
       const refreshed = recent.slice(Math.max(start, 0))
       const anchor = recent.length ? rows.findIndex(row => row.id === recent[start]?.id) : 0
-      if (anchor >= 0) {
+      if (anchor < 0) {
+        // 断线期间整个已加载窗口可能被回退。游标已找不到交集时从实际快照重建。
+        clearHistory()
+        nextCursor = cursor
+      } else {
         // 最新快照可能来自 CLI 回退。只移除刷新窗口中的失效轮次，保留其前面的已加载历史。
         const currentIds = new Set(refreshed.map(turn => turn.id))
         for (let index = rows.length - 1; index >= anchor; index--) {
@@ -231,17 +244,20 @@ export function createCodexHistory(ctx, thread, catalog) {
           rows.splice(index, 1)
         }
       }
-      if (!rows.length) nextCursor = page.nextCursor
+      if (!rows.length) nextCursor = cursor
       for (const turn of refreshed) await updateTurn(turn)
     }
     publish()
-    publishState({ mode, status, historyMode, canAcceptDirectInput })
+    publishState({ mode, status, historyMode, canAcceptDirectInput, archived })
     if (selection !== undefined) publishModel(selection)
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
     publishReadingReceipt(readState)
-    if (readState !== undefined) catalog?.seedReadState(thread.id, readState)
+    if (readState !== undefined) {
+      if (replace) catalog?.setReadState(thread.id, readState)
+      else catalog?.seedReadState(thread.id, readState)
+    }
     markReady()
     void refreshOutline()
   }
@@ -362,6 +378,29 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
   }
 
+  function turnAtEnd(seq) {
+    return rows.find(({ entries }) => {
+      const { event } = entries.at(-1)
+      return event.type === 'turn/end' && event.seq === seq
+    })?.id
+  }
+
+  function rowAtTurn(turn) {
+    return rows.find(({ entries }) => entries[0].event.data.turn === turn)
+  }
+
+  function editableInput(turn, sequence) {
+    const row = rowAtTurn(turn)
+    const source = transcript.getTurn(row?.id)
+    if (!source || source.status === 'inProgress') return
+    const input = row.entries.find(({ event }) => event.type === 'user/message')?.event
+    if (input?.seq !== sequence) return
+    const message = source.items.find(item => item.type === 'userMessage')
+    if (!message) return
+    return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: rows.at(-1).id,
+      hasAttachments: message.content.some(part => part.type !== 'text') }
+  }
+
   openLiveWatch(thread.id, { receive, changeMode }, signal)
   return {
     events,
@@ -372,6 +411,9 @@ export function createCodexHistory(ctx, thread, catalog) {
       loadOlder,
       loadThrough,
       findMessage,
+      turnAtEnd,
+      turnIdAt: turn => rowAtTurn(turn)?.id,
+      editableInput,
       publishModel,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       async readAttachment(id) {

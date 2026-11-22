@@ -24,7 +24,7 @@ export function readProjects(request) {
   return collectPages(params => readProjectPage(request, params))
 }
 
-async function readThreads(request, filters) {
+export async function readThreads(request, filters) {
   return collectPages(async params => {
     const page = await request('thread/list', {
       ...params, modelProviders: [], sortKey: 'updated_at', ...filters,

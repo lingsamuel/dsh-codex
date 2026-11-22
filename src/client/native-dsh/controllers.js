@@ -37,7 +37,7 @@ function readonlyBinding(ctx, thread, catalog) {
   }
 }
 
-/** 仅安装浏览所需的客户端控制器。选择与保留引用都留在当前页面。 */
+/** 为 DSH 提供 Codex 会话与工作区控制器。选择与保留引用都留在当前页面。 */
 export function provideCodexControllers(ctx, catalog) {
   const projected = observe(catalog.store, projectCatalog)
   const list = createSnapshotStore({ ...projected.getSnapshot().sessions, phase: 'pending' })
@@ -114,7 +114,15 @@ export function provideCodexControllers(ctx, catalog) {
       return { sessionId: id, binding, ready: binding.ready.then(() => binding), release, [Symbol.dispose]: release }
     },
     create: rejectWrite,
-    fork: rejectWrite,
+    async fork({ sessionId: threadId, atSeq, onCreated }) {
+      const lastTurnId = atSeq === undefined ? undefined : sessions.binding(threadId)?.session.turnAtEnd(atSeq)
+      if (atSeq !== undefined && !lastTurnId) throw new Error('找不到可分支的 Codex 轮次。')
+      const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'fork', lastTurnId })
+      // DSH 的回复分支会立即打开新会话，必须先让保留引用能从原生目录找到它。
+      catalog.acceptThread(thread, workspacePaths)
+      onCreated?.(thread.id)
+      return thread.id
+    },
     async using(target, options, operation) {
       const reference = sessions.retain(target, options)
       try {
@@ -132,8 +140,21 @@ export function provideCodexControllers(ctx, catalog) {
     rename: rejectWrite,
     delete: rejectWrite,
     insertBefore: rejectWrite,
-    archiveSession: rejectWrite,
-    unarchiveSession: rejectWrite,
+    async archiveSession(threadId, { stopActivity } = {}) {
+      try {
+        await writeThreadAction({ threadId, action: 'archive', stopActivity })
+      } catch (error) {
+        if (error.reason !== 'archiveActive') throw error
+        // 复用 DSH 对正在执行的会话显示的停止并归档确认。
+        throw Object.assign(error, { name: 'WorkspaceArchiveError',
+          rpcError: { code: 'workspace/session-active', details: { activity: error.activity } },
+        })
+      }
+    },
+    async unarchiveSession(threadId) {
+      const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'unarchive' })
+      catalog.acceptThread({ ...thread, archived: false }, workspacePaths)
+    },
     pinSession: threadId => writeThreadAction({ threadId, action: 'pin', pinned: true }),
     unpinSession: threadId => writeThreadAction({ threadId, action: 'pin', pinned: false }),
   }
@@ -144,8 +165,15 @@ export function provideCodexControllers(ctx, catalog) {
   ctx.effect(() => catalog.store.subscribe(syncSessions))
   ctx.inject(['uiWorkspace'], scope => {
     scope.effect(() => {
-      function initialize() {
-        const { busy, error, selected, threads } = catalog.store.getSnapshot()
+      function reconcile() {
+        const { busy, error, selected, threads, childThreads } = catalog.store.getSnapshot()
+        if (initialization === 'ready' && selected && !childThreads[selected.id]
+          && !threads.some(thread => thread.id === selected.id)) {
+          const next = threads.find(thread => !thread.archived)
+          if (next) scope.uiWorkspace.openSession(next.id)
+          else scope.uiWorkspace.clearMain()
+          return
+        }
         if (initialization !== 'waiting' || busy || error) return
         // DSH 在两个列表就绪后恢复主视图。先打开已有会话，让它无需补建空白会话。
         initialization = 'opening'
@@ -154,8 +182,13 @@ export function provideCodexControllers(ctx, catalog) {
         initialization = 'ready'
         syncSessions()
       }
-      initialize()
-      return catalog.store.subscribe(initialize)
+      reconcile()
+      return catalog.store.subscribe(reconcile)
     })
   })
+
+  return async threadId => {
+    await writeThreadAction({ threadId, action: 'delete' })
+    catalog.removeThread(threadId)
+  }
 }

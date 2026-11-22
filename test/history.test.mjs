@@ -84,6 +84,107 @@ test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', a
     ['thread/readState/update', 'thread/name/set', 'thread/section/move'])
 })
 
+test('会话生命周期使用原生归档、删除和按轮次分支', async t => {
+  const source = { id: 'source', cwd: '/mock', status: { type: 'active' } }
+  const branch = { id: 'branch', cwd: source.cwd, forkedFromId: source.id }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: source } }),
+    'thread/list': ({ archived, ancestorThreadId }) => {
+      assert.equal(ancestorThreadId, source.id)
+      return { result: { data: archived ? [{ id: 'child', agentNickname: '助手', status: { type: 'active' } }] : [] } }
+    },
+    'thread/archive': () => ({ result: {} }),
+    'thread/unarchive': () => ({ result: { thread: source } }),
+    'thread/delete': () => ({ result: {} }),
+    'thread/fork': () => ({ result: { thread: branch } }),
+  })
+  const post = (action, fields) => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: source.id, action, ...fields }),
+  })
+
+  const archive = await post('archive')
+  assert.equal(archive.status, 409)
+  const refusal = await archive.json()
+  assert.equal(refusal.reason, 'archiveActive')
+  assert.deepEqual(refusal.activity, [{ kind: 'turn' }])
+  source.status.type = 'idle'
+  const activeChild = await post('archive')
+  assert.equal(activeChild.status, 409)
+  assert.deepEqual((await activeChild.json()).activity, [{ kind: 'subagent', items: [{ id: 'child', label: '助手' }] }])
+  assert.equal((await post('archive', { stopActivity: true })).status, 200)
+  assert.equal((await post('unarchive')).status, 200)
+  assert.equal((await post('delete')).status, 200)
+  assert.equal((await post('fork', { lastTurnId: '' })).status, 400)
+  assert.deepEqual((await (await post('fork')).json()).thread, branch)
+  assert.deepEqual((await (await post('fork', { lastTurnId: 'earlier', ephemeral: true })).json()).thread, branch)
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/') && method !== 'thread/list').map(({ method, params }) => [method, params]), [
+    ['thread/read', { threadId: source.id }],
+    ['thread/read', { threadId: source.id }],
+    ['thread/archive', { threadId: source.id }],
+    ['thread/unarchive', { threadId: source.id }],
+    ['thread/delete', { threadId: source.id }],
+    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true }],
+    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true, lastTurnId: 'earlier' }],
+  ])
+})
+
+test('回退检查原生线程状态，并以所选轮次为排除边界', async t => {
+  const thread = { id: 'source', status: { type: 'active' }, historyMode: 'paginated' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/revert': () => ({ result: { thread } }),
+  })
+  const post = beforeTurnId => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: thread.id, action: 'revert', beforeTurnId }),
+  })
+  assert.equal((await post(undefined)).status, 400)
+  assert.equal((await post('earlier')).status, 409)
+  thread.status.type = 'notLoaded'
+  assert.equal((await post('earlier')).status, 409)
+  thread.status.type = 'idle'
+  assert.equal((await post('earlier')).status, 200)
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/revert').map(({ params }) => params), [
+    { threadId: thread.id, beforeTurnId: 'earlier' },
+  ])
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+})
+
+test('编辑原生用户消息保留附件，回退后才发送，且只接受轮首消息', async t => {
+  const image = { type: 'localImage', path: '/workspace/illustration.png' }
+  const mention = { type: 'mention', name: 'example', path: '/workspace/example.txt' }
+  const thread = { id: 'source', status: { type: 'idle' }, historyMode: 'paginated' }
+  let rejectSend = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/items/list': ({ turnId }) => {
+      assert.equal(turnId, 'selected')
+      return { result: { data: [{ item: { type: 'userMessage', id: 'opening', content: [
+        image, { type: 'text', text: 'original', text_elements: [] }, mention,
+      ] } }, { item: { type: 'userMessage', id: 'later', content: [] } }] } }
+    },
+    'thread/turns/list': () => ({ result: { data: [{ id: 'latest' }] } }),
+    'thread/read': () => ({ result: { thread } }),
+    'thread/revert': () => ({ result: { thread } }),
+    'turn/start': () => rejectSend ? { error: { code: -32600, message: 'Native provider offline' } } : { result: { turn: { id: 'replacement' } } },
+  })
+  const edit = (itemId, headTurnId = 'latest') => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'edit', threadId: thread.id, beforeTurnId: 'selected', itemId, headTurnId, text: 'edited\nmessage' }),
+  })
+  assert.equal((await edit('later')).status, 400)
+  assert.equal((await edit('opening', 'stale')).status, 409)
+  assert.deepEqual((await (await edit('opening')).json()).turn, { id: 'replacement' })
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/revert' || method === 'turn/start').map(({ method, params }) => [method, params]), [
+    ['thread/revert', { threadId: thread.id, beforeTurnId: 'selected' }],
+    ['turn/start', { threadId: thread.id, input: [image, { type: 'text', text: 'edited\nmessage', text_elements: [] }, mention] }],
+  ])
+  rejectSend = true
+  const failed = await edit('opening')
+  assert.equal(failed.status, 409)
+  assert.match((await failed.json()).error, /历史已回退.*Native provider offline/)
+})
+
 test('模型目录逐页读取各 Codex provider 的原生模型和等级', async t => {
   const model = (id, isDefault, effort) => ({ id, model: id, displayName: id, isDefault, defaultReasoningEffort: effort,
     supportedReasoningEfforts: [{ reasoningEffort: effort, description: '原生等级' }] })
@@ -438,6 +539,30 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
   assert.deepEqual(await read(), { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
   assert.deepEqual(fixture.messages.map(message => message.method).sort(),
     ['initialize', 'initialized', 'config/read'].sort())
+  await reader.cancel()
+})
+
+test('回退通知在同一 SSE 连接替换历史尾部和游标', { timeout: 5000 }, async t => {
+  const threadId = 'observed'
+  const kept = { id: 'kept', status: 'completed', items: [] }
+  let turns = [{ ...kept, id: 'removed' }, kept]
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, historyMode: 'paginated' } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: turns, nextCursor: turns[0].id } }),
+  })
+  const response = await fixture.get(`/api/codex/watch?threadId=${threadId}`)
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal((await read()).page.nextCursor, 'removed')
+
+  turns = [kept]
+  fixture.broadcast({ method: 'thread/reverted', params: { threadId } })
+  const snapshot = await read()
+  assert.equal(snapshot.type, 'snapshot')
+  assert.equal(snapshot.replace, true)
+  assert.deepEqual(snapshot.page, { data: [kept], nextCursor: 'kept' })
+  assert.equal(fixture.messages.filter(({ method }) => method === 'initialize').length, 1)
   await reader.cancel()
 })
 

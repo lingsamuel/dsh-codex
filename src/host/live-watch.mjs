@@ -40,6 +40,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let timer
           let reading = false
           let dirty = false
+          let reset = false
           let tail
           let pendingReadState
           let receiptSequence = 0
@@ -48,6 +49,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let connection
           let catalogReady = false
           let catalogQueue = Promise.resolve()
+          let mode
           const early = []
 
           async function sendFacts() {
@@ -76,13 +78,19 @@ export function createWatchRoute(socketPath, ownerSignal) {
               const receipt = receiptSequence
               pendingReadState = undefined
               try {
-                await Promise.all([tail.readChanges().then(updates => {
+                const updates = reset ? null : await tail.readChanges()
+                if (!updates || reset) {
+                  reset = false
+                  const reading = await connection.request('thread/read', { threadId })
+                  await sendSnapshot(reading, true)
+                } else {
                   for (const update of updates) send({ type: 'change', ...update })
                   // Codex 在保存新结果后才广播回执。在读取并发出该历史后暴露此版本。
                   if (readState !== undefined && receipt === receiptSequence) send({ type: 'reading-receipt', readState })
-                }), sendFacts()])
+                }
+                await sendFacts()
               } catch (error) {
-                connection.close(error)
+                if (!reset) connection.close(error)
               } finally {
                 reading = false
                 if (dirty) wake()
@@ -109,8 +117,15 @@ export function createWatchRoute(socketPath, ownerSignal) {
             if (message.params?.threadId !== threadId) return
             const goal = goalMethods.has(message.method)
             const settings = message.method === 'thread/settings/updated'
-            if (!catalogMethods.has(message.method) && !goal && !settings) return
+            const reverted = message.method === 'thread/reverted'
+            if (!catalogMethods.has(message.method) && !goal && !settings && !reverted) return
             if (!tail) { early.push(message); return }
+            if (reverted) {
+              // 原生回退会使已有游标失效。尾部读取和原生通知均可触发快照重建。
+              reset = true
+              wake()
+              return
+            }
             if (message.method === 'thread/readState/changed') {
               receiptSequence++
               pendingReadState = undefined
@@ -121,6 +136,16 @@ export function createWatchRoute(socketPath, ownerSignal) {
             }
             send({ type: 'notification', notification: message })
             if (!goal && !settings) wake()
+          }
+
+          async function sendSnapshot({ thread, readState }, replace = false) {
+            const page = await connection.request('thread/turns/list', {
+              threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
+            })
+            tail = createHistoryTail(connection.request, thread, page)
+            send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
+              selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
+              mode, ...(replace && { replace: true }) })
           }
 
           async function follow() {
@@ -139,22 +164,18 @@ export function createWatchRoute(socketPath, ownerSignal) {
                 await connection.closed
                 return
               }
-              const [{ thread, readState }, config] = await Promise.all([
+              const [reading, config] = await Promise.all([
                 connection.request('thread/read', { threadId }),
                 configRead,
               ])
+              const { thread } = reading
               rolloutFacts = createRolloutFacts(thread.path, signal)
               const watching = watchNativeHistory({
                 thread,
                 sqliteHome: sqliteDirectory(config),
               }, wake, signal)
-              const page = await connection.request('thread/turns/list', {
-                threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
-              })
-              tail = createHistoryTail(connection.request, thread, page)
-              send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
-                selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput,
-                mode: watching ? 'live' : 'history' })
+              mode = watching ? 'live' : 'history'
+              await sendSnapshot(reading)
               for (const message of early) notify(message)
               early.length = 0
               void sendFacts()

@@ -40,5 +40,5 @@ test('原生历史头部回退时重新同步，不把已撤回轮次留在增�
     data: [{ id: 'removed', status: 'completed', items: [] }, previous],
     backwardsCursor: 'removed-anchor',
   })
-  await assert.rejects(tail.readChanges(), /历史尾部已回退/)
+  assert.equal(await tail.readChanges(), null)
 })

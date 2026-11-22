@@ -15,6 +15,7 @@ await build({
   platform: 'browser',
   external: [
     'react',
+    'react-dom',
     'react/jsx-runtime',
     '@deepseek-ai/dsh-client-store',
     '@deepseek-ai/dsh-client-ui-primitives',

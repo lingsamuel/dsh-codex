@@ -171,6 +171,12 @@ export function createHistoryCatalog(signal) {
     store,
     loadChildren,
     setReadState,
+    acceptThread(thread, workspacePaths) {
+      receive({ type: 'thread', id: thread.id, thread, workspacePaths })
+    },
+    removeThread(id) {
+      receive({ type: 'thread', id, thread: null })
+    },
     seedReadState(threadId, readState) {
       if (!store.getSnapshot().readStates[threadId]) setReadState(threadId, readState)
     },
