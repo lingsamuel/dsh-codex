@@ -151,6 +151,18 @@ test('向已连接的 daemon 查询原生项目', async t => {
   assert.equal(messages[0].params.capabilities.experimentalApi, true)
 })
 
+test('会话详情保留 Codex 的模型设置和 Goal，两个读取共用连接', async t => {
+  const goal = { threadId: 'native', objective: '已有目标', status: 'paused', tokensUsed: 500 }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'native', model: 'native-model', reasoningEffort: 'high' } } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+  })
+  assert.deepEqual(await (await get('/api/codex/thread-info?threadId=native')).json(), {
+    model: 'native-model', reasoningEffort: 'high', goal,
+  })
+  assert.deepEqual(messages.map(message => message.method).sort(), ['initialize', 'initialized', 'thread/read', 'thread/goal/get'].sort())
+})
+
 test('已淘汰的分页游标返回上游错误', async t => {
   const { get } = await fakeCodex(t, {
     'thread/turns/list': () => ({ error: { code: -32602, message: 'invalid cursor' } }),

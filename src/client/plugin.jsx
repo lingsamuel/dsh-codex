@@ -4,6 +4,7 @@ import { installLiveStatus } from './native-dsh/live-status.jsx'
 import { installMessageSearch } from './native-dsh/message-search.jsx'
 import { installArchiveView } from './native-dsh/archive-view.jsx'
 import { installTurnChanges } from './native-dsh/turn-changes.jsx'
+import { installSessionInfo } from './native-dsh/session-info.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -18,6 +19,7 @@ export function apply(ctx) {
   installMessageSearch(ctx)
   installArchiveView(ctx)
   installTurnChanges(ctx)
+  installSessionInfo(ctx)
   ctx.slots.inject('conversation.composer.bar', () => ctx.slots.register(
     { name: 'conversation.composer.bar', priority: -1 },
     HistoryStatus,

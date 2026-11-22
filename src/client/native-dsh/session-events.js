@@ -37,6 +37,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
+    goalRevision: 0,
     live: { mode: 'connecting', status: thread.status, lastTurnStatus: undefined },
   })
   const events = createSnapshotStore({
@@ -243,6 +244,11 @@ export function createCodexHistory(ctx, thread, catalog) {
           catalog?.setStatus(params.threadId, params.status)
         } else if (method === 'thread/readState/changed') {
           catalog?.setReadState(params.threadId, params.readState)
+        } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
+          state.update(current => {
+            current.goal = params.goal ?? null
+            current.goalRevision++
+          })
         }
       }
     })

@@ -9,6 +9,7 @@ const catalogMethods = new Set([
   'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
   'thread/archived', 'thread/unarchived', 'thread/deleted', 'thread/section/changed', 'project/changed',
 ])
+const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
 export function createWatchRoute(socketPath, ownerSignal) {
@@ -65,8 +66,9 @@ export function createWatchRoute(socketPath, ownerSignal) {
 
           function notify(message) {
             // 只处理通知。账户和服务端交互请求不进入此通道。
-            if (message.id !== undefined || !catalogMethods.has(message.method)) return
+            if (message.id !== undefined) return
             if (catalog) {
+              if (!catalogMethods.has(message.method)) return
               if (!catalogReady) early.push(message)
               else catalogQueue = catalogQueue.then(async () => {
                 if (signal.aborted) return
@@ -79,9 +81,11 @@ export function createWatchRoute(socketPath, ownerSignal) {
               return
             }
             if (message.params?.threadId !== threadId) return
+            const goal = goalMethods.has(message.method)
+            if (!catalogMethods.has(message.method) && !goal) return
             if (!tail) early.push(message)
             else send({ type: 'notification', notification: message })
-            if (message.params?.threadId === threadId && message.method !== 'thread/readState/changed') wake()
+            if (message.method !== 'thread/readState/changed' && !goal) wake()
           }
 
           async function follow() {
