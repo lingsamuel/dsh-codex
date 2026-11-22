@@ -26,7 +26,8 @@ function RunningCount({ sessionId, useBackgroundTerminals, t }) {
 
 function SidebarIndicator({ sessionId, useBackgroundTerminals, t }) {
   const count = useBackgroundTerminals(state => state.get(sessionId)?.length ?? 0)
-  return count > 0 && <span style={{ display: 'inline-flex', width: 14, justifyContent: 'center' }}>
+  // 行尾插槽在时间之后声明，只把这个蓝点排到时间前面。
+  return count > 0 && <span style={{ order: -1, display: 'inline-flex', width: 14, justifyContent: 'center' }}>
     <span aria-hidden style={{ width: 6, height: 6, borderRadius: '50%', background: runningIndicatorColor }} />
     <span style={visuallyHidden}>{t('running', { count })}</span>
   </span>
