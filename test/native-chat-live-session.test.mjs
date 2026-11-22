@@ -18,7 +18,9 @@ const hook = registerHooks({
   },
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
+const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
 hook.deregister()
+const { createSnapshotStore } = await import(storeModule)
 
 function mockTransport(t) {
   const original = { document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
@@ -39,6 +41,55 @@ function turn(id, status, items) {
 
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
+
+test('新分叉领先于已有普通会话并保留手动顺序', async t => {
+  mockTransport(t)
+  const source = { id: 'source', cwd: '/workspace', updatedAt: 1 }
+  const store = createSnapshotStore({
+    projects: [], threads: [source, { ...source, id: 'another' }], childThreads: {},
+    workspacePaths: {},
+  })
+  const fork = { ...source, id: 'fork', updatedAt: 2 }
+  globalThis.fetch = async (url, { body }) => {
+    assert.equal(url.pathname, '/api/codex/thread-action')
+    assert.deepEqual(JSON.parse(body), { action: 'fork', threadId: source.id })
+    return Response.json({ thread: fork })
+  }
+  const manualOrder = createSnapshotStore({
+    orderBy: 'manual',
+    sessionOrderByAccount: {
+      'directory:/workspace': ['another', 'source'],
+      '__flat_session_order__': ['source', 'unrelated', 'another'],
+      'directory:/other': ['unrelated'],
+    },
+  })
+  const storeInstance = { ...manualOrder, actions: {
+    syncSessionOrders: orders => manualOrder.update(state => Object.assign(state.sessionOrderByAccount, orders)),
+  } }
+  const services = new Map()
+  const ctx = {
+    slots: { entriesOfSlot: () => [{ store: { create: () => storeInstance } }] },
+    provide: (key, value) => services.set(key, value),
+    effect: install => install(),
+    inject() {},
+  }
+  provideCodexControllers(ctx, {
+    store,
+    acceptThread: thread => store.update(state => state.threads.push(thread)),
+  })
+  const expected = {
+    'directory:/workspace': ['fork', 'another', 'source'],
+    '__flat_session_order__': ['fork', 'source', 'unrelated', 'another'],
+    'directory:/other': ['unrelated'],
+  }
+  await services.get('sessions').fork({ sessionId: source.id,
+    onCreated: () => assert.deepEqual(manualOrder.getSnapshot().sessionOrderByAccount, expected) })
+
+  manualOrder.update(state => { state.orderBy = 'updated' })
+  fork.id = 'recent-fork'
+  await services.get('sessions').fork({ sessionId: source.id })
+  assert.deepEqual(manualOrder.getSnapshot().sessionOrderByAccount, expected)
+})
 
 test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', async t => {
   const active = { type: 'active', activeFlags: [] }

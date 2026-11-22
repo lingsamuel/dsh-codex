@@ -6,6 +6,7 @@ import { subagentAddress } from './subagents.js'
 import { writeConversationAction, writeThreadAction } from '../api.js'
 
 const searchResultLimit = 20
+const flatSessionOrderKey = '__flat_session_order__'
 const unsupported = '此操作暂未开放，请使用 Codex CLI。'
 
 async function rejectWrite() {
@@ -141,6 +142,18 @@ export function provideCodexControllers(ctx, catalog) {
       const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'fork', lastTurnId })
       // DSH 的回复分支会立即打开新会话，必须先让保留引用能从原生目录找到它。
       catalog.acceptThread(thread, workspacePaths)
+      const view = ctx.slots.entriesOfSlot('sidebar.workspaces')[0]?.store?.create()
+      const viewState = view?.getSnapshot()
+      if (viewState?.orderBy === 'manual') {
+        const workspace = workspaces.list.getSnapshot().items.find(item => item.sessionIds.includes(thread.id))
+        const orders = {}
+        // 复用侧栏保存顺序的操作，置顶分区继续由 DSH 生成。
+        for (const key of [workspace?.workspaceId ?? '', flatSessionOrderKey]) {
+          const order = viewState.sessionOrderByAccount[key] ?? []
+          orders[key] = [thread.id, ...order.filter(id => id !== thread.id)]
+        }
+        view.actions.syncSessionOrders(orders)
+      }
       onCreated?.(thread.id)
       return thread.id
     },
