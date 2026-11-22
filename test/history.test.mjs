@@ -2490,6 +2490,36 @@ test('侧栏独立接收会话与项目增量，无需打开任何会话', { tim
   await reader.cancel()
 })
 
+test('子代理开始执行后，侧栏收到带父子关系的线程摘要', { timeout: 5000 }, async t => {
+  const active = { type: 'active', activeFlags: [] }
+  const child = {
+    id: 'child', parentThreadId: 'running-parent', status: active,
+    source: { subAgent: { thread_spawn: { parent_thread_id: 'running-parent', agent_path: '/root/check' } } },
+  }
+  let saved = false
+  const fixture = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => saved && threadId === child.id
+      ? { result: { thread: child } }
+      : { error: { code: -32600, message: `thread not found: ${threadId}` } },
+  })
+  const response = await fixture.get('/api/codex/watch?scope=catalog')
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.deepEqual(await read(), { type: 'catalog-ready' })
+
+  const statusChanged = status => ({ method: 'thread/status/changed', params: { threadId: child.id, status } })
+  const idle = statusChanged({ type: 'idle' })
+  // App Server 内部创建的子线程没有 thread/started，首次状态可能早于摘要可读。
+  fixture.broadcast(idle)
+  assert.deepEqual(await read(), { type: 'notification', notification: idle })
+
+  saved = true
+  const started = statusChanged(active)
+  fixture.broadcast(started)
+  assert.deepEqual(await read(), { type: 'notification', notification: started, thread: child, workspacePaths: {} })
+})
+
 test('原生卸载只移除已读不到的空白草稿，保留仍可读取的历史', { timeout: 5000 }, async t => {
   const draft = { id: 'unloaded-draft', source: 'vscode', historyMode: 'paginated', status: { type: 'idle' }, preview: '' }
   const saved = { id: 'unloaded-saved', historyMode: 'paginated', status: { type: 'notLoaded' }, preview: '已写入的消息' }

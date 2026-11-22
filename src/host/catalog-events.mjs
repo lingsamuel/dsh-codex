@@ -12,14 +12,16 @@ export async function readCatalogEvent(notification, request) {
   switch (method) {
     case 'thread/status/changed': {
       const update = { type: 'notification', notification }
-      const unloaded = params.status.type === 'notLoaded'
-      if (!unloaded && params.status.type !== 'idle') return update
+      const status = params.status.type
+      const unloaded = status === 'notLoaded'
+      if (!unloaded && status !== 'idle' && status !== 'active') return update
       try {
-        // 空白草稿卸载时可能没有原生记录。先读回目录状态，再决定是否发布更新。
+        // 子代理可能只有状态通知，且初次空闲时摘要还不可读。运行后读回父子关系。
         return { ...update, ...await summarize(await request('thread/read', { threadId: params.threadId })) }
       } catch (error) {
         if (error instanceof CodexRpcError) {
           if (!unloaded) return update
+          // 卸载的空白草稿可能没有原生记录。
           if (error.code === -32600 && error.message === `thread not loaded: ${params.threadId}`) {
             return { type: 'thread', id: params.threadId, thread: null }
           }
