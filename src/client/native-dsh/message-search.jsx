@@ -5,6 +5,7 @@ import { findRenderedMessage } from './message-anchor.js'
 
 const slot = 'conversation.session.header.utilities'
 const locale = 'codex.history.search'
+const searchTarget = 'data-codex-message-search-target'
 const copy = {
   zh: { title: '在会话中搜索', query: '搜索消息', search: '搜索', close: '关闭', more: '更多结果', busy: '正在查询…', empty: '没有找到消息。', unavailable: '这条消息已无法定位。' },
   en: { title: 'Search conversation', query: 'Search messages', search: 'Search', close: 'Close', more: 'More results', busy: 'Searching…', empty: 'No matching messages.', unavailable: 'This message is no longer available.' },
@@ -30,6 +31,12 @@ const searchStyles = `
     color: inherit; background: var(--dsw-alias-state-warn-secondary); border-radius: 3px;
   }
   .codex-message-search-more { width: 100%; margin-top: 4px; }
+  [${searchTarget}] {
+    outline: 2px solid var(--dsw-alias-state-business-primary);
+    outline-offset: 2px;
+    border-radius: var(--dsw-radius-sm);
+    background-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
+  }
 `
 
 function MessageSearch({ sessionId, findMessage, useSession, t }) {
@@ -41,7 +48,11 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
   const [error, setError] = useState('')
   const operation = useRef()
   const button = useRef()
-  useEffect(() => () => operation.current?.abort(), [])
+  const clearJump = useRef()
+  useEffect(() => () => {
+    operation.current?.abort()
+    clearJump.current?.()
+  }, [])
   if (historyMode !== 'paginated') return null
 
   function close() {
@@ -75,6 +86,25 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
     })
   }
 
+  function jumpTo(node) {
+    clearJump.current?.()
+    let timeout
+    // 弹窗关闭后再标记落点和滚动，避免高亮留在遮罩下或被关闭时的焦点还原遮住。
+    const frame = requestAnimationFrame(() => {
+      if (!node.isConnected) return clear()
+      node.setAttribute(searchTarget, '')
+      node.scrollIntoView({ block: 'center' })
+      timeout = setTimeout(clear, 2500)
+    })
+    function clear() {
+      cancelAnimationFrame(frame)
+      clearTimeout(timeout)
+      node.removeAttribute(searchTarget)
+      clearJump.current = undefined
+    }
+    clearJump.current = clear
+  }
+
   function reveal(hit) {
     void run(async signal => {
       const target = await findMessage(sessionId, hit, signal)
@@ -85,7 +115,7 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
       if (!node) throw new Error(t('unavailable'))
       node.closest('[hidden="until-found"]')?.dispatchEvent(new Event('beforematch'))
       close()
-      requestAnimationFrame(() => node.scrollIntoView({ block: 'center' }))
+      jumpTo(node)
     })
   }
 
