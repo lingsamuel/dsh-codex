@@ -1,12 +1,25 @@
 import { groupThreads, threadTitle } from '../workspaces.js'
 import { pinnedSectionId } from '../../shared/thread-sections.js'
 import { subagentAddress, subagentPath } from './subagents.js'
+import { readPage } from '../api.js'
 
 const noRetention = {}
 const mainRetention = { mainView: 1 }
 
 export function remoteFailure(message) {
   return { code: 'codex/history', message }
+}
+
+/** 先把原生线程补入同一个目录，再交给 DSH 打开。 */
+export async function openCodexThread(catalog, navigation, threadId, signal) {
+  const { threads, childThreads } = catalog.store.getSnapshot()
+  if (!childThreads[threadId] && !threads.some(thread => thread.id === threadId)) {
+    const { thread } = await readPage('thread-summary', { threadId }, signal)
+    if (!thread) throw new Error('原生会话已不可用。')
+    catalog.acceptThread(thread)
+  }
+  signal?.throwIfAborted()
+  navigation?.openSession(threadId)
 }
 
 function unixMillis(seconds) {

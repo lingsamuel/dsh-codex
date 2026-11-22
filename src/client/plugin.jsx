@@ -21,6 +21,7 @@ import { installVisualizePreview } from './native-dsh/visualize-preview.jsx'
 import { installSubagentActivity } from './native-dsh/subagent-activity.jsx'
 import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
+import { installThreadReferences } from './native-dsh/thread-references.jsx'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
 import { installCodexSkills } from './native-dsh/skills.js'
@@ -44,6 +45,7 @@ export function apply(ctx) {
   const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx)
+  installThreadReferences(ctx, catalog, controller.signal)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)
   installWorktrees(ctx, catalog)

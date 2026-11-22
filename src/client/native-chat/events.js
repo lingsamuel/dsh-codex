@@ -6,6 +6,7 @@ import { subagentActivityEvent, subagentActivityKinds } from './subagent-activit
 import { questionReplies } from '../../shared/question-replies.js'
 import { goalCommandObjective } from '../../shared/user-input.js'
 import { fileAttachmentOf, splitFileAttachmentInput } from '../../shared/file-attachments.js'
+import { displayThreadReferenceText } from '../../shared/thread-references.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
 const newestHistoryBoundary = 2 ** 32
@@ -19,7 +20,7 @@ function textBlock(text) {
 }
 
 function userBlock(part, image) {
-  if (part.type === 'text') return textBlock(part.text)
+  if (part.type === 'text') return textBlock(displayThreadReferenceText(part.text))
   if (image) return { type: 'image', attachment: image.attachment }
   return textBlock(part.path || part.name || (part.type === 'image' ? '图片附件' : part.type))
 }

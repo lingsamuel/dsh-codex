@@ -1,6 +1,7 @@
 import { readPage, writeCommandAction, writeConversationAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
 import { goalCommandObjective, planCommandText, replaceUserInputText, userInputText } from '../../shared/user-input.js'
+import { threadReferencesIn } from '../../shared/thread-references.js'
 
 const accepted = { ok: true, value: { accepted: true } }
 const failedSubmission = { reason: 'failed' }
@@ -184,6 +185,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       throw new Error('目标使用输入栏正文。请移除附件和待创建的工作树，或退出 Goal 模式后按普通消息发送。')
     }
     if (!objective) throw new Error('请输入目标内容。')
+    if (threadReferencesIn(objective).length) {
+      throw new Error('会话引用需要随消息提交。请退出 Goal 模式后继续发送。')
+    }
     const tokenBudget = goalDraftValue?.budget ? Number(goalDraftValue.budget) : undefined
     if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) throw new Error('Token 预算必须是正整数。')
     const command = (action, fields) => writeCommandAction({ threadId, action, ...fields, ...(unarchive && { unarchive: true }) }, signal)

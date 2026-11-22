@@ -15,6 +15,8 @@ import { createThreadTitleScheduler } from './thread-titles.mjs'
 import { resolveInputSkills } from './skills.mjs'
 import { resolveWorktreeCwd, validateWorktreeSelection, worktreeConflict } from './git-worktrees.mjs'
 import { createQueuedSteers } from './queued-steers.mjs'
+import { threadTaskToolsConfig, requireThreadReadTool } from './codex-task-tools-config.mjs'
+import { hasThreadReferences, prepareThreadReferences } from '../shared/thread-references.js'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -158,11 +160,11 @@ async function submissionThread(request, threadId, fields, permissions) {
 }
 
 /** 原生可能在冷恢复时启动旧队列，因此草稿设置随恢复请求一起应用。 */
-export async function submissionRuntime(request, thread, { modelDraft, permissionDraft }, signal, permissions) {
+export async function submissionRuntime(request, thread, { modelDraft, permissionDraft }, signal, permissions, taskConfig) {
+  const config = { ...taskConfig, ...(modelDraft?.reasoningEffort && { model_reasoning_effort: modelDraft.reasoningEffort }) }
   const settings = {
-    ...(modelDraft && { model: modelDraft.model, ...(modelDraft.reasoningEffort && {
-      config: { model_reasoning_effort: modelDraft.reasoningEffort },
-    }) }),
+    ...(modelDraft && { model: modelDraft.model }),
+    ...(Object.keys(config).length && { config }),
     ...(permissionDraft && { permissions: permissionDraft }),
   }
   let permission
@@ -178,7 +180,7 @@ export async function submissionRuntime(request, thread, { modelDraft, permissio
   return { runtime, ...(permission && { permission }) }
 }
 
-async function startQueued(request, threadId, fields, signal, permissions, scheduleTitle, steers) {
+async function startQueued(request, threadId, fields, signal, permissions, scheduleTitle, steers, socketPath) {
   const { queuedSubmissionId } = fields
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
   const thread = await submissionThread(request, threadId, fields, permissions)
@@ -190,20 +192,18 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
   }
   const hasDraft = fields.modelDraft !== undefined || fields.permissionDraft !== undefined
   const preparesRuntime = thread.status?.type === 'notLoaded' || fields.unarchive === true || hasDraft
-  const checkHead = queuedSubmissionId === undefined && steers.list(threadId).length
-  if (!preparesRuntime && !checkHead) {
-    return started(await request('thread/queue/start', { threadId, queuedSubmissionId }))
-  }
-
   const queue = await readConversationQueue(request, threadId)
   const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
   if (!target) {
-    if (queuedSubmissionId === undefined && (checkHead || fields.unarchive === true || hasDraft)) return { queueEmpty: true }
+    if (queuedSubmissionId === undefined) return { queueEmpty: true }
     throw missingQueueItem()
   }
   if (steers.find(threadId, target.id)) throw uncertainQueueSteer()
+  const references = hasThreadReferences(target.input, threadId)
+  const taskConfig = references && thread.status?.type === 'notLoaded' ? await threadTaskToolsConfig(socketPath, signal) : undefined
+  if (references && !taskConfig) await requireThreadReadTool(request, threadId)
   if (!preparesRuntime) return started(await request('thread/queue/start', { threadId, queuedSubmissionId: target.id }))
-  const ready = await submissionRuntime(request, thread, fields, signal, permissions)
+  const ready = await submissionRuntime(request, thread, fields, signal, permissions, taskConfig)
   permission = ready.permission
   async function claimedTurn() {
     const turn = await readLatestTurn(request, threadId, 'full')
@@ -218,6 +218,7 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
     const claimed = await claimedTurn()
     if (claimed) return started(claimed)
   }
+  if (references && taskConfig) await requireThreadReadTool(request, threadId)
   try {
     const result = await request('thread/queue/start', { threadId, queuedSubmissionId: target.id })
     await waitForThreadActivity(request, threadId, signal)
@@ -285,8 +286,9 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 
   if (operation === 'edit') {
     const edited = replaceUserInputText(item.input, text)
-    const input = edited === item.input ? edited : await resolveInputSkills(request, edited,
+    const resolved = edited === item.input ? edited : await resolveInputSkills(request, edited,
       async () => (await addressableThread(request, threadId)).cwd, userInputText(item.input))
+    const input = prepareThreadReferences(resolved, threadId)
     if (!input.length) throw badRequest('请输入消息内容。')
     try {
       return await request('thread/queue/update', { ...target, input })
@@ -297,6 +299,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
   }
 
   await requireActiveThread(request, threadId)
+  if (hasThreadReferences(item.input, threadId)) await requireThreadReadTool(request, threadId)
   const current = await readLatestTurn(request, threadId, 'notLoaded')
   if (current?.id !== expectedTurnId || current.status !== 'inProgress') {
     throw conflict('turn-unavailable', '原插话轮次已结束或发生变化。')
@@ -340,9 +343,10 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
     return permissions ? permissions.withThreadCreation(signal, create) : withCodexReader(socketPath, signal, create)
   }
 
-  async function startDraft(rpc, cwd, projectId, retainDraft, options) {
+  async function startDraft(rpc, cwd, projectId, retainDraft, options, signal) {
     const started = await rpc('thread/start', {
       cwd, historyMode: 'paginated', ...(projectId && { projectId }), ...options,
+      config: await threadTaskToolsConfig(socketPath, signal),
     })
     const permission = retainDraft?.(started)
     return workspaceThread({ ...started.thread, blank: true }, permission)
@@ -363,7 +367,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       }
       const cwd = await resolveWorktreeCwd(source.cwd, selection, signal)
       const projectId = source.projectId ?? (await openProject(rpc, source.cwd)).project.id
-      return startDraft(rpc, cwd, projectId, retainDraft, await permissions?.startOptions(rpc, cwd))
+      return startDraft(rpc, cwd, projectId, retainDraft, await permissions?.startOptions(rpc, cwd), signal)
     })
     // Git 检出和 thread/start 都可能先于发送失败。保留原生目标，让重试继续原会话。
     start = { chosen, native }
@@ -420,7 +424,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             if (reused && (!options?.permissions || permission?.profileId === options.permissions)) {
               return workspaceThread({ ...reused, blank: true }, permission)
             }
-            return startDraft(rpc, cwd, projectId, retainDraft, options)
+            return startDraft(rpc, cwd, projectId, retainDraft, options, signal)
           }
           return json(await withThreadCreation(signal, create))
         }
@@ -458,12 +462,15 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
                 return planMode ? { ...recovered, planMode } : recovered
               }
               const thread = await submissionThread(rpc, destination, fields, permissions)
+              const references = hasThreadReferences(parts, destination)
+              const taskConfig = references && thread.status?.type === 'notLoaded' ? await threadTaskToolsConfig(socketPath, signal) : undefined
+              const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions, taskConfig)
+              if (references) await requireThreadReadTool(rpc, destination)
               // 计划任务从下一轮开始。目标线程确认模式后才入队，工作树首发同样在目标线程设置。
               if (planMode && !(await enablePlan(destination, signal)).confirmed) {
                 throw conflict('plan-mode-unconfirmed', 'Codex 尚未确认计划模式，请重试。')
               }
-              const { runtime, permission } = await submissionRuntime(rpc, thread, fields, signal, permissions)
-              params.input = await resolveInputSkills(rpc, params.input, () => runtime.cwd ?? thread.cwd)
+              params.input = prepareThreadReferences(await resolveInputSkills(rpc, parts, () => runtime.cwd ?? thread.cwd), destination)
               if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
                 try {
                   const result = await steerTurn(rpc, { ...params, expectedTurnId })
@@ -502,7 +509,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           signal.throwIfAborted()
           // 原生取走消息之后由 Host 跟到回执，切换视图或取消网页请求不提前关闭连接。
           return withCodexReader(socketPath, keepsRunning ? ownerSignal : signal, rpc => operation === 'start'
-            ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle, steers)
+            ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle, steers, socketPath)
             : queueAction(rpc, threadId, fields, steers))
         }
         return json(await (operation !== 'list' ? submit(threadId, run) : run()))

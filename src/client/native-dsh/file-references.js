@@ -1,7 +1,7 @@
 import { readPage } from '../api.js'
 import { remoteFailure } from './catalog.js'
 
-/** 将 DSH 原生 @ 候选查询接到 Codex 会话的 Host 文件索引。 */
+/** 将 DSH 原生 @ 菜单接到 Codex 的文件和会话候选。 */
 export function installFileReferences(ctx) {
   ctx.inject(['inputTriggers'], scope => scope.effect(() => {
     const triggers = scope.inputTriggers
@@ -29,7 +29,14 @@ export function installFileReferences(ctx) {
         return { ok: false, error: remoteFailure(error.message) }
       }
     }
-    const candidates = async () => ({ ok: true, value: [] })
+    async function candidates(threadId, query, signal) {
+      try {
+        const value = await readPage('thread-references', { threadId, query }, signal)
+        return { ok: true, value }
+      } catch (error) {
+        return { ok: false, error: remoteFailure(error.message) }
+      }
+    }
     Object.defineProperty(files, 'list', { configurable: true, enumerable: true, value: list })
     Object.defineProperty(sessions, 'candidates', { configurable: true, enumerable: true, value: candidates })
     return () => {

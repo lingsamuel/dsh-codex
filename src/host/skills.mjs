@@ -1,5 +1,6 @@
 import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { userInputText } from '../shared/user-input.js'
+import { threadReferencesIn } from '../shared/thread-references.js'
 
 const nameContinuation = /^[\p{L}\p{M}\p{N}_:-]/u
 const otherToolLink = /^\]\s*\(\s*(app|mcp|plugin):\/\//
@@ -7,7 +8,9 @@ const otherToolLink = /^\]\s*\(\s*(app|mcp|plugin):\/\//
 function mentionedSkills(text, candidates) {
   const names = [...candidates].sort((left, right) => right.length - left.length)
   const mentioned = new Set()
+  const references = threadReferencesIn(text)
   for (const { index } of text.matchAll(/\$/g)) {
+    if (references.some(ref => index >= ref.start && index < ref.end)) continue
     // 命名空间和 Unicode 名称按 Codex 提供的原字符串查找，并优先使用完整的长名称。
     const start = index + 1
     const name = names.find(candidate => text.startsWith(candidate, start)

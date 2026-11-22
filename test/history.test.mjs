@@ -14,6 +14,8 @@ import { createHistoryRoutes } from '../src/host/history.mjs'
 import { createWatchRoute } from '../src/host/live-watch.mjs'
 import { asyncQuestionItemId, encodeQuestionReplies } from '../src/shared/question-replies.js'
 import { fileAttachmentInput } from '../src/shared/file-attachments.js'
+import { codexTaskToolsConfig, codexTaskToolsServerName } from '../src/host/codex-task-tools-config.mjs'
+import { encodeThreadReference } from '../src/shared/thread-references.js'
 
 async function fakeCodex(t, methods) {
   await mkdir('.runtime', { recursive: true })
@@ -1068,7 +1070,7 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
   assert.equal((await post('cancel', { threadId: thread.id, turnId: 'active-turn' })).status, 200)
   assert.deepEqual(messages.filter(({ method }) => /^(thread|turn)\//.test(method) && method !== 'thread/read')
     .map(({ method, params }) => [method, params]), [
-    ['thread/start', { cwd: thread.cwd, historyMode: 'paginated', projectId: 'project-id' }],
+    ['thread/start', { cwd: thread.cwd, historyMode: 'paginated', projectId: 'project-id', config: codexTaskToolsConfig(socketPath) }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/resume', { threadId: thread.id, excludeTurns: true }],
     ['thread/queue/add', { threadId: thread.id, input, clientUserMessageId: 'browser-id' }],
@@ -1079,6 +1081,50 @@ test('普通发送按需恢复原生会话，恢复失败时保留消息未入�
     ['turn/steer', { threadId: thread.id, input, clientUserMessageId: 'browser-id', expectedTurnId: 'active-turn' }],
     ['turn/interrupt', { threadId: thread.id, turnId: 'active-turn' }],
   ])
+})
+
+test('会话引用在原生入队前确认模型工具，并按原生格式发送线程 ID', async t => {
+  const thread = { id: 'native-thread', cwd: '/mock', status: { type: 'active' } }
+  let connected = false
+  let queued
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'mcpServerStatus/list': ({ serverName }) => ({ result: { data: connected && serverName === codexTaskToolsServerName
+      ? [{ name: serverName, runtimeStatus: 'connected', tools: { read_thread: {} } }] : [] } }),
+    'thread/queue/add': ({ input }) => {
+      queued = { id: 'reference-queued', input }
+      return { result: { queuedSubmission: queued } }
+    },
+    'thread/queue/list': () => ({ result: { data: queued ? [queued] : [] } }),
+    'thread/queue/start': () => ({ result: { turn: { id: 'continued-reference' } } }),
+  })
+  const post = fields => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: thread.id, ...fields }),
+  })
+  const text = '参考 ' + encodeThreadReference('source-thread', '旧会话')
+  const fields = { action: 'prompt', mode: 'queue',
+    clientUserMessageId: 'reference-input', input: [{ type: 'text', text }] }
+  const blocked = await post(fields)
+  assert.equal(blocked.status, 409)
+  assert.equal((await blocked.json()).reason, 'thread-read-tool-unavailable')
+  assert(!messages.some(({ method }) => method === 'thread/queue/add'))
+  connected = true
+  const sent = await post(fields)
+  assert.equal(sent.status, 200)
+  const { queuedSubmission } = await sent.json()
+  assert.match(queuedSubmission.input[0].text, /"threadId":"source-thread"/)
+  assert(queuedSubmission.input[0].text.endsWith(text))
+  assert.deepEqual(queuedSubmission.input[0].text_elements.map(element => element.placeholder), ['@旧会话'])
+
+  thread.status.type = 'idle'
+  connected = false
+  const resume = { action: 'queue', operation: 'start' }
+  assert.equal((await post(resume)).status, 409)
+  assert(!messages.some(({ method }) => method === 'thread/queue/start'))
+  connected = true
+  assert.equal((await post(resume)).status, 200)
+  assert.equal(messages.find(({ method }) => method === 'thread/queue/start').params.queuedSubmissionId, queued.id)
 })
 
 test('中断后空闲发送会启动唯一的新稿，既有待发消息仍由继续队列控制', async t => {
@@ -1523,7 +1569,7 @@ test('队列编辑保留原生附件，显式插话拒绝后保留待发文本',
   assert.equal((await queue('steer', { queuedSubmissionId: item.id, expectedTurnId: 'completed-turn' })).status, 409)
   assert.equal(messages.slice(before).some(({ method }) => method === 'thread/queue/delete'), false)
   assert.deepEqual(await (await queue('start')).json(), { turn: { id: 'resumed-turn' } })
-  assert.deepEqual(messages.at(-1).params, { threadId })
+  assert.deepEqual(messages.at(-1).params, { threadId, queuedSubmissionId: item.id })
 })
 
 test('待发项从原生队列移除后保留完整原稿，直到重连在指定历史中看到原生 ID', async t => {
@@ -1903,7 +1949,7 @@ test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', a
 test('会话生命周期使用原生归档、删除和按轮次分支', async t => {
   const source = { id: 'source', cwd: '/mock', status: { type: 'active' } }
   const branch = { id: 'branch', cwd: source.cwd, forkedFromId: source.id }
-  const { get, messages } = await fakeCodex(t, {
+  const { get, messages, socketPath } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread: source } }),
     'thread/list': ({ archived, ancestorThreadId }) => {
       assert.equal(ancestorThreadId, source.id)
@@ -1940,8 +1986,9 @@ test('会话生命周期使用原生归档、删除和按轮次分支', async t 
     ['thread/archive', { threadId: source.id }],
     ['thread/unarchive', { threadId: source.id }],
     ['thread/delete', { threadId: source.id }],
-    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true }],
-    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true, lastTurnId: 'earlier' }],
+    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true, config: codexTaskToolsConfig(socketPath) }],
+    ['thread/fork', { threadId: source.id, excludeTurns: true, deferGoalContinuation: true, lastTurnId: 'earlier',
+      config: codexTaskToolsConfig(socketPath) }],
   ])
 })
 
@@ -1979,7 +2026,7 @@ test('已归档源会话收到明确确认后才取消归档，并直接使用�
   const source = { id: 'archived-source', cwd: '/mock', status: { type: 'notLoaded' } }
   const branch = { id: 'forked-thread', cwd: source.cwd, forkedFromId: source.id }
   let archived = true
-  const { get, messages } = await fakeCodex(t, {
+  const { get, messages, socketPath } = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread: source } }),
     'thread/list': ({ archived: filter, includedThreadIds }) => ({ result: {
       data: filter && archived && includedThreadIds.includes(source.id) ? [source] : [],
@@ -2004,6 +2051,7 @@ test('已归档源会话收到明确确认后才取消归档，并直接使用�
     ['thread/fork', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/fork'])
   assert.deepEqual(messages.at(-1).params, {
     threadId: source.id, lastTurnId: 'selected-turn', excludeTurns: true, deferGoalContinuation: true,
+    config: codexTaskToolsConfig(socketPath),
   })
 })
 

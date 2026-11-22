@@ -9,6 +9,8 @@ import { createThreadSubmissionQueue, resumeThread, unarchiveForSubmission } fro
 import { readLatestTurn } from './live-history.mjs'
 import { replaceUserInputText, userInputText } from '../shared/user-input.js'
 import { resolveInputSkills } from './skills.mjs'
+import { threadTaskToolsConfig, requireThreadReadTool } from './codex-task-tools-config.mjs'
+import { hasThreadReferences, prepareThreadReferences } from '../shared/thread-references.js'
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -119,7 +121,9 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             if ((cold || unarchive) && await hasQueued()) return queued()
             let runtime = thread
             let permission
-            if (replacement) ({ runtime, permission } = await submissionRuntime(request, thread, draft, signal, permissions))
+            const references = replacement && hasThreadReferences(replacement, threadId)
+            const taskConfig = references && cold ? await threadTaskToolsConfig(socketPath, signal) : undefined
+            if (replacement) ({ runtime, permission } = await submissionRuntime(request, thread, draft, signal, permissions, taskConfig))
             else if (cold) await resumeThread(request, thread)
             if (cold || unarchive || (replacement && (modelDraft || permissionDraft))) {
               const { thread: current } = await request('thread/read', { threadId })
@@ -131,8 +135,10 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
               runtime = current
             }
             if (!replacement) return json(await request(method, params))
+            if (references) await requireThreadReadTool(request, threadId)
             // 恢复可能改变工作目录。在实际目录解析技能，成功后再回退历史。
-            const revised = await resolveInputSkills(request, replacement, () => runtime.cwd ?? thread.cwd, userInputText(original))
+            const revised = prepareThreadReferences(
+              await resolveInputSkills(request, replacement, () => runtime.cwd ?? thread.cwd, userInputText(original)), threadId)
             if (!revised.length) return json({ error: '请输入消息内容。' }, 400)
             try {
               await request(method, params)
@@ -154,6 +160,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             await unarchiveForSubmission(request, thread)
           }
           // 分叉和改名只需要原生记录，源线程可以保持未加载。
+          if (action === 'fork') return request(method, { ...params, config: await threadTaskToolsConfig(socketPath, signal) })
           return request(method, params)
         })
         const result = await (action === 'rename' || restoreArchived ? submit(threadId, run) : run())

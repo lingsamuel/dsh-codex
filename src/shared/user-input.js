@@ -1,11 +1,12 @@
 import { fileAttachmentOf, splitFileAttachmentInput } from './file-attachments.js'
+import { displayThreadReferenceText } from './thread-references.js'
 
 function isMessageText(part) {
   return part.type === 'text' && !fileAttachmentOf(part)
 }
 
 function textOfParts(parts) {
-  return parts.filter(isMessageText).map(part => part.text).join('')
+  return parts.filter(isMessageText).map(part => displayThreadReferenceText(part.text)).join('')
 }
 
 /** 将该条原生用户消息中的文本段装入同一个编辑框。附件和引用由原生消息单独保存。 */

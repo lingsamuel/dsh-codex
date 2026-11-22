@@ -21,6 +21,7 @@ import { createCodexMcpRoutes } from './codex-mcp.mjs'
 import { createWorktreeRoutes } from './worktree-actions.mjs'
 import { createQueuedSteers } from './queued-steers.mjs'
 import { createFileUploads } from './file-uploads.mjs'
+import { readThreadReferenceCandidates } from './thread-references.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -173,6 +174,8 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       limit: 20,
       ...optionalParams(query, ['cursor']),
     }))),
+    route('thread-references', (query, signal) => withCodexReader(socketPath, signal, rpc =>
+      readThreadReferenceCandidates(rpc, query.get('threadId'), query.get('cwd'), query.get('query') ?? ''))),
     route('turns', (query, signal) => withCodexReader(socketPath, signal, request => readThreadTurns(request, {
         threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
         limit: 25,
