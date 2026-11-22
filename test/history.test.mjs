@@ -1186,6 +1186,37 @@ test('会话详情分页读取已加载线程的原生后台终端', async t => 
   assert.equal(messages.some(message => message.method === 'thread/resume'), false)
 })
 
+test('/ps 将尚未加载或查询时卸载的会话显示为空列表', async t => {
+  let unloading = 'idle'
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => ({ result: { thread: {
+      id: threadId, status: { type: threadId === 'cold' ? 'notLoaded' : unloading },
+    } } }),
+    'thread/backgroundTerminals/list': ({ threadId }) => {
+      assert.equal(threadId, 'unloading')
+      unloading = 'notLoaded'
+      return { error: { code: -32600, message: 'thread not found: unloading' } }
+    },
+  })
+  const cold = await get('/api/codex/thread-info?threadId=cold&view=ps')
+  assert.equal(cold.status, 200)
+  assert.deepEqual((await cold.json()).terminals, [])
+  const interrupted = await get('/api/codex/thread-info?threadId=unloading&view=ps')
+  assert.equal(interrupted.status, 200)
+  assert.deepEqual((await interrupted.json()).terminals, [])
+  assert.deepEqual(messages.filter(message => message.params?.threadId).map(message => message.method),
+    ['thread/read', 'thread/read', 'thread/backgroundTerminals/list', 'thread/read'])
+})
+
+test('/ps 在 App Server 不支持进程查询时报告列表不可用', async t => {
+  const { get } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'loaded', status: { type: 'idle' } } } }),
+  })
+  const response = await get('/api/codex/thread-info?threadId=loaded&view=ps')
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).terminals, null)
+})
+
 async function watchBackgroundTerminals(t, get) {
   const response = await get('/api/codex/watch?scope=catalog&backgroundTerminals=1')
   const reader = response.body.getReader()

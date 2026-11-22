@@ -33,6 +33,27 @@ function requiredParam(query, key, message) {
   return value
 }
 
+function unavailable(error) {
+  if (error.code === -32601 || error.code === -32602) return null
+  throw error
+}
+
+async function readThreadTerminals(request, threadId, status) {
+  if (status === 'notLoaded') return []
+  if (!status) return undefined
+
+  try {
+    return await readBackgroundTerminals(request, threadId)
+  } catch (error) {
+    // 线程可能在两次原生调用之间卸载，重读运行时状态再区分空列表和请求错误。
+    if (error.code === -32600 || error.code === -32602) {
+      const { thread } = await request('thread/read', { threadId })
+      if (thread?.status?.type === 'notLoaded') return []
+    }
+    return unavailable(error)
+  }
+}
+
 /** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
 export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
@@ -83,17 +104,13 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       const view = query.get('view')
       return withCodexReader(socketPath, signal, async request => {
-        function unavailable(error) {
-          if (error.code === -32601 || error.code === -32602) return null
-          throw error
-        }
         const [reading, goalResult] = await Promise.all([
           view === 'goal' ? undefined : request('thread/read', { threadId }),
           !view || view === 'goal' ? request('thread/goal/get', { threadId }).catch(unavailable) : undefined,
         ])
         const thread = reading?.thread
-        const terminals = (!view || view === 'ps') && thread?.status?.type && thread.status.type !== 'notLoaded'
-          ? await readBackgroundTerminals(request, threadId).catch(unavailable)
+        const terminals = !view || view === 'ps'
+          ? await readThreadTerminals(request, threadId, thread?.status?.type)
           : undefined
         return { model: thread?.model, reasoningEffort: thread?.reasoningEffort, goal: goalResult?.goal ?? null, terminals }
       })
