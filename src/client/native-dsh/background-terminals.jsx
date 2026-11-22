@@ -18,7 +18,9 @@ const visuallyHidden = { position: 'absolute', width: 1, height: 1, overflow: 'h
 
 function RunningCount({ sessionId, useBackgroundTerminals, t }) {
   const count = useBackgroundTerminals(state => state.get(sessionId)?.length ?? 0)
-  return count > 0 && <span>{t('running', { count })}</span>
+  return count > 0 && <span style={{ color: 'var(--dsw-alias-hovercard-label-secondary)', fontSize: 12, lineHeight: '16px' }}>
+    {t('running', { count })}
+  </span>
 }
 
 function SidebarTerminalIcon({ sessionId, useBackgroundTerminals, t }) {
