@@ -13,7 +13,7 @@ const copy = {
     goalPlaceholder: '输入要交给 Codex 的目标', goalSend: '创建目标', goalUnarchiveAndSend: '取消归档并创建目标',
     changingPlan: '正在等待 Codex 确认计划模式…',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
-    select: '选择一个 Codex 会话浏览历史', commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
+    commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
     viewQueue: '查看队列', unarchiveAndView: '取消归档并查看', queueEmpty: '没有待发消息。',
     viewQueueDescription: '查看队列需要先取消归档。待发消息继续由你手动启动。', cancel: '取消', close: '关闭',
     imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
@@ -21,20 +21,13 @@ const copy = {
     goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
     changingPlan: 'Waiting for Codex to confirm Plan mode…',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
-    select: 'Select a Codex session to browse its history', commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
+    commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
     viewQueue: 'View queue', unarchiveAndView: 'Unarchive and view', queueEmpty: 'No queued messages.',
     viewQueueDescription: 'Viewing the queue unarchives this session. You can start pending messages manually.', cancel: 'Cancel', close: 'Close',
     imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
 const noGoalDraft = createSnapshotStore(undefined)
-
-function CatalogStatus({ catalog, t }) {
-  const { busy, error, selected } = useSyncExternalStore(catalog.subscribe, catalog.getSnapshot)
-  if (error) return <p role="alert">{error}</p>
-  if (selected) return null
-  return <p role="status">{t(busy ? 'loading' : 'select')}</p>
-}
 
 function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, composerT, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
@@ -218,7 +211,7 @@ export function installComposer(ctx, catalog) {
       if (!inject || !Component) return
       const injectComposer = (sessionId, ...args) => {
         const props = inject(sessionId, ...args)
-        if (sessionId === undefined) return { ...props, accessory: <CatalogStatus catalog={catalog} t={t} /> }
+        if (sessionId === undefined) return props
         return { ...props, goalDraft: sessions.binding(sessionId)?.session.goalDraft, addFiles(files, directories) {
           if (!sessions.binding(sessionId)) return t('imageInputUnavailable')
           if (files.some(file => directories?.has(file) || !isComposerImageType(file.type))) return t('imagesOnly')
@@ -230,7 +223,10 @@ export function installComposer(ctx, catalog) {
         } }
       }
       function Composer(props) {
-        return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')}
+        const status = useSyncExternalStore(catalog.subscribe, () => props.sessionId === undefined ? catalog.getSnapshot() : undefined)
+        const accessory = status?.error ? <p role="alert">{status.error}</p>
+          : status?.busy && !status.selected ? <p role="status">{t('loading')}</p> : props.accessory
+        return <ComposerBar {...props} accessory={accessory} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')}
           skillHint={t('skillHint')} composerT={t} />
       }
       entry.inject = injectComposer
