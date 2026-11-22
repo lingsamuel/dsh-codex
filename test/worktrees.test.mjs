@@ -66,6 +66,20 @@ async function fixture(t, handlers = {}) {
 
 const idle = { type: 'idle' }
 
+test('保留工作树的实际分支与分离 HEAD，并使用不带 Git 引用前缀的分支名', async t => {
+  const { repo, existing, git, list } = await fixture(t)
+  const linked = join(repo, '.worktrees', 'feature')
+  git('worktree', 'add', '-b', 'feature/editor', linked)
+  const choices = await (await lookup(list, repo)).json()
+  assert.equal(choices.local.branchLabel, 'main')
+  const feature = choices.worktrees.find(tree => tree.path === linked)
+  assert.equal(feature.branch, 'refs/heads/feature/editor')
+  assert.equal(feature.branchLabel, 'feature/editor')
+  const detached = choices.worktrees.find(tree => tree.path === existing)
+  assert.equal(detached.branchLabel, null)
+  assert.equal(detached.head, git('rev-parse', 'alternate'))
+})
+
 test('在首次提交时以所选 Git 分支启动原生工作树会话；失败重试与并发提交复用同一会话', async t => {
   const threads = new Map()
   let editedFile, nativeCwd, queueAttempts = 0

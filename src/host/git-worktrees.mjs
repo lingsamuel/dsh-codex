@@ -23,15 +23,22 @@ function git(cwd, args, signal, timeout = 4_000) {
   }).then(({ stdout }) => stdout)
 }
 
+function branchLabel(ref) {
+  return ref.replace(/^refs\/(?:heads|remotes)\//, '')
+}
+
 function registeredWorktrees(output) {
   const entries = []
   let tree
   // NUL 分隔的原生格式不会对换行、空格或非 ASCII 路径进行转义。
   for (const field of output.split('\0')) {
     if (field.startsWith('worktree ')) {
-      tree = { path: field.slice('worktree '.length), branch: null }
+      tree = { path: field.slice('worktree '.length), branch: null, branchLabel: null, head: null }
       entries.push(tree)
-    } else if (field.startsWith('branch ')) tree.branch = field.slice('branch '.length)
+    } else if (field.startsWith('branch ')) {
+      tree.branch = field.slice('branch '.length)
+      tree.branchLabel = branchLabel(tree.branch)
+    } else if (field.startsWith('HEAD ')) tree.head = field.slice('HEAD '.length)
     else if (field === 'bare') tree.bare = true
     else if (field === 'prunable' || field.startsWith('prunable ')) tree.prunable = true
   }
@@ -56,7 +63,7 @@ async function repository(cwd, signal) {
   const local = entries[0] && !entries[0].bare && !entries[0].prunable ? entries[0] : null
   const branches = refs.split('\n').filter(Boolean).flatMap(row => {
     const [ref, symbolicTarget] = row.split('\0')
-    return symbolicTarget ? [] : [{ ref, label: ref.replace(/^refs\/(?:heads|remotes)\//, '') }]
+    return symbolicTarget ? [] : [{ ref, label: branchLabel(ref) }]
   })
   const currentBranch = entries.find(entry => entry.path === top)?.branch
   const baseRef = branches.some(({ ref }) => ref === currentBranch) ? currentBranch : branches[0]?.ref ?? null
