@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { openCodexReader } from './app-server.mjs'
 import { approvalResponse, hydrateFileApproval, projectApprovalRequest } from './approval-requests.mjs'
+import { mcpElicitationResponse, projectMcpElicitation } from './mcp-elicitation.mjs'
 
 const isWaiting = status => status?.type === 'active'
   && status.activeFlags?.some(flag => flag === 'waitingOnUserInput' || flag === 'waitingOnApproval')
@@ -20,7 +21,7 @@ function requestAnswers(questions, answers) {
   return Object.fromEntries(entries.map(([id, { answers }]) => [id, { answers }]))
 }
 
-/** 为正在查看且等待用户操作的线程建立一次短期订阅，转交原生问答和审批。 */
+/** 为正在查看且等待用户操作的线程建立一次短期订阅，转交原生问答、审批和 MCP 请求。 */
 export function createQuestionBridge(socketPath, ownerSignal) {
   const watched = new Map()
 
@@ -48,7 +49,7 @@ export function createQuestionBridge(socketPath, ownerSignal) {
   }
 
   function publishRequest(state, id, type, request) {
-    const entry = { type, request: { ...request, requestId: id, ...(type === 'approvals' && { key: randomUUID() }) } }
+    const entry = { type, request: { ...request, requestId: id, ...(type !== 'questions' && { key: randomUUID() }) } }
     state.requests.set(id, entry)
     publish(state, type)
     if (request.kind !== 'file-change') return
@@ -78,7 +79,11 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     }
     if (method === 'thread/status/changed') {
       state.waiting = isWaiting(params.status)
-      if (!state.waiting) release(state)
+      if (!state.waiting && !state.requests.size) release(state)
+      return
+    }
+    if (method === 'mcpServer/elicitation/request') {
+      publishRequest(state, id, 'mcp-requests', projectMcpElicitation(params))
       return
     }
     if (!isRequestId(id) || state.requests.has(id)) return
@@ -170,7 +175,7 @@ export function createQuestionBridge(socketPath, ownerSignal) {
         const state = watched.get(threadId)
         const pending = state?.requests.get(requestId)
         if (pending?.type !== type || state.submitting.has(requestId)
-          || (type === 'approvals' && body.key !== pending.request.key)) return json({ error: unavailable }, 409)
+          || (pending.request.key && body.key !== pending.request.key)) return json({ error: unavailable }, 409)
         const result = resultFor(pending.request, body)
         if (!result) return json({ error: mismatch }, 400)
         state.submitting.add(requestId)
@@ -197,5 +202,10 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     mismatch: '该决定不适用于此审批。', failed: '无法向 Codex 提交审批决定。',
     resultFor: (approval, { decision }) => approvalResponse(approval, decision),
   })
-  return { observe, route, approvalRoute }
+  const mcpRoute = replyRoute({
+    path: 'mcp-elicitation', type: 'mcp-requests', invalid: 'MCP 请求格式无效。', unavailable: '此 MCP 请求已处理或已结束。',
+    mismatch: '提交内容与当前 MCP 请求或表单约束不匹配。', failed: '无法向 Codex 提交 MCP 答复。',
+    resultFor: mcpElicitationResponse,
+  })
+  return { observe, route, approvalRoute, mcpRoute }
 }

@@ -200,7 +200,7 @@ function ApprovalUtilities({ useProjection, renderFactorySlot, nativeLabels, t }
   </>
 }
 
-/** 注册原生审批卡入口。真实请求与黄点分开，问答在输入栏优先，审批仍可从标题栏打开。 */
+/** 输入栏优先显示问答，其次为审批和 MCP 请求。标题栏始终可打开等待中的请求。 */
 export function installCodexApprovals(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   const nativeLabels = adaptNativeChoiceLabels(ctx)
@@ -213,18 +213,22 @@ export function installCodexApprovals(ctx) {
           installed.add(binding)
           binding.ctx.effect(() => {
             const approvals = binding.session.projections.faceOf('codexApprovals')
+            const mcp = binding.session.projections.faceOf('codexMcpRequests')
             let current
             let remove
             function sync() {
-              const key = approvals.getSnapshot()?.[0]?.key
+              const approval = approvals.getSnapshot()?.[0]
+              const key = (approval ?? mcp.getSnapshot()?.[0])?.key
               if (key === current) return
               remove?.()
-              remove = key && publish({ sessionId: binding.sessionId, kind: 'approval', key, codexApproval: true }, async () => {})
+              remove = key && publish({ sessionId: binding.sessionId, kind: 'approval', key,
+                ...(approval ? { codexApproval: true } : { codexMcp: true }) }, async () => {})
               current = key
             }
-            const unsubscribe = approvals.subscribe(sync)
+            const stopApprovals = approvals.subscribe(sync)
+            const stopMcp = mcp.subscribe(sync)
             sync()
-            return () => { unsubscribe(); remove?.() }
+            return () => { stopApprovals(); stopMcp(); remove?.() }
           })
         }
         return {}

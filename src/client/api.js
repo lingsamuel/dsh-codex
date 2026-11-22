@@ -45,6 +45,14 @@ export function writeApprovalDecision(parameters, signal) {
   return writeAction('approval-decision', parameters, signal)
 }
 
+export function writeMcpElicitation(parameters, signal) {
+  return writeAction('mcp-elicitation', parameters, signal)
+}
+
+export function writeCodexCapability(collection, parameters, signal) {
+  return writeAction(collection, parameters, signal)
+}
+
 export function writePermissionAction(parameters, signal) {
   return writeAction('permission-action', parameters, signal)
 }
