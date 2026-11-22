@@ -68,6 +68,35 @@ test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t
   assert.deepEqual(messages.map(message => message.method), ['initialize', 'initialized', 'thread/list'])
 })
 
+test('正文搜索使用 Codex 返回的会话、片段和游标', async t => {
+  const thread = { id: 'older-thread', cwd: '/projects/older' }
+  const result = { data: [{ thread, snippet: '正文里的命中' }], nextCursor: 'more' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/search': params => {
+      assert.deepEqual(params, { searchTerm: '命中', sortKey: 'updated_at', limit: 20, archived: true, cursor: 'native+page' })
+      return { result }
+    },
+  })
+  const response = await get('/api/codex/search?searchTerm=%E5%91%BD%E4%B8%AD&archived=1&cursor=native%2Bpage')
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { ...result, workspacePaths: {} })
+  assert.deepEqual(messages.map(message => message.method), ['initialize', 'initialized', 'thread/search'])
+})
+
+test('会话内搜索保留 Codex 原生消息和轮次定位', async t => {
+  const hit = { itemId: 'item', turnId: 'turn', turnCursor: 'native-turn-cursor', snippet: '原文', snippetMatchRange: { start: 0, end: 2 } }
+  const { get } = await fakeCodex(t, {
+    'thread/searchOccurrences': params => {
+      assert.equal(params.threadId, 'original-thread')
+      assert.equal(params.searchTerm, '原文')
+      return { result: { data: [hit], nextCursor: null } }
+    },
+  })
+  const response = await get('/api/codex/search-occurrences?threadId=original-thread&searchTerm=%E5%8E%9F%E6%96%87')
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { data: [hit], nextCursor: null })
+})
+
 test('按原生 ID 读取轮次，浏览历史时不会恢复线程', async t => {
   const turn = { id: 'original-turn', startedAt: 123, items: [{ id: 'item', type: 'agentMessage', text: '原文' }] }
   const { get, messages, clientClosed } = await fakeCodex(t, {

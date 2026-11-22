@@ -1,4 +1,5 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { mergePages } from '../shared/pages.js'
 import { readPage } from './api.js'
 
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
@@ -15,19 +16,21 @@ export function createHistoryCatalog(signal) {
   let refreshing = false
   const observedStatuses = new Map()
   const observedReadStates = new Map()
+  const searchThreads = new Map()
+  const searchPaths = {}
   let followsLocalReceipts = false
 
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
       state.projects = projects
-      state.threads = threads.map(thread => observedStatuses.has(thread.id)
+      state.threads = mergePages(threads, searchThreads.values()).map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
       if (!followsLocalReceipts) {
         state.unreadIds = threads.filter(({ id, readState }) =>
           (observedReadStates.get(id) ?? readState?.firstUnread != null)).map(thread => thread.id)
       }
-      state.workspacePaths = workspacePaths
+      state.workspacePaths = { ...searchPaths, ...workspacePaths }
       state.selected = state.threads.find(thread => thread.id === state.selected?.id) ?? state.selected
       state.busy = false
       state.error = ''
@@ -55,6 +58,21 @@ export function createHistoryCatalog(signal) {
 
   return {
     store,
+    async search(searchTerm, searchSignal) {
+      const requestSignal = AbortSignal.any([signal, searchSignal])
+      const { data, nextCursor, workspacePaths } = await readPage('search', { searchTerm }, requestSignal)
+      requestSignal.throwIfAborted()
+      store.update(state => {
+        // DSH 只显示已知会话的搜索结果。快速清单补齐期间保留搜索新发现的线程。
+        const known = new Set(state.threads.map(thread => thread.id))
+        const found = data.map(result => result.thread).filter(thread => !known.has(thread.id))
+        for (const thread of found) searchThreads.set(thread.id, thread)
+        Object.assign(searchPaths, workspacePaths)
+        state.threads = mergePages(state.threads, found)
+        state.workspacePaths = { ...searchPaths, ...state.workspacePaths }
+      })
+      return { items: data.map(({ thread, snippet }) => ({ sessionId: thread.id, snippet })), hasMore: Boolean(nextCursor) }
+    },
     setStatus(threadId, status) {
       observedStatuses.set(threadId, status)
       store.update(state => {

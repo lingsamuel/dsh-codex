@@ -1,6 +1,7 @@
 import { CodexRpcError, readCodex } from './app-server.mjs'
 import { createCatalogReader, readProjectPage } from './catalog.mjs'
 import { createWatchRoute } from './live-watch.mjs'
+import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -12,6 +13,12 @@ function optionalParams(query, keys) {
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
+}
+
+function requiredParam(query, key, message) {
+  const value = query.get(key)
+  if (!value?.trim()) throw new CodexRpcError({ code: -32602, message })
+  return value
 }
 
 /** 将只读入口注册在 DSH 的受保护 API 下。 */
@@ -47,11 +54,26 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       modelProviders: [],
       ...optionalParams(query, ['cwd', 'cursor', 'projectId']),
     }))),
+    route('search', async (query, signal) => {
+      const page = await readCodex('thread/search', {
+        searchTerm: requiredParam(query, 'searchTerm', '缺少搜索内容。'),
+        sortKey: 'updated_at',
+        limit: 20,
+        ...(query.get('archived') === '1' && { archived: true }),
+        ...optionalParams(query, ['cursor']),
+      }, socketPath, signal)
+      const workspacePaths = await resolveWorkspacePaths(page.data.map(({ thread }) => thread.cwd))
+      return { ...page, workspacePaths }
+    }),
+    route('search-occurrences', native('thread/searchOccurrences', query => ({
+      threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
+      searchTerm: requiredParam(query, 'searchTerm', '缺少搜索内容。'),
+      limit: 20,
+      ...optionalParams(query, ['cursor']),
+    }))),
     route('turns', native('thread/turns/list', query => {
-      const threadId = query.get('threadId')
-      if (!threadId) throw new CodexRpcError({ code: -32602, message: '缺少 Codex 线程 ID。' })
       return {
-        threadId,
+        threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
         limit: 25,
         sortDirection: 'desc',
         itemsView: 'full',

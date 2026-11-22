@@ -54,9 +54,12 @@ export function provideCodexControllers(ctx, catalog) {
     retainInfo,
     subagentAddress: () => undefined,
     searchResultLimit,
-    async search() {
-      // 侧栏原生搜索同时匹配本地标题与路径。当前 Codex API 没有正文搜索入口。
-      return { ok: true, value: { items: [], hasMore: false } }
+    async search(query, signal) {
+      try {
+        return { ok: true, value: await catalog.search(query, signal) }
+      } catch (error) {
+        return { ok: false, error: remoteFailure(error.message) }
+      }
     },
     retain(id, { source }) {
       const thread = catalog.store.getSnapshot().threads.find(item => item.id === id)
