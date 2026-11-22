@@ -35,8 +35,8 @@ function changeRetainCount(counts, key, delta) {
   else delete counts[key]
 }
 
-function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts) {
-  const history = createCodexHistory(ctx, thread, catalog)
+function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, retention) {
+  const history = createCodexHistory(ctx, thread, catalog, retention)
   const modelDraft = sessionDraft(modelDrafts, thread.id)
   const permissionDraft = sessionDraft(permissionDrafts, thread.id)
   return {
@@ -128,27 +128,28 @@ export function provideCodexControllers(ctx, catalog) {
         return { ok: false, error: remoteFailure(error.message) }
       }
     },
-    retain(target, { source, facets = {} }) {
+    retain(target, { source, facets = {}, connection = source !== 'recentViews' }) {
       const id = typeof target === 'string' ? target : target.childSessionId
       const { threads, childThreads } = catalog.store.getSnapshot()
       const thread = childThreads[id] ?? threads.find(item => item.id === id)
       if (!thread) throw new Error(`找不到 Codex 会话 ${id}`)
+      const observer = retainInfo(id)
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts, permissionDrafts), fiber }
+        record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog, modelDrafts, permissionDrafts, observer), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }
       const { binding } = record
-      const observer = retainInfo(id)
       const heldFacets = Object.keys(facets).filter(facet => facets[facet] === true)
-      // DSH 仅在视图引用持有对应 facet 时组装对话，保留后台会话引用不会开启渲染。
+      // 最近会话保留视图缓存。浏览器会把独立的 SSE 计入同源 HTTP/1.1 连接数。
       function shiftRetention(delta) {
         observer.update(state => {
           state.referenceCount += delta
           changeRetainCount(state.retainedBy, source, delta)
           for (const facet of heldFacets) changeRetainCount(state.retainedFacets, facet, delta)
+          if (connection) changeRetainCount(state, 'connectionCount', delta)
         })
       }
       shiftRetention(1)
@@ -167,7 +168,8 @@ export function provideCodexControllers(ctx, catalog) {
           void record.fiber.dispose()
         }
       }
-      return { sessionId: id, binding, ready: binding.ready.then(() => binding), release, [Symbol.dispose]: release }
+      const ready = connection ? binding.ready.then(() => binding) : Promise.resolve(binding)
+      return { sessionId: id, binding, ready, release, [Symbol.dispose]: release }
     },
     async create({ workspaceId, cwd, sessionId } = {}) {
       const workspace = workspaces.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)

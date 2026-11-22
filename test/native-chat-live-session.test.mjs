@@ -29,18 +29,17 @@ const { installPermissions } = await import('../src/client/native-dsh/permission
 hook.deregister()
 const { createSnapshotStore } = await import(storeModule)
 
-function mockTransport(t) {
+function mockTransport(t, sources = []) {
   const original = { window: globalThis.window, document: globalThis.document, EventSource: globalThis.EventSource, fetch: globalThis.fetch }
-  let source
   globalThis.window = new EventTarget()
   globalThis.document = { baseURI: 'http://127.0.0.1:3190/' }
   globalThis.EventSource = class extends EventTarget {
-    constructor(url) { super(); source = this; this.url = url }
+    constructor(url) { super(); this.url = url; sources.push(this) }
     close() { this.closed = true }
   }
   t.mock.timers.enable({ apis: ['setTimeout'] })
   t.after(() => Object.assign(globalThis, original))
-  return () => source
+  return () => sources.at(-1)
 }
 
 function turn(id, status, items) {
@@ -49,6 +48,103 @@ function turn(id, status, items) {
 
 const ask = { id: 'ask', type: 'userMessage', content: [{ type: 'text', text: 'native question' }] }
 const answer = { id: 'answer', type: 'agentMessage', text: 'native reply' }
+
+test('最近会话和草稿只保留缓存，视图重开时续读原生历史', async t => {
+  const sources = []
+  mockTransport(t, sources)
+  const currentSource = () => sources.findLast(source => !source.closed)
+  const threads = ['first', 'second', 'draft'].map(id => ({ id, cwd: '/workspace' }))
+  const store = createSnapshotStore({ threads, projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+  const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) } }
+  const services = new Map()
+  const disposers = []
+  t.after(() => disposers.reverse().forEach(dispose => dispose?.()))
+  provideCodexControllers({
+    slots: { subscribe() {} },
+    provide: (key, value) => services.set(key, value),
+    effect: install => disposers.push(install()),
+    inject() {},
+    plugin() {
+      const stops = []
+      const dispose = () => stops.splice(0).reverse().forEach(stop => stop())
+      disposers.push(dispose)
+      return { ctx: { extend: () => ({ effect: install => stops.push(install()) }) }, dispose }
+    },
+  }, catalog)
+  const sessions = services.get('sessions')
+  const main = { source: 'mainView', facets: { conversation: true } }
+  const nativeTurn = turn('initial', 'completed', [ask, answer])
+  const emit = async (...turns) => currentSource().onmessage({ data: JSON.stringify({ type: 'snapshot', page: { data: turns }, mode: 'live' }) })
+
+  const first = sessions.retain('first', main)
+  await Promise.resolve()
+  await emit(nativeTurn)
+  currentSource().dispatchEvent(new MessageEvent('history-checkpoint', { lastEventId: 'seen-items' }))
+  const binding = await first.ready
+  const cached = binding.eventSource.getSnapshot()
+  const recent = sessions.retain('first', { source: 'recentViews' })
+  const draft = sessions.retain('first', { source: 'draft', connection: false })
+  const second = sessions.retain('second', main)
+  first.release()
+  await Promise.resolve()
+  const openThreads = () => sources.filter(source => !source.closed).map(source => source.url.searchParams.get('threadId'))
+  assert.deepEqual(openThreads(), ['second'])
+  assert.strictEqual(recent.binding.eventSource.getSnapshot(), cached)
+
+  const unopenedDraft = sessions.retain('draft', { source: 'draft', connection: false })
+  await unopenedDraft.ready
+  assert.deepEqual(openThreads(), ['second'])
+
+  const side = sessions.retain('first', { source: 'sidebarChat', facets: { conversation: true } })
+  assert.deepEqual(openThreads(), ['second', 'first'])
+  assert.equal(currentSource().url.searchParams.has('questions'), false)
+  side.release()
+  assert.deepEqual(openThreads(), ['second'])
+
+  const reopened = sessions.retain('first', main)
+  second.release()
+  assert.deepEqual(openThreads(), ['first'])
+  assert.equal(currentSource().url.searchParams.get('questions'), '1')
+  assert.equal(currentSource().url.searchParams.get('itemCursor'), 'seen-items')
+  assert.strictEqual(reopened.binding, binding)
+  await emit(turn('while-away', 'completed', [{ ...ask, id: 'new-ask' }]), nativeTurn)
+  assert.ok(binding.eventSource.getSnapshot().entries.some(({ event }) => event.data.codexTurnId === 'while-away'))
+
+  reopened.release()
+  recent.release()
+  draft.release()
+  unopenedDraft.release()
+  assert.deepEqual(openThreads(), [])
+})
+
+test('切走会话时取消重连补页，不把已暂停的缓存重新标为实时', async t => {
+  const source = mockTransport(t)
+  const retention = createSnapshotStore({ connectionCount: 1 })
+  const history = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' }, undefined, retention)
+  await Promise.resolve()
+  const emit = (data, nextCursor) => source().onmessage({ data: JSON.stringify({
+    type: 'snapshot', mode: 'live', page: { data, nextCursor },
+  }) })
+  const initial = turn('initial', 'completed', [ask])
+  await emit([initial])
+
+  const request = Promise.withResolvers()
+  const reply = Promise.withResolvers()
+  globalThis.fetch = (_, { signal }) => {
+    request.resolve(signal)
+    return reply.promise
+  }
+  const refresh = emit([turn('new', 'completed', [answer])], 'gap')
+  const requestSignal = await request.promise
+  retention.set({})
+  reply.resolve(Response.json({ data: [initial] }))
+  await refresh
+
+  assert.equal(requestSignal.aborted, true)
+  assert.equal(history.session.getSnapshot().live.mode, 'disconnected')
+  assert.deepEqual(history.events.getSnapshot().entries.filter(({ event }) => event.type === 'turn/start')
+    .map(({ event }) => event.data.codexTurnId), ['initial'])
+})
 
 test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原生权限', async t => {
   mockTransport(t)

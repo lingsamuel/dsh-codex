@@ -22,7 +22,7 @@ function pageBounds(entry) {
 }
 
 /** 给原版聊天渲染器提供由会话引用持有的原生历史、状态和待发送队列。 */
-export function createCodexHistory(ctx, thread, catalog) {
+export function createCodexHistory(ctx, thread, catalog, retention) {
   const controller = new AbortController()
   const { signal } = controller
   const address = subagentAddress(thread)
@@ -82,7 +82,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   let outlineRevision = 0
   let archiveRevision = 0
   let liveQuestions = []
-  let watchingInteractions
+  let watchingInteractions = false
+  let itemCursor
   let markReady
   const ready = new Promise(resolve => { markReady = resolve })
   ctx.effect(() => () => {
@@ -266,7 +267,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, threadSummary, replace }) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
     if (!opened || replace) {
       if (replace) clearHistory()
       await addOlderPage(page)
@@ -276,7 +277,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       let cursor = page.nextCursor
       // 重连跨过整页时，按游标补齐两个窗口之间的轮次，已经载入的旧页继续保留。
       while (rows.length && recent.length && cursor && !recent.some(turn => transcript.getTurn(turn.id))) {
-        const earlier = await loadPage(cursor)
+        const earlier = await loadPage(cursor, lifetime)
         recent = mergePages(earlier.data.toReversed(), recent)
         if (earlier.nextCursor === cursor) break
         cursor = earlier.nextCursor
@@ -301,6 +302,8 @@ export function createCodexHistory(ctx, thread, catalog) {
       for (const turn of refreshed) await updateTurn(turn)
     }
     publish()
+    // 已开始合并的轮次保留在缓存中，旧连接不能在释放后更新实时状态或阅读回执。
+    if (lifetime.aborted) return
     publishState({ mode, status, historyMode, canAcceptDirectInput, archived })
     if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
@@ -376,7 +379,7 @@ export function createCodexHistory(ctx, thread, catalog) {
 
   function receive(frame, lifetime) {
     return enqueue(async () => {
-      if (frame.type === 'snapshot') return receiveSnapshot(frame)
+      if (frame.type === 'snapshot') return receiveSnapshot(frame, lifetime)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
       if (frame.type === 'questions' && watchingInteractions) {
         liveQuestions = frame.requests
@@ -451,7 +454,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       triedFallback = true
       try {
         const page = await loadPage(undefined, lifetime)
-        await receiveSnapshot({ page, mode: 'history' })
+        await receiveSnapshot({ page, mode: 'history' }, lifetime)
       } finally {
         if (lifetime.aborted) triedFallback = false
       }
@@ -557,28 +560,38 @@ export function createCodexHistory(ctx, thread, catalog) {
       catalogArchived = archived
       catalogArchiveRevision++
     }
-    const selected = !visibleCatalog || snapshot?.selected?.id === thread.id
-    if (selected === watchingInteractions) return
+    const connected = !retention || Boolean(retention.getSnapshot().connectionCount)
+    const selected = connected && (!visibleCatalog || snapshot?.selected?.id === thread.id)
+    if (Boolean(watch) === connected && selected === watchingInteractions) return
     watchingInteractions = selected
     watch?.abort()
-    watch = new AbortController()
+    const nextWatch = connected ? new AbortController() : undefined
+    watch = nextWatch
+    triedFallback = false
     if (!selected) {
       liveQuestions = []
       codexApprovals.set([])
-      publishQuestions()
     }
+    if (!nextWatch) {
+      publishState({ mode: 'disconnected' })
+      return
+    }
+    if (!selected) publishQuestions()
     // 队列可能还在等上一帧的异步读取。让已排队的帧携带自己的连接寿命，防止切回时显示旧审批。
-    const lifetime = AbortSignal.any([signal, watch.signal])
+    const lifetime = AbortSignal.any([signal, nextWatch.signal])
     openLiveWatch(thread.id, {
       receive: frame => receive(frame, lifetime), changeMode: mode => changeMode(mode, lifetime),
-      queue: true, questions: selected,
+      queue: true, questions: selected, itemCursor,
+      // 暂停后只从已完成投影的条目继续，仍在排队的旧帧会随旧连接取消。
+      checkpoint: cursor => enqueue(() => { itemCursor = cursor }, lifetime),
     }, lifetime)
   }
-  if (visibleCatalog) {
+  if (visibleCatalog || retention) {
     ctx.effect(() => {
-      const unsubscribe = visibleCatalog.subscribe(syncWatch)
+      const stopCatalog = visibleCatalog?.subscribe(syncWatch)
+      const stopRetention = retention?.subscribe(syncWatch)
       queueMicrotask(syncWatch)
-      return () => { unsubscribe(); watch?.abort() }
+      return () => { stopCatalog?.(); stopRetention?.(); watch?.abort() }
     })
   } else syncWatch()
   return {
