@@ -1,8 +1,6 @@
 # DSH ChatGPT
 
-DSH ChatGPT 是本机 Codex 的展示和转发层。它在独立的 DeepSeek Harness `codex` Profile 中，用 DSH 的原生工作区、侧栏和聊天界面呈现 Codex 会话。
-
-如果你已经在使用 Codex CLI，希望在浏览器里快速切换项目和长对话，或接着处理 CLI 中的任务，可以用它打开同一批会话。
+DSH ChatGPT 在独立的 DeepSeek Harness `codex` Profile 中接入本机 Codex。你可以通过 DSH 的原生工作区和聊天界面浏览项目、查看历史，或接着处理 CLI 中的任务。
 
 ## 核心功能
 
