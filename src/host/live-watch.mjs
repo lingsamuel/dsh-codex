@@ -2,6 +2,7 @@ import { openCodexReader } from './app-server.mjs'
 import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail } from './live-history.mjs'
+import { createRolloutFacts } from './rollout-facts.mjs'
 import { watchNativeUnread } from './unread-watch.mjs'
 
 const encoder = new TextEncoder()
@@ -39,10 +40,16 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let reading = false
           let dirty = false
           let tail
+          let rolloutFacts
           let connection
           let catalogReady = false
           let catalogQueue = Promise.resolve()
           const early = []
+
+          async function sendFacts() {
+            const facts = await rolloutFacts?.read()
+            if (facts) send({ type: 'rollout-facts', ...facts })
+          }
 
           function wake() {
             dirty = true
@@ -53,8 +60,9 @@ export function createWatchRoute(socketPath, ownerSignal) {
               dirty = false
               reading = true
               try {
-                const updates = await tail.readChanges()
-                for (const update of updates) send({ type: 'change', ...update })
+                await Promise.all([tail.readChanges().then(updates => {
+                  for (const update of updates) send({ type: 'change', ...update })
+                }), sendFacts()])
               } catch (error) {
                 connection.close(error)
               } finally {
@@ -108,6 +116,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
                 connection.request('thread/read', { threadId }),
                 configRead,
               ])
+              rolloutFacts = createRolloutFacts(thread.path, signal)
               const watching = watchNativeHistory({
                 thread,
                 sqliteHome: sqliteDirectory(config),
@@ -119,6 +128,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
               send({ type: 'snapshot', page, status: thread.status, readState, mode: watching ? 'live' : 'history' })
               for (const message of early) send({ type: 'notification', notification: message })
               early.length = 0
+              void sendFacts()
               if (dirty) wake()
               await connection.closed
             } catch {

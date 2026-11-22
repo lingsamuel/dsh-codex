@@ -49,6 +49,8 @@ export function createCodexHistory(ctx, thread, catalog) {
   const transcript = createLiveTranscript()
   const attachments = new Map()
   const outline = createSnapshotStore(undefined)
+  const todos = createSnapshotStore(undefined)
+  const projections = new Map([['turnOutline', outline], ['todos', todos]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -233,6 +235,10 @@ export function createCodexHistory(ctx, thread, catalog) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
       if (frame.type === 'unread') return catalog?.applyUnread(frame)
+      if (frame.type === 'rollout-facts') {
+        todos.set(frame.todos)
+        return
+      }
       if (frame.type === 'change') {
         await updateTurn(frame.turn, frame.items)
         publish()
@@ -328,7 +334,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       loadOlder,
       loadThrough,
       findMessage,
-      projections: { faceOf: key => key === 'turnOutline' ? outline : emptyProjection },
+      projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       async readAttachment(id) {
         const value = attachments.get(id)
         return value
