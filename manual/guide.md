@@ -39,11 +39,13 @@ dsh --profile codex --no-open
 
 ## 从源码启动
 
-在仓库根目录执行以下命令。`npm start` 每次都会先构建插件，再使用仓库内的独立运行目录启动 DSH。更新源码、DSH 或仓库中的 Profile 配置后，重新运行启动命令即可。
+在仓库根目录执行以下命令。`npm start` 每次都会先构建插件，再使用仓库内的 `codex` Profile 启动 DSH，并保留已有 Profile 和网页设置。新建的 Profile 通过插件组合包读取仓库中的默认配置。
 
 ```sh
 npm ci
 npm start -- --no-open
 ```
+
+测试时可使用 `npm start -- --fresh-profile --no-open --port 3191`。每次都会创建一个独立的临时 DSH 运行目录，退出后清理。
 
 插件默认用 `codex app-server daemon version` 查找共享服务。可通过 `DSH_CHATGPT_SOCKET` 指定 socket，通过 `DSH_CHATGPT_CODEX_BIN` 指定 Codex 可执行文件。源码启动脚本可通过 `DSH_CHATGPT_DSH_BIN` 指定 DSH 可执行文件。
