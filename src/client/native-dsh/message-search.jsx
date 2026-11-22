@@ -2,10 +2,12 @@ import { Button, IconSearchOutlineRegular, Input, Modal } from '@deepseek-ai/dsh
 import { useEffect, useRef, useState } from 'react'
 import { readPage } from '../api.js'
 import { findRenderedMessage } from './message-anchor.js'
+import { renderedSearchMatch } from './message-search-match.js'
 
 const slot = 'conversation.session.header.utilities'
 const locale = 'codex.history.search'
 const searchTarget = 'data-codex-message-search-target'
+const matchHighlight = 'codex-message-search-match'
 const copy = {
   zh: { title: '在会话中搜索', query: '搜索消息', search: '搜索', close: '关闭', more: '更多结果', busy: '正在查询…', empty: '没有找到消息。', unavailable: '这条消息已无法定位。' },
   en: { title: 'Search conversation', query: 'Search messages', search: 'Search', close: 'Close', more: 'More results', busy: 'Searching…', empty: 'No matching messages.', unavailable: 'This message is no longer available.' },
@@ -37,6 +39,7 @@ const searchStyles = `
     border-radius: var(--dsw-radius-sm);
     background-color: color-mix(in srgb, var(--dsw-alias-state-business-primary) 10%, transparent);
   }
+  ::highlight(${matchHighlight}) { background-color: var(--dsw-alias-state-warn-secondary); }
 `
 
 function MessageSearch({ sessionId, findMessage, useSession, t }) {
@@ -86,20 +89,35 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
     })
   }
 
-  function jumpTo(node) {
+  function jumpTo(node, hit) {
     clearJump.current?.()
     let timeout
+    let highlight
     // 弹窗关闭后再标记落点和滚动，避免高亮留在遮罩下或被关闭时的焦点还原遮住。
     const frame = requestAnimationFrame(() => {
       if (!node.isConnected) return clear()
       node.setAttribute(searchTarget, '')
+      const range = CSS.highlights && typeof Highlight === 'function' ? renderedSearchMatch(node, hit, page) : undefined
+      if (range) {
+        highlight = new Highlight(range)
+        CSS.highlights.set(matchHighlight, highlight)
+      }
       node.scrollIntoView({ block: 'center' })
+      const scrollport = range && node.closest('[data-conversation-scroll]')
+      if (scrollport) {
+        const match = range.getBoundingClientRect()
+        const viewport = scrollport.getBoundingClientRect()
+        if (match.height && (match.top < viewport.top || match.bottom > viewport.bottom)) {
+          scrollport.scrollBy({ top: match.top - viewport.top + (match.height - viewport.height) / 2 })
+        }
+      }
       timeout = setTimeout(clear, 2500)
     })
     function clear() {
       cancelAnimationFrame(frame)
       clearTimeout(timeout)
       node.removeAttribute(searchTarget)
+      if (highlight && CSS.highlights.get(matchHighlight) === highlight) CSS.highlights.delete(matchHighlight)
       clearJump.current = undefined
     }
     clearJump.current = clear
@@ -115,7 +133,7 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
       if (!node) throw new Error(t('unavailable'))
       node.closest('[hidden="until-found"]')?.dispatchEvent(new Event('beforematch'))
       close()
-      jumpTo(node)
+      jumpTo(node, hit)
     })
   }
 
@@ -133,9 +151,9 @@ function MessageSearch({ sessionId, findMessage, useSession, t }) {
       {error && <p className="codex-message-search-status" role="alert">{error}</p>}
       {page?.data.length === 0 && <p className="codex-message-search-status" role="status">{t('empty')}</p>}
       {page?.data.length > 0 && <div className="codex-message-search-results">
-        <ul>{page.data.map(hit => {
+        <ul>{page.data.map((hit, index) => {
           const { start, end } = hit.snippetMatchRange
-          return <li key={`${hit.turnId}:${hit.itemId}:${start}:${end}:${hit.snippet}`}>
+          return <li key={`${hit.turnId}:${hit.itemId}:${index}`}>
             <Button className="codex-message-search-hit" disabled={busy} onClick={() => reveal(hit)}>
               <span>{hit.snippet.slice(0, start)}<mark>{hit.snippet.slice(start, end)}</mark>{hit.snippet.slice(end)}</span>
             </Button>
