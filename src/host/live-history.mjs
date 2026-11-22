@@ -1,4 +1,4 @@
-import { CodexRpcError, readCodexPages } from './app-server.mjs'
+import { CodexRpcError, iterateCodexPages } from './app-server.mjs'
 
 const turnList = 'thread/turns/list'
 const itemList = 'thread/items/list'
@@ -27,7 +27,7 @@ export async function readLatestTurn(request, threadId, itemsView) {
 }
 
 function same(left, right) {
-  return JSON.stringify(left) === JSON.stringify(right)
+  return left === right || (left !== undefined && right !== undefined && JSON.stringify(left) === JSON.stringify(right))
 }
 
 function needsUpdate(item) {
@@ -36,22 +36,31 @@ function needsUpdate(item) {
 }
 
 function readThrough(request, method, parameters, cursor) {
-  return readCodexPages(next => request(method, { ...parameters, ...(next != null && { cursor: next }) }), cursor)
+  return iterateCodexPages(next => request(method, { ...parameters, ...(next != null && { cursor: next }) }), cursor)
 }
 
 function flattenItem({ item, startedAtMs, completedAtMs }) {
   return { ...item, startedAtMs: startedAtMs ?? item.startedAtMs, completedAtMs: completedAtMs ?? item.completedAtMs }
 }
 
-/** 线程级条目按写入顺序分页，可以发现追加到已经结束的旧轮次的记录。 */
-export async function readItemTailCursor(request, threadId) {
+function invalidHistoryCursor(error) {
+  return error instanceof CodexRpcError && (error.code === -32600 || error.code === -32602)
+}
+
+async function readItemTail(request, threadId) {
   try {
-    const { backwardsCursor } = await request(itemList, { threadId, limit: 1, sortDirection: 'desc' })
-    return backwardsCursor ?? null
+    const { data, backwardsCursor } = await request(itemList, { threadId, limit: 1, sortDirection: 'desc' })
+    const { item, turnId } = data?.[0] ?? {}
+    return { cursor: backwardsCursor ?? null, itemId: item?.id, turnId }
   } catch (error) {
     if (error instanceof CodexRpcError && [-32600, -32601, -32602].includes(error.code)) return null
     throw error
   }
+}
+
+/** 线程级条目按写入顺序分页，可以发现追加到已经结束的旧轮次的记录。 */
+export async function readItemTailCursor(request, threadId) {
+  return (await readItemTail(request, threadId))?.cursor ?? null
 }
 
 /** 跟随活跃尾部。分页历史通过原生条目锚点读取新增记录和需要刷新的未完成项。 */
@@ -66,83 +75,118 @@ export function createHistoryTail(request, thread, initialPage, itemCursor) {
   let lastTurnId = initialPage.data[0]?.id
   let tailCursor = initialPage.backwardsCursor
 
-  async function readItems(turnId, previous) {
-    const known = previous ? [...previous.items.values()] : []
-    const firstOpen = known.findIndex(needsUpdate)
-    const anchor = firstOpen < 0 ? known.at(-1) : known[firstOpen - 1]
-    const rows = await readThrough(request, itemList, { threadId, turnId, limit: 100, sortDirection: 'asc' },
+  function readItems(turnId, known) {
+    let anchor
+    for (const item of known.values()) {
+      if (needsUpdate(item)) break
+      anchor = item
+    }
+    return readThrough(request, itemList, { threadId, turnId, limit: 100, sortDirection: 'asc' },
       anchor ? { type: 'item', itemId: anchor.id } : null)
-    return rows.map(flattenItem)
   }
 
-  async function readLateItems() {
-    const latestCursor = await readItemTailCursor(request, threadId)
-    if (!latestCursor || latestCursor === itemCursor) return []
-    // 先取得新的反向游标，再读取旧游标之后的条目，避免跨过并发写入。
-    const rows = itemCursor
-      ? await readThrough(request, itemList, { threadId, limit: 100, sortDirection: 'asc' }, itemCursor)
-      : []
-    itemCursor = latestCursor
-    return rows
-  }
-
-  return {
-    itemCursor: () => itemCursor,
-    async readChanges() {
-      const head = await readThreadTurns(request, { threadId, limit: 1, sortDirection: 'desc', itemsView })
-      const latest = head.data[0]
-      if (!latest) return lastTurnId ? null : []
-      if (latest.id !== lastTurnId && seen.has(latest.id)) return null
-      let turns = [latest]
-      if (latest.id !== lastTurnId) {
-        try {
-          turns = await readThrough(request, turnList, { threadId, limit: 100, sortDirection: 'asc', itemsView }, tailCursor)
-        } catch (error) {
-          // 原生已发出的游标变为无效，通常是回退删去了它的锚点。
-          if (tailCursor && error instanceof CodexRpcError && error.code === -32602) return null
-          throw error
+  async function deliverTurn({ items, ...turn }, consume, scanned, isCurrent) {
+    const previous = seen.get(turn.id)
+    const sameTurn = previous && same(previous.turn, turn)
+    if (paginated && sameTurn && turn.status !== 'inProgress') return true
+    const rows = previous?.items ?? new Map()
+    const pages = paginated ? readItems(turn.id, rows) : [{ data: items }]
+    try {
+      for await (const { data, nextCursor } of pages) {
+        if (!isCurrent()) return false
+        const changed = []
+        for (const entry of data) {
+          const item = paginated ? flattenItem(entry) : entry
+          if (same(rows.get(item.id), item)) continue
+          rows.set(item.id, item)
+          changed.push(item)
         }
+        const lastPage = !nextCursor
+        if ((changed.length || (lastPage && !sameTurn))
+          && await consume({ turn, items: changed }, lastPage) === false) return false
       }
-      if (!turns.some(turn => turn.id === latest.id)) return null
-
-      let late = []
-      if (paginated) {
-        try {
-          late = await readLateItems()
-        } catch (error) {
-          if (error instanceof CodexRpcError && (error.code === -32600 || error.code === -32602)) return null
-          throw error
-        }
-      }
-      const changes = []
-      const scanned = new Set()
-      for (const { items, ...turn } of turns) {
-        const previous = seen.get(turn.id)
-        const sameTurn = previous && same(previous.turn, turn)
-        if (paginated && sameTurn && turn.status !== 'inProgress') continue
-        const native = paginated ? await readItems(turn.id, previous) : items
-        scanned.add(turn.id)
-        const rows = previous?.items ?? new Map()
-        const changed = native.filter(item => !same(rows.get(item.id), item))
-        if (!sameTurn || changed.length) changes.push({ turn, items: changed })
-        for (const item of changed) rows.set(item.id, item)
-        seen.set(turn.id, { turn, items: rows })
-      }
-      const lateByTurn = Map.groupBy(late.filter(({ turnId }) => !scanned.has(turnId)), row => row.turnId)
-      for (const [id, appended] of lateByTurn) {
-        const previous = seen.get(id)
-        const items = appended.map(flattenItem).filter(item => !same(previous?.items.get(item.id), item))
-        if (items.length) changes.push({ turn: previous?.turn ?? { id }, items, onlyIfLoaded: true })
-      }
-
-      // 较早的轮次只保留状态，用于辨认游标重复出现的锚点。
-      const tailId = turns.at(-1).id
-      for (const [id, view] of seen) {
-        if (id !== tailId && view.turn.status !== 'inProgress') view.items.clear()
-      }
-      lastTurnId = latest.id
-      tailCursor = head.backwardsCursor
-      return changes
-    },
+    } catch (error) {
+      if (paginated && invalidHistoryCursor(error)) return false
+      throw error
+    }
+    scanned.add(turn.id)
+    seen.set(turn.id, { turn, items: rows })
+    return true
   }
+
+  async function deliverLateItems(consume, scanned, head, isCurrent) {
+    const pages = readThrough(request, itemList, { threadId, limit: 100, sortDirection: 'asc' }, itemCursor)
+    const { itemId, turnId: lastTurn } = head
+    const hasBoundary = itemId != null && lastTurn != null
+    try {
+      for await (const { data } of pages) {
+        if (!isCurrent()) return false
+        // 范围起点是原生不透明游标，终点按捕获的条目辨认，避免追着并发追加无限补页。
+        const boundary = hasBoundary ? data.findIndex(row => row.turnId === lastTurn && row.item.id === itemId) : -1
+        const included = boundary < 0 ? data : data.slice(0, boundary + 1)
+        const byTurn = Map.groupBy(included.filter(row => !scanned.has(row.turnId)), row => row.turnId)
+        for (const [id, appended] of byTurn) {
+          const previous = seen.get(id)
+          const items = appended.map(flattenItem).filter(item => !same(previous?.items.get(item.id), item))
+          if (items.length && await consume({ turn: previous?.turn ?? { id }, items, onlyIfLoaded: true }, true) === false) return false
+        }
+        if (boundary >= 0) return true
+      }
+    } catch (error) {
+      if (invalidHistoryCursor(error)) return false
+      throw error
+    }
+    // 有明确终点却未读到时，原范围可能已被回退或替换。
+    return !hasBoundary
+  }
+
+  /** 回调成功交付当前页后才继续。返回 false 时丢弃此尾部并发送替换快照。 */
+  async function readChanges(consume, isCurrent = () => true) {
+    const head = await readThreadTurns(request, { threadId, limit: 1, sortDirection: 'desc', itemsView })
+    const latest = head.data[0]
+    if (!isCurrent()) return false
+    if (!latest) return !lastTurnId
+    if (latest.id !== lastTurnId && seen.has(latest.id)) return false
+    // 普通轮次读取前固定条目游标上界。较晚的写入仍可在下一次检查中读到。
+    const latestItem = paginated ? await readItemTail(request, threadId) : null
+    if (!isCurrent()) return false
+    const pages = latest.id === lastTurnId ? [{ data: [latest] }]
+      : readThrough(request, turnList, { threadId, limit: 100, sortDirection: 'asc', itemsView }, tailCursor)
+    const scanned = new Set()
+    let foundLatest = false
+    try {
+      for await (const { data } of pages) {
+        if (!isCurrent()) return false
+        for (const turn of data) {
+          if (!isCurrent() || !await deliverTurn(turn, consume, scanned, isCurrent)) return false
+          if (turn.id === latest.id) {
+            foundLatest = true
+            break
+          }
+          if (scanned.has(turn.id) && turn.status !== 'inProgress') seen.get(turn.id).items.clear()
+        }
+        if (foundLatest) break
+      }
+    } catch (error) {
+      // 原生已发出的轮次游标变为无效，通常是回退删去了它的锚点。
+      if (tailCursor && invalidHistoryCursor(error)) return false
+      throw error
+    }
+    if (!foundLatest || !isCurrent()) return false
+    const latestCursor = latestItem?.cursor
+    if (itemCursor && latestCursor && latestCursor !== itemCursor
+      && !await deliverLateItems(consume, scanned, latestItem, isCurrent)) return false
+    if (!isCurrent()) return false
+
+    // 较早的轮次只保留状态，用于辨认游标重复出现的锚点。
+    for (const [id, view] of seen) {
+      if (id !== latest.id && view.turn.status !== 'inProgress') view.items.clear()
+    }
+    lastTurnId = latest.id
+    tailCursor = head.backwardsCursor
+    if (latestCursor) itemCursor = latestCursor
+    return true
+  }
+
+  return { itemCursor: () => itemCursor, readChanges }
 }

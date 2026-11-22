@@ -18,6 +18,40 @@ const catalogMethods = new Set([
 ])
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
+/** 每个批次沿用 change 帧。终态只随本轮最后一个批次或随后的空批次发送。 */
+function* historyChangeFrames({ turn, items, onlyIfLoaded }, lastPage) {
+  const { status, completedAt, durationMs, error, ...ongoing } = turn
+  const initial = !onlyIfLoaded && status && status !== 'inProgress' ? ongoing : turn
+  const prefixFor = fields => `data: ${JSON.stringify({ type: 'change', turn: fields, ...(onlyIfLoaded && { onlyIfLoaded }) }).slice(0, -1)},"items":[`
+  const prefix = prefixFor(initial)
+  const suffix = ']}\n\n'
+  const overhead = Buffer.byteLength(prefix) + suffix.length
+  const parts = []
+  let length = overhead
+  const encodeBatch = start => {
+    const bytes = encoder.encode(start + parts.join(',') + suffix)
+    // 等待下游时仅保留编码后的当前批次，不保留该批次的序列化字符串。
+    parts.length = 0
+    length = overhead
+    return bytes
+  }
+  for (const item of items) {
+    const part = JSON.stringify(item)
+    const bytes = Buffer.byteLength(part)
+    if (parts.length && length + 1 + bytes > maxQueuedBytes) yield encodeBatch(prefix)
+    if (parts.length) length++
+    parts.push(part)
+    length += bytes
+  }
+
+  const finalPrefix = lastPage && initial !== turn ? prefixFor(turn) : prefix
+  if (parts.length && finalPrefix !== prefix
+    && length - overhead + Buffer.byteLength(finalPrefix) + suffix.length > maxQueuedBytes) {
+    yield encodeBatch(prefix)
+  }
+  yield encodeBatch(finalPrefix)
+}
+
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
 export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers) {
   return {
@@ -90,7 +124,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           const encodeFrame = frame => encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)
           const send = frame => { if (!signal.aborted) push(encodeFrame(frame)) }
           // 历史读取串行等待当前帧发完，积压时只保留正在发送的历史帧。
-          const sendHistory = frame => new Promise(resolve => push(encodeFrame(frame), resolve))
+          const writeHistory = bytes => new Promise(resolve => push(bytes, resolve))
           const heartbeat = setInterval(() => {
             if (waiting) push(heartbeatFrame)
           }, 15_000)
@@ -192,19 +226,28 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               pendingReadState = undefined
               try {
                 if (readHistory) {
-                  const updates = reset ? null : await tail.readChanges()
-                  if (!updates || reset) {
+                  let changed = false
+                  let sawUserInput = false
+                  const isCurrent = () => !reset && !signal.aborted
+                  const complete = isCurrent() && await tail.readChanges(async (update, lastPage) => {
+                    if (!isCurrent()) return false
+                    for (const bytes of historyChangeFrames(update, lastPage)) {
+                      await writeHistory(bytes)
+                      signal.throwIfAborted()
+                      if (reset) return false
+                    }
+                    changed = true
+                    sawUserInput ||= awaitingPreview && update.items.some(item => item.type === 'userMessage')
+                  }, isCurrent)
+                  signal.throwIfAborted()
+                  if (!complete || reset) {
                     reset = false
                     const reading = await connection.request('thread/read', { threadId })
                     await sendSnapshot(reading, true)
                   } else {
-                    for (const update of updates) {
-                      await sendHistory({ type: 'change', ...update })
-                      signal.throwIfAborted()
-                    }
-                    if (updates.length && steers?.list(observedThread.id).length) wakeQueue?.()
+                    if (changed && steers?.list(observedThread.id).length) wakeQueue?.()
                     checkpoint(tail.itemCursor())
-                    if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
+                    if (sawUserInput) {
                       // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
                       const result = await connection.request('thread/read', { threadId }).catch(() => null)
                       if (result?.thread.name || result?.thread.preview) {
@@ -331,10 +374,10 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             const fromCursor = !replace && itemCursor && resumeCursor ? resumeCursor : itemCursor
             tail = createHistoryTail(connection.request, thread, page, fromCursor)
             awaitingPreview = !thread.name && !thread.preview
-            const writing = sendHistory({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
+            const writing = writeHistory(encodeFrame({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
               planMode: readDraftPlanMode?.(threadId), goal,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
-              mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
+              mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) }))
             if (fromCursor === itemCursor) checkpoint(itemCursor)
             else wake()
             questionObserver?.update(thread.status)

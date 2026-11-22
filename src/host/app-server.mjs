@@ -139,16 +139,21 @@ export function codexSqliteHome(configResult, codexHome) {
   return configResult?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || codexHome
 }
 
-/** 沿 Codex 返回的不透明游标继续读取，保留原生顺序。 */
-export async function readCodexPages(read, cursor) {
-  const entries = []
+/** 按原生顺序逐页交付。消费者取下一页时才发下一次请求。 */
+export async function* iterateCodexPages(read, cursor) {
   const cursors = new Set()
   do {
     const page = await read(cursor)
-    entries.push(...page.data)
     if (cursor != null) cursors.add(cursor)
     cursor = page.nextCursor
     if (cursor && cursors.has(cursor)) throw new Error('Codex 返回了重复的分页游标。')
+    yield page
   } while (cursor)
+}
+
+/** 沿 Codex 返回的不透明游标收集完整结果，保留原生顺序。 */
+export async function readCodexPages(read, cursor) {
+  const entries = []
+  for await (const { data } of iterateCodexPages(read, cursor)) entries.push(...data)
   return entries
 }

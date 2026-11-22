@@ -2789,6 +2789,101 @@ test('SSE 大快照分块发送，续读检查点在完整快照之后到达', {
   assert.match(decoder.decode((await reader.read()).value), /^id: after-snapshot\nevent: history-checkpoint\n/)
 })
 
+async function readSseFrame(reader, firstChunk) {
+  const decoder = new TextDecoder()
+  let frame = firstChunk ? decoder.decode(firstChunk, { stream: true }) : ''
+  while (!frame.endsWith('\n\n')) {
+    const { done, value } = await reader.read()
+    assert.equal(done, false)
+    frame += decoder.decode(value, { stream: true })
+  }
+  return frame
+}
+
+test('SSE 历史增量发送当前页后才读取下一页，最后确认终态和检查点', { timeout: 5000 }, async t => {
+  const threadId = 'paged-round'
+  const turnId = 'round'
+  const text = 'x'.repeat(3 * 1024 * 1024)
+  let saved = false
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, name: '分批追踪', historyMode: 'paginated' } } }),
+    'thread/turns/list': () => ({ result: { data: [{
+      id: turnId, status: saved ? 'completed' : 'inProgress', ...(saved && { completedAt: 7 }), items: [],
+    }], backwardsCursor: 'after-turn' } }),
+    'thread/items/list': ({ turnId: selected, sortDirection, cursor }) => {
+      if (!selected) return { result: { data: [],
+        ...(sortDirection === 'desc' && { backwardsCursor: saved ? 'after-append' : 'before-append' }),
+      } }
+      const page = Number(cursor ?? 0)
+      return { result: { data: [{ item: { id: `reply-${page}`, type: 'agentMessage', text }, completedAtMs: page + 1 }],
+        nextCursor: page < 3 ? String(page + 1) : null } }
+    },
+  })
+  const reader = (await fixture.get(`/api/codex/watch?threadId=${threadId}`)).body.getReader()
+  t.after(() => reader.cancel())
+  assert.equal(JSON.parse((await readSseFrame(reader)).slice(6)).type, 'snapshot')
+  assert.match(await readSseFrame(reader), /^id: before-append\n/)
+  saved = true
+  const readState = { firstUnread: { type: 'turn', turnId }, revision: 'new' }
+  fixture.broadcast({ method: 'thread/readState/changed', params: { threadId, readState } })
+  const first = await reader.read()
+  assert.equal(first.value.length, 64 * 1024)
+  await delay(30)
+  const pages = () => fixture.messages.filter(({ method, params }) =>
+    method === 'thread/items/list' && params.turnId === turnId).map(({ params }) => params.cursor)
+  assert.deepEqual(pages(), [undefined])
+
+  let frame = await readSseFrame(reader, first.value)
+  const received = []
+  let completedAfter
+  while (frame.startsWith('data: ')) {
+    const update = JSON.parse(frame.slice(6))
+    assert.ok(Buffer.byteLength(frame) <= Buffer.byteLength(text) + 1024)
+    assert.equal(update.type, 'change')
+    assert.equal(update.turn.id, turnId)
+    assert.ok(update.items.length <= 1)
+    for (const item of update.items) {
+      assert.equal(item.text, text)
+      received.push(item.id)
+    }
+    if (update.turn.status === 'completed') {
+      assert.equal(update.turn.completedAt, 7)
+      completedAfter = received.length
+    } else assert.equal(update.turn.completedAt, undefined)
+    frame = await readSseFrame(reader)
+  }
+  assert.deepEqual(pages(), [undefined, '1', '2', '3'])
+  assert.deepEqual(received, ['reply-0', 'reply-1', 'reply-2', 'reply-3'])
+  assert.equal(completedAfter, received.length)
+  assert.match(frame, /^id: after-append\nevent: history-checkpoint\n/)
+  assert.deepEqual(JSON.parse((await readSseFrame(reader)).slice(6)), { type: 'reading-receipt', readState })
+})
+
+test('旧版历史增量按 UTF-8 字节限制单帧，保留原生条目', { timeout: 5000 }, async t => {
+  const threadId = 'legacy-round'
+  const text = '界'.repeat(400_000)
+  const items = [0, 1, 2].map(index => ({ id: `reply-${index}`, type: 'agentMessage', text }))
+  let saved = false
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, name: '旧版历史', historyMode: 'legacy' } } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'round', status: 'inProgress', items: saved ? items : [] }] } }),
+  })
+  const reader = (await fixture.get(`/api/codex/watch?threadId=${threadId}`)).body.getReader()
+  t.after(() => reader.cancel())
+  assert.equal(JSON.parse((await readSseFrame(reader)).slice(6)).type, 'snapshot')
+  saved = true
+  const readState = { firstUnread: { type: 'turn', turnId: 'round' }, revision: 'new' }
+  fixture.broadcast({ method: 'thread/readState/changed', params: { threadId, readState } })
+  for (const item of items) {
+    const frame = await readSseFrame(reader)
+    assert.ok(Buffer.byteLength(frame) <= 2 * 1024 * 1024)
+    const update = JSON.parse(frame.slice(6))
+    assert.equal(update.type, 'change')
+    assert.deepEqual(update.items, [item])
+  }
+  assert.deepEqual(JSON.parse((await readSseFrame(reader)).slice(6)), { type: 'reading-receipt', readState })
+})
+
 test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线程', { timeout: 5000 }, async t => {
   const threadId = 'observed'
   const head = { id: 'round', status: 'inProgress', items: [] }
