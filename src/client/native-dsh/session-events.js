@@ -66,7 +66,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const attachments = new Map()
   let queueImages = new Map()
   let cancelledToolCalls = new Map()
-  let turnWorkingDirectories = {}
+  const turnWorkingDirectories = Object.create(null)
   let goalInputs = {}
   let savedGoalCompletions = {}
   let goalCompletions = {}
@@ -326,12 +326,12 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function publishTurnDirectories(directories) {
-    if (!directories) return
-    const before = turnWorkingDirectories
-    turnWorkingDirectories = directories
+    const updates = directories ? Object.entries(directories) : Object.keys(turnWorkingDirectories).map(id => [id, null])
     let changed = false
-    for (const id of new Set([...Object.keys(before), ...Object.keys(directories)])) {
-      if (before[id] === directories[id]) continue
+    for (const [id, cwd] of updates) {
+      if (turnWorkingDirectories[id] === (cwd ?? undefined)) continue
+      if (cwd === null) delete turnWorkingDirectories[id]
+      else turnWorkingDirectories[id] = cwd
       const turn = transcript.getTurn(id)
       if (!turn) continue
       renderTurn(turn)
@@ -549,7 +549,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         if ('todos' in frame) todos.set(frame.todos ?? undefined)
         if ('contextPressure' in frame) contextPressure.set(frame.contextPressure ?? undefined)
         publishCancelledToolCalls(frame.cancelledToolCalls)
-        publishTurnDirectories(frame.turnWorkingDirectories)
+        if (frame.turnWorkingDirectories) publishTurnDirectories(frame.turnWorkingDirectories)
         if (frame.goalInputs || frame.goalCompletions) publishGoalHistory(frame.goalInputs, frame.goalCompletions)
         if ('turnPermission' in frame) {
           recordedTurnPermission = frame.turnPermission ?? undefined
@@ -611,7 +611,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
         publishCancelledToolCalls([])
-        publishTurnDirectories({})
+        publishTurnDirectories()
         publishGoalHistory({}, {})
         recordedTurnPermission = undefined
         lastSavedPlanMode = undefined

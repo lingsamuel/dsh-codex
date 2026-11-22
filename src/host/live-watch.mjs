@@ -127,7 +127,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                     await sendSnapshot(reading, true)
                   } else {
                     for (const update of updates) send({ type: 'change', ...update })
-                    if (updates.length && steers?.list(threadId).length) wakeQueue?.()
+                    if (updates.length && steers?.list(observedThread.id).length) wakeQueue?.()
                     checkpoint(tail.itemCursor())
                     if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
                       // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
@@ -168,7 +168,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               })
               return
             }
-            if ((message.params?.threadId ?? message.params?.thread?.id) !== threadId) return
+            if ((message.params?.threadId ?? message.params?.thread?.id) !== (observedThread?.id ?? threadId)) return
             if (message.method === 'thread/queue/changed') {
               wakeQueue?.()
               return
@@ -257,7 +257,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               ])
               sqliteHome = sqliteDirectory(config)
               await sendSnapshot(reading, false, goalResult?.goal)
-              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteHome, send, signal, steers)
+              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, reading.thread.id, sqliteHome, send, signal, steers)
               for (const message of early) notify(message)
               early.length = 0
               wakeFacts()

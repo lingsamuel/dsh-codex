@@ -2793,7 +2793,7 @@ test('分页历史 WAL 只唤醒检查点变动的会话，rollout 单独推送�
   assert.equal(messages.length - start, 0)
 
   await appendFile(join(directory, `${threads[0]}.jsonl`), event('event_msg', { type: 'thread_rolled_back', num_turns: 1 }))
-  assert.deepEqual(await frame(readers[0]), { type: 'rollout-facts', contextPressure: null, turnWorkingDirectories: {} })
+  assert.deepEqual(await frame(readers[0]), { type: 'rollout-facts', contextPressure: null, turnWorkingDirectories: { round: null } })
 })
 
 test('SSE 重连沿用先前的条目游标，回放初始快照之外的较早活动', { timeout: 5000 }, async t => {
@@ -2899,7 +2899,7 @@ test('回退在同一 SSE 连接替换快照并跟随新的 rollout 和投影', 
   assert.equal(snapshot.replace, true)
   assert.deepEqual(snapshot.page, { data: [kept], nextCursor: 'kept' })
   assert.match(await readText(), /^id: after-revert\n/)
-  assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: {} })
+  assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: { removed: null } })
 
   await appendFile(path, context('kept', '/new'))
   assert.deepEqual(await read(), { type: 'rollout-facts', turnWorkingDirectories: { kept: '/new' } })
@@ -2930,6 +2930,45 @@ test('网页从原生队列变更推送只读队列快照，并保持线程未�
   assert.deepEqual(await read(), { type: 'queue', submissions: [queued] })
   assert.equal(fixture.messages.some(({ method }) => method === 'thread/resume' || method === 'thread/queue/start'), false)
   await reader.cancel()
+})
+
+test('队列 WAL 只刷新修订号变动的会话，仍直接处理目标通知', { timeout: 5000 }, async t => {
+  const ids = ['019afabc-0000-7000-8000-000000000001', 'second', 'third']
+  const queued = { id: 'native-id', input: [{ type: 'text', text: '原生排队' }] }
+  let entries = []
+  const fixture = await fakeCodex(t, {
+    'thread/read': ({ threadId }) => ({ result: { thread: { id: threadId.toLowerCase(), status: { type: 'notLoaded' } } } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': ({ threadId }) => ({ result: { data: threadId.toLowerCase() === ids[0] ? entries : [], nextCursor: null } }),
+  })
+  using db = new DatabaseSync(join(fixture.directory, 'queue_1.sqlite'))
+  db.exec(`PRAGMA journal_mode = WAL;
+    CREATE TABLE queued_thread_revisions (revision INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL UNIQUE);`)
+  const write = db.prepare('INSERT OR REPLACE INTO queued_thread_revisions (thread_id) VALUES (?)')
+  const readers = await Promise.all(ids.map(async id =>
+    (await fixture.get(`/api/codex/watch?threadId=${id.toUpperCase()}&queue=1`)).body.getReader()))
+  t.after(() => Promise.all(readers.map(reader => reader.cancel())))
+  const read = async reader => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  const requests = () => fixture.messages.filter(({ method }) => method === 'thread/queue/list')
+  for (const reader of readers) {
+    assert.equal((await read(reader)).type, 'snapshot')
+    assert.deepEqual(await read(reader), { type: 'queue', submissions: [] })
+  }
+
+  const start = requests().length
+  for (let index = 0; index < 4; index++) {
+    write.run('unobserved')
+    await delay(150)
+  }
+  assert.equal(requests().length - start, 0, '无关队列的四次提交引起的额外 RPC')
+
+  entries = [queued]
+  write.run(ids[0])
+  assert.deepEqual(await read(readers[0]), { type: 'queue', submissions: [queued] })
+  entries = []
+  fixture.broadcast({ method: 'thread/queue/changed', params: { threadId: ids[0] } })
+  assert.deepEqual(await read(readers[0]), { type: 'queue', submissions: [] })
+  assert.deepEqual(requests().slice(start).map(({ params }) => params.threadId), [ids[0], ids[0]])
 })
 
 test('归档队列按原生顺序只读显示，并跟随队列清空', { timeout: 4000 }, async t => {

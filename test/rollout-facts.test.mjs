@@ -230,3 +230,28 @@ test('保留每个已保存轮次自己的工作目录，回退时丢弃已删�
   await appendFile(path, event('thread_rolled_back', { num_turns: 1 }))
   assert.deepEqual((await facts.read()).turnWorkingDirectories, { first: '/main repo' })
 })
+
+test('一万轮历史后的目录增量只包含新增、更正和回退的轮次', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'facts-cwd-delta-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const cwd = '/workspace/checkout-tree'
+  const record = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const context = (turn_id, directory) => record('turn_context', { turn_id, cwd: directory })
+  const turn = id => record('event_msg', { type: 'task_started', turn_id: id }) + context(id, cwd)
+  await writeFile(path, Array.from({ length: 10_000 }, (_, index) => turn(`turn-${index}`)).join(''))
+  const facts = createRolloutFacts(path, t.signal)
+  const read = () => facts.read({ changesOnly: true })
+  assert.equal(Object.keys((await read()).turnWorkingDirectories).length, 10_000)
+
+  await appendFile(path, turn('new-turn'))
+  const added = await read()
+  const bytes = Buffer.byteLength(`data: ${JSON.stringify({ type: 'rollout-facts', ...added })}\n\n`)
+  assert.ok(bytes <= 128, `新增一轮的 SSE 帧为 ${bytes} 字节`)
+  assert.deepEqual(added, { turnWorkingDirectories: { 'new-turn': cwd } })
+  await appendFile(path, context('turn-1', '/corrected') + context('new-turn', cwd))
+  assert.deepEqual(await read(), { turnWorkingDirectories: { 'turn-1': '/corrected' } })
+  await appendFile(path, record('event_msg', { type: 'thread_rolled_back', num_turns: 1 }))
+  assert.deepEqual(await read(), { turnWorkingDirectories: { 'new-turn': null } })
+})

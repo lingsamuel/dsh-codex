@@ -44,6 +44,9 @@ export function createRolloutFacts(path, signal, threadId) {
   if (!path || !isAbsolute(path)) return undefined
   const pendingPlans = new Map()
   const pendingToolCalls = new Map()
+  const pendingDirectories = new Map()
+  let turnDirectories
+  let rebuildDirectories = false
   let turns = []
   let offset = 0
   let line = ''
@@ -90,7 +93,7 @@ export function createRolloutFacts(path, signal, threadId) {
       if (owner && typeof value?.cwd === 'string' && isAbsolute(value.cwd)) {
         owner.id ??= turnId
         owner.cwd = value.cwd
-        pending.add('turnWorkingDirectories')
+        if (owner.id) pendingDirectories.set(owner.id, owner.cwd)
       }
       const mode = planModeOf(value)
       if (mode) {
@@ -243,8 +246,6 @@ export function createRolloutFacts(path, signal, threadId) {
     planMode: () => savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode,
     cancelledToolCalls: () => collection('cancelledToolCalls', turns.flatMap(turn =>
       turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])),
-    turnWorkingDirectories: () => collection('turnWorkingDirectories', Object.fromEntries(
-      turns.filter(({ id, cwd }) => id && cwd).map(({ id, cwd }) => [id, cwd]))),
     goalInputs: () => collection('goalInputs', Object.fromEntries(
       turns.filter(turn => turn.goalInput).map(({ id, goalInput }) => [id, goalInput]))),
     goalCompletions: () => collection('goalCompletions', Object.fromEntries(
@@ -253,6 +254,30 @@ export function createRolloutFacts(path, signal, threadId) {
 
   function invalidateProjection() {
     for (const key of Object.keys(project)) pending.add(key)
+    rebuildDirectories = true
+  }
+
+  function readDirectoryChanges() {
+    if (rebuildDirectories) {
+      pendingDirectories.clear()
+      for (const id of turnDirectories?.keys() ?? []) pendingDirectories.set(id, null)
+      for (const { id, cwd } of turns) {
+        if (id && cwd) pendingDirectories.set(id, cwd)
+      }
+      rebuildDirectories = false
+    }
+    if (!pendingDirectories.size) return undefined
+    turnDirectories ??= new Map()
+    const changes = []
+    // 常规追加只核对本批 turn_context 涉及的轮次，回退或换文件时才核对全部目录。
+    for (const [id, cwd] of pendingDirectories) {
+      if (turnDirectories.get(id) === (cwd ?? undefined)) continue
+      if (cwd === null) turnDirectories.delete(id)
+      else turnDirectories.set(id, cwd)
+      changes.push([id, cwd])
+    }
+    pendingDirectories.clear()
+    if (changes.length) return Object.fromEntries(changes)
   }
 
   async function scan(filePath, changesOnly) {
@@ -298,8 +323,12 @@ export function createRolloutFacts(path, signal, threadId) {
         changes[key] = value ?? null
       }
       pending.clear()
+      const directories = readDirectoryChanges()
+      if (directories) changes.turnWorkingDirectories = directories
       if (!Object.keys(changes).length) return null
-      return changesOnly ? changes : { ...previous }
+      return changesOnly ? changes : {
+        ...previous, ...(turnDirectories && { turnWorkingDirectories: Object.fromEntries(turnDirectories) }),
+      }
     } finally {
       await file.close()
     }

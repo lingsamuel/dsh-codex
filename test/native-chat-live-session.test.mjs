@@ -566,6 +566,29 @@ test('取消的原始调用能补入已载入的历史轮次，并随原生回�
   assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/result'), false)
 })
 
+test('目录增量保留其他轮次的文件引用，删除与重连清除旧目录', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const text = '[文件](src/main.js)'
+  const first = turn('first', 'completed', [{ ...answer, id: 'first-link', text }])
+  const second = turn('second', 'completed', [{ ...answer, id: 'second-link', text }])
+  const reply = id => history.events.getSnapshot().entries.find(({ event }) =>
+    event.type === 'assistant/message' && event.data.message.id === `${id}-link`).event.data.message.content[0].text
+  const directories = turnWorkingDirectories => emit({ type: 'rollout-facts', turnWorkingDirectories })
+  await emit({ type: 'snapshot', page: { data: [second, first] }, mode: 'live' })
+  await directories({ first: '/old' })
+  await directories({ second: '/new' })
+  assert.equal(reply('first'), '[文件](/old/src/main.js)')
+  assert.equal(reply('second'), '[文件](/new/src/main.js)')
+
+  await directories({ second: null })
+  assert.equal(reply('first'), '[文件](/old/src/main.js)')
+  assert.equal(reply('second'), text)
+  await source().onopen()
+  assert.equal(reply('first'), text)
+})
+
 test('实时问题使用原生请求身份，原生确认完成后清理当前投影', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })

@@ -47,43 +47,72 @@ export function watchConversationQueue(request, threadId, sqliteHome, publish, s
   const path = queueDatabase(sqliteHome)
   let last
   let nativeQueue
+  let revision
   let timer
   let reading = false
   let dirty = false
+  let fileDirty = false
 
-  const readQueue = () => readVisibleConversationQueue(request, threadId, () => sqliteHome, signal)
+  function readRevision() {
+    if (!path) return undefined
+    try {
+      using db = new DatabaseSync(path, { readOnly: true })
+      return db.prepare('SELECT revision FROM queued_thread_revisions WHERE thread_id = ?').get(threadId)?.revision ?? null
+    } catch {
+      // 旧库或暂不可读的库仍使用 WAL 提示触发原生队列读取。
+      return undefined
+    }
+  }
 
   function wake() {
     dirty = true
+    schedule()
+  }
+
+  function schedule() {
     if (timer || reading || signal.aborted) return
     timer = setTimeout(async () => {
       timer = undefined
       reading = true
-      dirty = false
+      const forced = dirty
+      dirty = fileDirty = false
       try {
+        const next = readRevision()
+        if (!forced && next !== undefined && next === revision) return
+        let fetched = false
+        const readQueue = async () => {
+          fetched = false
+          const data = await readVisibleConversationQueue(request, threadId, () => sqliteHome, signal)
+          fetched = true
+          return data
+        }
         const { data: submissions, steers: records, native } = steers ? await steers.read(request, threadId, () => nativeQueue, readQueue)
           : { data: await readQueue(), steers: [] }
         if (submissions === undefined && !records.length && last === undefined) return
+        // 读取期间的共享写入只有影响本会话时，才会使这份快照过期。
+        if (dirty || signal.aborted || (fileDirty && (next === undefined || readRevision() !== next))) return
+        if (fetched) revision = next
+        if (native) nativeQueue = native
         const frame = { type: 'queue', submissions: submissions ?? [], ...(records.length && { steers: records }) }
         const stamp = JSON.stringify(frame)
-        if (!dirty && !signal.aborted) {
-          if (native) nativeQueue = native
-          if (stamp !== last) {
-            last = stamp
-            publish(frame)
-          }
+        if (stamp !== last) {
+          last = stamp
+          publish(frame)
         }
       } catch {
         // 队列是可选的原生数据。临时读失败不影响聊天历史与状态流。
       } finally {
         reading = false
-        if (dirty) wake()
+        if (dirty || fileDirty) schedule()
       }
     }, 100)
     timer.unref()
   }
 
-  if (path) watchNativeFiles([path, `${path}-wal`], wake, signal)
+  if (path) watchNativeFiles([path, `${path}-wal`], () => {
+    fileDirty = true
+    schedule()
+  }, signal)
   const unsubscribe = steers?.subscribe(threadId, change => {
     // 原生读失败时沿用最后成功的原生队列，再应用已经确认的取走或重新入队回执。
     if (change?.removedId && nativeQueue) nativeQueue = nativeQueue.filter(item => item.id !== change.removedId)
