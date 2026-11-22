@@ -1,4 +1,7 @@
-import { Button, Input, PathLabel } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconChevronLeftOutlineMedium, IconChevronRightOutlineRegular, IconPluginPinwheelOutlineRegular,
+  IconRefreshOutlineRegular, IconSearchOutlineRegular, Input, PathLabel, Tag,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { pluginRequestSource, pluginUninstallId } from '../../shared/codex-plugin-source.js'
 import { externalWebUrl } from '../../shared/external-url.js'
@@ -23,9 +26,6 @@ const labels = {
     skills: 'Skills', servers: 'MCP servers', capabilities: 'Capabilities',
   },
 }
-const column = { display: 'grid', gap: 12, alignContent: 'start', overflowWrap: 'anywhere' }
-const row = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }
-const list = { margin: 0, paddingInlineStart: 20 }
 const pluginName = plugin => plugin.interface?.displayName || plugin.name
 
 function entriesOf({ catalog, installed }) {
@@ -53,23 +53,31 @@ function PluginList({ inventory, search, changeSearch, choose, t }) {
     (result.marketplaceLoadErrors ?? []).map(error => `${error.marketplacePath}: ${error.message}`)))]
 
   return <>
-    {entries.length > 0 && <Input value={search} aria-label={t('search')} placeholder={t('search')} onChange={event => changeSearch(event.target.value)} />}
-    {!results.length && <p>{t(entries.length ? 'noResults' : 'empty')}</p>}
+    {entries.length > 0 && <Input type="search" className="codex-settings-search" value={search}
+      icon={<IconSearchOutlineRegular size={16} />} aria-label={t('search')} placeholder={t('search')}
+      onChange={event => changeSearch(event.target.value)} />}
+    {!results.length && <p role="status" className="codex-settings-notice">{t(entries.length ? 'noResults' : 'empty')}</p>}
     {[true, false].map(isInstalled => {
       const matches = results.filter(({ plugin }) => Boolean(plugin.installed) === isInstalled)
       if (!matches.length) return null
-      return <section key={String(isInstalled)} style={column}>
-        <strong>{t(isInstalled ? 'installed' : 'available')}</strong>
-        {matches.map(({ key, plugin, marketplace, source }) => <div key={key} style={row}>
-          <div style={{ display: 'grid', justifyItems: 'start', gap: 4 }}>
-            <Button variant="outline" size="sm" disabled={!source} onClick={() => choose(source)}>{pluginName(plugin)}</Button>
-            <small>{marketplace}{plugin.installed && !plugin.enabled && ` · ${t('disabled')}`}</small>
-            {plugin.interface?.shortDescription && <div>{plugin.interface.shortDescription}</div>}
-          </div>
-        </div>)}
+      return <section key={String(isInstalled)} className="codex-settings-content">
+        <h3>{t(isInstalled ? 'installed' : 'available')}</h3>
+        <ul className="codex-settings-list">{matches.map(({ key, plugin, marketplace, source }) => <li key={key}>
+          <button type="button" className="codex-settings-row" disabled={!source} onClick={() => choose(source)}>
+            <span className="codex-settings-heading">
+              <span className="codex-settings-statuses">
+                <strong>{pluginName(plugin)}</strong>
+                {plugin.installed && !plugin.enabled && <Tag>{t('disabled')}</Tag>}
+              </span>
+              {plugin.interface?.shortDescription && <span className="codex-settings-secondary">{plugin.interface.shortDescription}</span>}
+              <small className="codex-settings-secondary">{marketplace}</small>
+            </span>
+            {source && <IconChevronRightOutlineRegular size={16} aria-hidden="true" />}
+          </button>
+        </li>)}</ul>
       </section>
     })}
-    {catalogErrors.map(error => <p key={error} role="alert">{error}</p>)}
+    {catalogErrors.map(error => <p key={error} role="alert" className="codex-settings-notice">{error}</p>)}
   </>
 }
 
@@ -79,16 +87,20 @@ function PluginApps({ apps, appStates, installResult, rememberLink, t }) {
   const entries = new Map(apps.map(app => [app.id, app]))
   for (const [id, app] of required) if (!entries.has(id)) entries.set(id, app)
   if (!entries.size) return null
-  return <section>
-    <strong>{t('apps')}</strong>
-    <ul style={list}>{[...entries].map(([id, app]) => {
+  return <section className="codex-settings-card codex-settings-content">
+    <h3>{t('apps')}</h3>
+    <ul className="codex-settings-apps">{[...entries].map(([id, app]) => {
       const state = states.get(id)
       const appUrl = externalWebUrl(required.get(id)?.installUrl ?? state?.installUrl ?? app.installUrl)
       const status = state?.isEnabled === false ? 'disabled' : state?.isAccessible ? 'connected'
         : state?.isAccessible === false || required.has(id) ? 'authRequired' : 'authUnknown'
-      return <li key={id}>
-        <span>{app.name} · {t(status)}</span>
-        {app.description && <div>{app.description}</div>}
+      const tone = status === 'connected' ? 'success' : status === 'authRequired' ? 'warning' : 'neutral'
+      return <li key={id} className="codex-settings-heading">
+        <div className="codex-settings-statuses">
+          <strong>{app.name}</strong>
+          <Tag className="codex-settings-tag" tone={tone}>{t(status)}</Tag>
+        </div>
+        {app.description && <p className="codex-settings-secondary">{app.description}</p>}
         {appUrl && !state?.isAccessible && <a href={appUrl} target="_blank" rel="noopener noreferrer" onClick={rememberLink}>{t('authorize')}</a>}
       </li>
     })}</ul>
@@ -96,8 +108,9 @@ function PluginApps({ apps, appStates, installResult, rememberLink, t }) {
 }
 
 function PluginNames({ title, values }) {
-  return values?.length > 0 && <section><strong>{title}</strong>
-    <ul style={list}>{values.map((value, index) => <li key={index}>{value}</li>)}</ul>
+  return values?.length > 0 && <section className="codex-settings-card codex-settings-content">
+    <h3>{title}</h3>
+    <ul className="codex-settings-items">{values.map((value, index) => <li key={index}>{value}</li>)}</ul>
   </section>
 }
 
@@ -110,30 +123,39 @@ function PluginDetail({ result, installResult, busy, change, rememberLink, t }) 
   const action = summary.installed ? 'uninstall' : 'install'
   const uninstallId = pluginUninstallId(summary)
   const canChange = summary.installed ? Boolean(uninstallId) : available
-  return <div style={column}>
-    <header style={row}><strong>{name}</strong>
-      {summary.installed && <span>{t(summary.enabled ? 'installed' : 'disabled')}</span>}
+  const description = plugin.description ?? summary.interface?.longDescription
+  return <>
+    <header className="codex-settings-toolbar">
+      <div className="codex-settings-heading">
+        <h2>{name}</h2>
+        {summary.installed && <div className="codex-settings-statuses">
+          <Tag className="codex-settings-tag" tone={summary.enabled ? 'success' : 'neutral'}>
+            {t(summary.enabled ? 'installed' : 'disabled')}
+          </Tag>
+        </div>}
+      </div>
+      {canChange && confirm !== action && <Button variant="outline" size="sm" disabled={busy}
+        onClick={() => setConfirm(action)}>{t(action)}</Button>}
     </header>
-    {(plugin.description ?? summary.interface?.longDescription) && <div>{plugin.description ?? summary.interface.longDescription}</div>}
-    {plugin.marketplacePath && <PathLabel path={plugin.marketplacePath} />}
-    <PluginNames title={t('capabilities')} values={summary.interface?.capabilities} />
-    <PluginNames title={t('skills')} values={plugin.skills?.map(skill => skill.name)} />
-    <PluginNames title={t('servers')} values={plugin.mcpServers} />
-    <PluginApps apps={plugin.apps ?? []} {...{ appStates, installResult, rememberLink, t }} />
-    {appError && <p role="alert">{appError}</p>}
-    {confirm === action ? <div style={row}>
-      <span>{t(`confirm.${action}`, { name })}</span>
-      <div style={{ display: 'flex', gap: 8 }}>
+    {!canChange && <p className="codex-settings-notice">{t('unavailable')}</p>}
+    {confirm === action && <div className="codex-settings-card codex-settings-toolbar">
+      <p>{t(`confirm.${action}`, { name })}</p>
+      <div className="codex-settings-actions">
         <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(null)}>{t('cancel')}</Button>
         <Button variant="primary" size="sm" disabled={busy || !canChange}
           onClick={() => { setConfirm(null); void change(action, uninstallId) }}>{t(action)}</Button>
       </div>
-    </div> : <div>
-      {canChange
-        ? <Button variant="outline" size="sm" disabled={busy} onClick={() => setConfirm(action)}>{t(action)}</Button>
-        : <p>{t('unavailable')}</p>}
     </div>}
-  </div>
+    {(description || plugin.marketplacePath) && <div className="codex-settings-heading">
+      {description && <p className="codex-settings-secondary">{description}</p>}
+      {plugin.marketplacePath && <PathLabel path={plugin.marketplacePath} />}
+    </div>}
+    <PluginNames title={t('capabilities')} values={summary.interface?.capabilities} />
+    <PluginNames title={t('skills')} values={plugin.skills?.map(skill => skill.name)} />
+    <PluginNames title={t('servers')} values={plugin.mcpServers} />
+    <PluginApps apps={plugin.apps ?? []} {...{ appStates, installResult, rememberLink, t }} />
+    {appError && <p role="alert" className="codex-settings-notice">{appError}</p>}
+  </>
 }
 
 function PluginSettings({ useCodexHistory, t }) {
@@ -196,13 +218,17 @@ function PluginSettings({ useCodexHistory, t }) {
       setBusy(false)
     }
   }
-  return <div style={column} data-codex-plugins="">
-    <div style={row}>
-      {selection ? <Button variant="outline" size="sm" disabled={busy} onClick={() => choose(null)}>{t('back')}</Button> : <strong>{t('title')}</strong>}
-      <Button variant="outline" size="sm" disabled={loading || busy} onClick={() => setRefresh(version => version + 1)}>{t('refresh')}</Button>
-    </div>
-    {loading && <p role="status">{t('loading')}</p>}
-    {error && <p role="alert">{error}</p>}
+  return <div className="codex-settings" data-codex-plugins="">
+    <header className="codex-settings-toolbar">
+      {selection
+        ? <Button variant="ghost" size="sm" icon={<IconChevronLeftOutlineMedium size={14} />} disabled={busy}
+            onClick={() => choose(null)}>{t('back')}</Button>
+        : <h2>{t('title')}</h2>}
+      <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular size={14} />} disabled={loading || busy}
+        onClick={() => setRefresh(version => version + 1)}>{t('refresh')}</Button>
+    </header>
+    {loading && <p role="status" className="codex-settings-notice">{t('loading')}</p>}
+    {error && <p role="alert" className="codex-settings-notice">{error}</p>}
     {selection ? (detail && <PluginDetail result={detail} {...{ installResult, change, t }} busy={busy || loading}
       rememberLink={() => { expectingReturn.current = true }} />)
       : (inventory && <PluginList {...{ inventory, search, choose, t }} changeSearch={setSearch} />)}
@@ -212,7 +238,10 @@ function PluginSettings({ useCodexHistory, t }) {
 /** Codex 的插件设置独立显示 native catalog 并沿用 DSH 设置导航。 */
 export function installCodexPluginSettings(ctx) {
   const name = 'settings.section'
+  const icon = 'settings.section.icon'
+  const id = 'codex-plugins'
   ctx.effect(() => ctx.locale.register(locale, labels))
   const t = ctx.locale.bind(locale)
-  ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'codex-plugins', order: 80, label: () => t('title'), locale }, PluginSettings))
+  ctx.slots.inject(name, () => ctx.slots.register({ name, id, order: 80, label: () => t('title'), locale }, PluginSettings))
+  ctx.slots.inject(icon, () => ctx.slots.register({ name: icon, id }, ({ size }) => <IconPluginPinwheelOutlineRegular size={size} />))
 }

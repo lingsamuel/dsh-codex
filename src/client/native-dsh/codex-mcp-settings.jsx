@@ -1,4 +1,6 @@
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  Button, IconApiOutlineMedium, IconChevronRightOutlineRegular, IconRefreshOutlineRegular, Tag,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage, writeCodexCapability } from '../api.js'
 
@@ -29,33 +31,42 @@ const labels = {
     'auth.bearerToken': 'Bearer token', 'auth.oAuth': 'Signed in with OAuth',
   },
 }
-const column = { display: 'grid', gap: 12, alignContent: 'start', overflowWrap: 'anywhere' }
-const row = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }
+const runtimeTones = {
+  connected: 'success',
+  starting: 'info',
+  authenticationRequired: 'warning',
+  failed: 'danger',
+}
 
 function McpServer({ server, login, startLogin, busy, t }) {
   const tools = Object.values(server.tools ?? {})
   const { name, runtimeStatus, authStatus } = server
   const canLogin = ['notLoggedIn', 'oAuth'].includes(authStatus) || runtimeStatus === 'authenticationRequired'
   const waitingForOAuth = login?.state === 'pending'
-  return <section style={{ display: 'grid', gap: 6 }}>
-    <div style={row}>
-      <div>
-        <div>{name}</div>
-        <small>{runtimeStatus ? t(`runtime.${runtimeStatus}`) : t('runtime.unknown')} · {t(`auth.${authStatus ?? 'unknown'}`)}</small>
+  return <section className="codex-settings-card codex-settings-content">
+    <div className="codex-settings-toolbar">
+      <div className="codex-settings-heading">
+        <h3>{name}</h3>
+        <div className="codex-settings-statuses">
+          <Tag className="codex-settings-tag" tone={runtimeTones[runtimeStatus] ?? 'neutral'}>
+            {t(`runtime.${runtimeStatus ?? 'unknown'}`)}
+          </Tag>
+          <span className="codex-settings-secondary">{t(`auth.${authStatus ?? 'unknown'}`)}</span>
+        </div>
       </div>
       {canLogin && <Button size="sm" variant="outline" disabled={busy || waitingForOAuth}
         onClick={() => void startLogin(name)}>{t('login')}</Button>}
     </div>
-    {login && <div>
-      <p role={login.state === 'failed' ? 'alert' : 'status'}>{login.error || t(login.state)}</p>
+    {login && <div className="codex-settings-heading codex-settings-notice" role={login.state === 'failed' ? 'alert' : 'status'}>
+      <p>{login.error || t(login.state)}</p>
       {['pending', 'unknown'].includes(login.state) && <a href={login.authorizationUrl} target="_blank" rel="noopener noreferrer">{t('open')}</a>}
     </div>}
-    {server.toolsError && <p role="alert">{server.toolsError}</p>}
-    {tools.length > 0 && <details>
-      <summary>{t('tools', { count: tools.length })}</summary>
-      <ul>{tools.map((tool, index) => <li key={index}>
+    {server.toolsError && <p role="alert" className="codex-settings-notice">{server.toolsError}</p>}
+    {tools.length > 0 && <details className="codex-settings-tools">
+      <summary><IconChevronRightOutlineRegular size={14} aria-hidden="true" />{t('tools', { count: tools.length })}</summary>
+      <ul className="codex-settings-tool-list">{tools.map((tool, index) => <li key={index}>
         <code>{tool.name}</code>
-        {tool.description && <div>{tool.description}</div>}
+        {tool.description && <p className="codex-settings-secondary">{tool.description}</p>}
       </li>)}</ul>
     </details>}
   </section>
@@ -126,17 +137,21 @@ function McpInventory({ threadId, t }) {
     }
   }
 
-  return <div style={column} data-codex-mcp="">
-    <header style={row}>
-      <div><strong>{t('title')}</strong><div>{t(threadId ? 'session' : 'global')}</div></div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        <Button size="sm" variant="outline" onClick={() => setRefresh(version => version + 1)} disabled={loading || busy}>{t('refresh')}</Button>
+  return <div className="codex-settings" data-codex-mcp="">
+    <header className="codex-settings-toolbar">
+      <div className="codex-settings-heading">
+        <h2>{t('title')}</h2>
+        <p className="codex-settings-secondary">{t(threadId ? 'session' : 'global')}</p>
+      </div>
+      <div className="codex-settings-actions">
+        <Button size="sm" variant="outline" icon={<IconRefreshOutlineRegular size={14} />}
+          onClick={() => setRefresh(version => version + 1)} disabled={loading || busy}>{t('refresh')}</Button>
         <Button size="sm" variant="outline" onClick={() => void change('reload')} disabled={busy}>{t('reload')}</Button>
       </div>
     </header>
-    {loading && <p role="status">{t('loading')}</p>}
-    {error && <p role="alert">{error}</p>}
-    {servers?.length === 0 && <p>{t('empty')}</p>}
+    {loading && <p role="status" className="codex-settings-notice">{t('loading')}</p>}
+    {error && <p role="alert" className="codex-settings-notice">{error}</p>}
+    {servers?.length === 0 && <p role="status" className="codex-settings-notice">{t('empty')}</p>}
     {servers?.map(server => <McpServer key={server.name} {...{ server, t }} busy={busy}
       login={login?.name === server.name ? login : undefined} startLogin={name => change('login', name)} />)}
   </div>
@@ -150,7 +165,10 @@ function McpSettings({ useCodexHistory, t }) {
 /** 通过 DSH 设置显示原生 MCP 服务、工具与登录状态。 */
 export function installCodexMcpSettings(ctx) {
   const name = 'settings.section'
+  const icon = 'settings.section.icon'
+  const id = 'codex-mcp'
   ctx.effect(() => ctx.locale.register(locale, labels))
   const t = ctx.locale.bind(locale)
-  ctx.slots.inject(name, () => ctx.slots.register({ name, id: 'codex-mcp', order: 81, label: () => t('title'), locale }, McpSettings))
+  ctx.slots.inject(name, () => ctx.slots.register({ name, id, order: 81, label: () => t('title'), locale }, McpSettings))
+  ctx.slots.inject(icon, () => ctx.slots.register({ name: icon, id }, ({ size }) => <IconApiOutlineMedium size={size} />))
 }
