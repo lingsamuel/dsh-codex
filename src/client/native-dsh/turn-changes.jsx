@@ -20,12 +20,16 @@ function TurnChanges({ turn, t }) {
   }
   return <DisclosureRow icon={<IconEditOutlineRegular />} title={t('files', { count: files.length })}
     open={open} expandable expandOnRowClick onToggle={() => setOpen(value => !value)}>
-    {open && files.map(file => <details key={file.path}>
-      <summary>{file.path}</summary>
-      {file.edits.map(({ diffs, raw }, index) => raw === undefined
-        ? <DiffBlock key={index} diffs={diffs} labels={copy} />
-        : <CodeBlock key={index} code={raw} lang="diff" toolbarLabels={copy} copyLabel={copy.copy} copiedLabel={copy.copied} />)}
-    </details>)}
+    {open && <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: '0.5rem' }}>
+      {files.flatMap(({ path, edits }) => edits.map(({ diffs, raw }, index) => {
+        const key = `${path}:${index}`
+        if (raw === undefined) return <DiffBlock key={key} diffs={diffs} labels={copy} />
+        return <figure key={key} style={{ margin: 0 }}>
+          <figcaption style={{ overflowWrap: 'anywhere', font: 'var(--dsw-font-markdown-code-block-small)' }}>{path}</figcaption>
+          <CodeBlock code={raw} lang="diff" toolbarLabels={copy} copyLabel={copy.copy} copiedLabel={copy.copied} />
+        </figure>
+      }))}
+    </div>}
   </DisclosureRow>
 }
 
