@@ -1,7 +1,8 @@
 import { createHistoryCatalog } from './catalog.js'
 import { provideCodexControllers } from './native-dsh/controllers.js'
+import { installLiveStatus } from './native-dsh/live-status.jsx'
 
-export const inject = ['slots']
+export const inject = ['slots', 'locale']
 
 export function apply(ctx) {
   const controller = new AbortController()
@@ -10,6 +11,7 @@ export function apply(ctx) {
 
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   provideCodexControllers(ctx, catalog)
+  installLiveStatus(ctx)
   ctx.slots.inject('conversation.composer.bar', () => ctx.slots.register(
     { name: 'conversation.composer.bar', priority: -1 },
     HistoryStatus,

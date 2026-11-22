@@ -12,13 +12,16 @@ export function createHistoryCatalog(signal) {
     error: '',
   })
   let refreshing = false
+  const observedStatuses = new Map()
 
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
       state.projects = projects
-      state.threads = threads
+      state.threads = threads.map(thread => observedStatuses.has(thread.id)
+        ? { ...thread, status: observedStatuses.get(thread.id) }
+        : thread)
       state.workspacePaths = workspacePaths
-      state.selected = threads.find(thread => thread.id === state.selected?.id) ?? state.selected
+      state.selected = state.threads.find(thread => thread.id === state.selected?.id) ?? state.selected
       state.busy = false
       state.error = ''
     })
@@ -45,6 +48,14 @@ export function createHistoryCatalog(signal) {
 
   return {
     store,
+    observe({ method, params }) {
+      if (method !== 'thread/status/changed') return
+      observedStatuses.set(params.threadId, params.status)
+      store.update(state => {
+        const thread = state.threads.find(item => item.id === params.threadId)
+        if (thread) thread.status = params.status
+      })
+    },
     select(thread) {
       store.update(state => { state.selected = thread })
     },

@@ -10,8 +10,8 @@ async function rejectWrite() {
   throw new Error(unsupported)
 }
 
-function readonlyBinding(ctx, thread) {
-  const history = createCodexHistory(ctx, thread)
+function readonlyBinding(ctx, thread, observe) {
+  const history = createCodexHistory(ctx, thread, observe)
   return {
     ctx,
     sessionId: thread.id,
@@ -64,7 +64,7 @@ export function provideCodexControllers(ctx, catalog) {
       let record = bindings.get(id)
       if (!record) {
         const fiber = ctx.plugin(() => {})
-        record = { binding: readonlyBinding(fiber.ctx.extend({ [scopeId]: id }), thread), fiber }
+        record = { binding: readonlyBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog.observe), fiber }
         bindings.set(id, record)
       }
       const { binding } = record

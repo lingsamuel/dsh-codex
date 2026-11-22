@@ -116,6 +116,7 @@ function turnEvents(turn, number, source, createdAt, attachments) {
 export function projectCodexTurns(turns, {
   beforeSeq = newestHistoryBoundary,
   beforeTurn = newestHistoryBoundary,
+  firstSeq,
   provider = 'codex',
   model = '',
   createdAt,
@@ -124,6 +125,6 @@ export function projectCodexTurns(turns, {
   const source = { kind: 'model', provider, model }
   const firstTurn = beforeTurn - turns.length
   const events = turns.flatMap((turn, index) => turnEvents(turn, firstTurn + index, source, createdAt, attachments))
-  const firstSeq = beforeSeq - events.length
-  return events.map((event, index) => ({ type: 'event', event: { ...event, seq: firstSeq + index } }))
+  const start = firstSeq ?? beforeSeq - events.length
+  return events.map((event, index) => ({ type: 'event', event: { ...event, seq: start + index } }))
 }

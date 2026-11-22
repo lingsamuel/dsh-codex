@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { on, once } from 'node:events'
+import { once } from 'node:events'
 import { createConnection } from 'node:net'
 import { promisify } from 'node:util'
 import WebSocket from 'ws'
@@ -23,51 +23,113 @@ export async function findCodexSocket(signal) {
   return daemon.socketPath
 }
 
-/** 同一批只读请求共用一次握手，批次完成或取消后释放连接。 */
-export async function withCodexReader(socketPath, requestSignal, read, timeoutMs = 15_000) {
-  const timeout = AbortSignal.timeout(timeoutMs)
-  const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout
-  const endpoint = socketPath || await findCodexSocket(signal)
-  signal.throwIfAborted()
+/** 在同一连接上接收只读 RPC 回复与 daemon 广播，退出时取消尚未完成的请求。 */
+export async function openCodexReader(socketPath, signal, onNotification = () => {}) {
+  const setup = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
+  const endpoint = socketPath || await findCodexSocket(setup)
+  setup.throwIfAborted()
   const ws = new WebSocket('ws://localhost/', {
     createConnection: () => createConnection({ path: endpoint }),
     maxPayload: 64 * 1024 * 1024,
   })
-  let messages
   let nextId = 0
+  let failure
+  const pending = new Map()
+  const { promise: closed, resolve: finish } = Promise.withResolvers()
 
-  async function request(method, params) {
-    signal.throwIfAborted()
-    const id = ++nextId
-    ws.send(JSON.stringify({ id, method, params }))
-    // Codex 可以在回应之间发送通知或服务端请求，按 ID 和响应形状匹配。
-    while (true) {
-      const { done, value } = await messages.next()
-      if (done) throw new Error('Codex App Server 已断开。')
-      const reply = JSON.parse(value[0].toString())
-      if (reply.id !== id) continue
-      if (reply.error) throw new CodexRpcError(reply.error)
-      if ('result' in reply) return reply.result
+  function close(error = new Error('Codex App Server 已断开。')) {
+    if (failure) return
+    failure = error
+    signal.removeEventListener('abort', abort)
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timer)
+      waiter.reject(error)
     }
+    pending.clear()
+    ws.terminate()
+    finish()
+  }
+  function abort() {
+    close(signal.reason)
+  }
+
+  ws.on('error', close)
+  ws.on('close', () => close())
+  signal.addEventListener('abort', abort, { once: true })
+  ws.on('message', data => {
+    try {
+      const message = JSON.parse(data.toString())
+      if (typeof message.method === 'string') {
+        onNotification(message)
+        return
+      }
+      const waiter = pending.get(message.id)
+      if (!waiter) return
+      pending.delete(message.id)
+      clearTimeout(waiter.timer)
+      if (message.error) waiter.reject(new CodexRpcError(message.error))
+      else waiter.resolve(message.result)
+    } catch (error) {
+      close(error)
+    }
+  })
+
+  function request(method, params) {
+    if (failure) return Promise.reject(failure)
+    const id = ++nextId
+    const { promise, resolve, reject } = Promise.withResolvers()
+    const timer = setTimeout(() => {
+      pending.delete(id)
+      reject(new Error('Codex App Server 未及时响应。'))
+    }, 15_000)
+    pending.set(id, { resolve, reject, timer })
+    ws.send(JSON.stringify({ id, method, params }), error => {
+      if (error) close(error)
+    })
+    return promise
   }
 
   try {
-    messages = on(ws, 'message', { signal, close: ['close'] })
-    await once(ws, 'open', { signal })
-    await request('initialize', {
-      clientInfo: { name: 'dsh_chatgpt', title: 'DSH ChatGPT', version: '0.1.0' },
+    await once(ws, 'open', { signal: setup })
+    // Codex 的 daemon 查询客户端标识不覆盖 CLI 正在使用的全局 originator 和 UA。
+    const initialize = await request('initialize', {
+      clientInfo: { name: 'codex_app_server_daemon', title: 'DSH ChatGPT', version: '0.1.0' },
       capabilities: { experimentalApi: true },
     })
     ws.send(JSON.stringify({ method: 'initialized' }))
-    return await read(request)
+    return { request, initialize, close, closed }
+  } catch (error) {
+    close(error)
+    throw error
+  }
+}
+
+/** 同一批只读请求共用一次握手，批次完成或取消后释放连接。 */
+export async function withCodexReader(socketPath, requestSignal, read, timeoutMs = 15_000) {
+  const timeout = AbortSignal.timeout(timeoutMs)
+  const signal = requestSignal ? AbortSignal.any([requestSignal, timeout]) : timeout
+  const connection = await openCodexReader(socketPath, signal)
+  try {
+    return await read(connection.request)
   } finally {
-    // 连接在握手期间取消也可能异步产生 error，此时请求已经结束。
-    ws.once('error', () => {})
-    ws.terminate()
-    await messages?.return()
+    connection.close()
   }
 }
 
 export function readCodex(method, params, socketPath, signal) {
   return withCodexReader(socketPath, signal, request => request(method, params))
+}
+
+/** 沿 Codex 返回的不透明游标继续读取，保留原生顺序。 */
+export async function readCodexPages(read, cursor) {
+  const entries = []
+  const cursors = new Set()
+  do {
+    const page = await read(cursor)
+    entries.push(...page.data)
+    if (cursor != null) cursors.add(cursor)
+    cursor = page.nextCursor
+    if (cursor && cursors.has(cursor)) throw new Error('Codex 返回了重复的分页游标。')
+  } while (cursor)
+  return entries
 }

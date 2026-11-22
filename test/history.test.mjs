@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -24,7 +24,7 @@ async function fakeCodex(t, methods) {
       messages.push(request)
       if (request.id === undefined) return
       const reply = request.method === 'initialize'
-        ? { result: { userAgent: 'test Codex' } }
+        ? { result: { userAgent: 'test Codex', codexHome: directory } }
         : methods[request.method]?.(request.params)
       client.send(JSON.stringify({
         id: request.id,
@@ -45,7 +45,12 @@ async function fakeCodex(t, methods) {
   const routes = createHistoryRoutes(socketPath)
   const get = path => routes.find(route => path.split('?')[0] === route.path)
     .fetch(new Request(`http://localhost${path}`))
-  return { get, messages, clientClosed, socketPath, directory }
+  return {
+    get, messages, clientClosed, socketPath, directory,
+    broadcast(message) {
+      for (const client of ws.clients) client.send(JSON.stringify(message))
+    },
+  }
 }
 
 test('通过原生目录筛选分页，保留线程 ID 和原始时间', async t => {
@@ -192,4 +197,44 @@ test('缓存过期后的完整刷新失败，不会让已显示的旧工作区�
   assert.equal(cached.complete, false)
   assert.equal((await get('/api/codex/catalog?complete=1')).status, 502)
   assert.deepEqual((await (await get('/api/codex/catalog')).json()).threads, [indexed, legacy])
+})
+
+test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线程', { timeout: 5000 }, async t => {
+  const threadId = 'observed'
+  const head = { id: 'round', status: 'inProgress', items: [] }
+  const old = { id: 'first', type: 'agentMessage', text: '原有', completedAtMs: 1000 }
+  const fresh = { id: 'second', type: 'agentMessage', text: '新增', completedAtMs: 2000 }
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status: { type: 'active', activeFlags: [] }, historyMode: 'paginated' } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': ({ itemsView }) => ({
+      result: { data: [itemsView === 'full' ? { ...head, items: [old] } : head], backwardsCursor: 'head' },
+    }),
+    'thread/items/list': () => ({ result: { data: [{ item: fresh, turnId: head.id, completedAtMs: 2000 }] } }),
+  })
+  const response = await fixture.get(`/api/codex/watch?threadId=${threadId}`)
+  assert.equal(response.headers.get('Content-Type'), 'text/event-stream')
+  const reader = response.body.getReader()
+  const read = async () => {
+    const { done, value } = await reader.read()
+    assert.equal(done, false)
+    return JSON.parse(new TextDecoder().decode(value).slice(6))
+  }
+  const snapshot = await read()
+  assert.equal(snapshot.type, 'snapshot')
+  assert.equal(snapshot.mode, 'live')
+  const waiting = { type: 'active', activeFlags: ['waitingOnUserInput'] }
+  fixture.broadcast({ id: 'request', method: 'item/tool/requestUserInput', params: { threadId } })
+  fixture.broadcast({ method: 'thread/status/changed', params: { threadId, status: waiting } })
+  const state = await read()
+  assert.deepEqual(state.notification.params.status, waiting)
+  await writeFile(join(fixture.directory, 'thread_history_1.sqlite-wal'), 'write notification')
+  const change = await read()
+  assert.equal(change.type, 'change')
+  assert.deepEqual(change.items.map(item => item.id), ['second'])
+  const allowed = new Set(['initialize', 'initialized', 'thread/read', 'config/read', 'thread/turns/list', 'thread/items/list'])
+  assert.equal(fixture.messages.every(message => allowed.has(message.method)), true)
+  assert.equal(fixture.messages[0].params.clientInfo.name, 'codex_app_server_daemon')
+  await reader.cancel()
+  await fixture.clientClosed
 })

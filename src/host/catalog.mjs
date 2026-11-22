@@ -1,5 +1,5 @@
 import { mergePages } from '../shared/pages.js'
-import { CodexRpcError, findCodexSocket, withCodexReader } from './app-server.mjs'
+import { CodexRpcError, findCodexSocket, readCodexPages, withCodexReader } from './app-server.mjs'
 import { catalogCachePath, readCatalogCache, saveCatalogCache } from './catalog-cache.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
@@ -15,18 +15,7 @@ export async function readProjectPage(request, params) {
 }
 
 async function collectPages(read) {
-  const entries = []
-  const cursors = new Set()
-  let cursor
-  do {
-    const page = await read(cursor ? { limit: 100, cursor } : { limit: 100 })
-    entries.push(...page.data)
-    cursor = page.nextCursor
-    if (cursor) {
-      if (cursors.has(cursor)) throw new Error('Codex 返回了重复的列表游标。')
-      cursors.add(cursor)
-    }
-  } while (cursor)
+  const entries = await readCodexPages(cursor => read({ limit: 100, ...(cursor != null && { cursor }) }))
   return mergePages([], entries)
 }
 

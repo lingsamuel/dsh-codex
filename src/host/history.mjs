@@ -1,5 +1,6 @@
 import { CodexRpcError, readCodex } from './app-server.mjs'
 import { createCatalogReader, readProjectPage } from './catalog.mjs'
+import { createWatchRoute } from './live-watch.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -34,6 +35,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
+    createWatchRoute(socketPath, ownerSignal),
     route('catalog', query => readCatalog(query.get('complete') === '1')),
     route('projects', (query, signal) => readProjectPage(
       (method, params) => readCodex(method, params, socketPath, signal),
