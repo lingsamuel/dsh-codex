@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws'
 import { readCodex } from '../src/host/app-server.mjs'
 import { createConversationActionRoute } from '../src/host/conversation-actions.mjs'
 import { createHistoryRoutes } from '../src/host/history.mjs'
+import { createWatchRoute } from '../src/host/live-watch.mjs'
 import { asyncQuestionItemId, encodeQuestionReplies } from '../src/shared/question-replies.js'
 import { fileAttachmentInput } from '../src/shared/file-attachments.js'
 
@@ -2691,6 +2692,51 @@ test('缓存过期后的完整刷新失败，不会让已显示的旧工作区�
   assert.equal(cached.complete, false)
   assert.equal((await get('/api/codex/catalog?complete=1')).status, 502)
   assert.deepEqual((await (await get('/api/codex/catalog')).json()).threads, [indexed, legacy])
+})
+
+test('SSE 积压达到字节上限时释放当前连接的监听和待发数据', { timeout: 5000 }, async t => {
+  const { socketPath, clientClosed } = await fakeCodex(t, {})
+  const observing = Promise.withResolvers()
+  const route = createWatchRoute(socketPath, undefined, undefined, {
+    watch(send, signal) { observing.resolve({ send, signal }) },
+  })
+  const response = await route.fetch(new Request('http://localhost/api/codex/watch?scope=catalog&backgroundTerminals=1'))
+  const reader = response.body.getReader()
+  t.after(() => reader.cancel())
+  assert.equal(new TextDecoder().decode((await reader.read()).value), 'data: {"type":"catalog-ready"}\n\n')
+  const { send, signal } = await observing.promise
+  const update = { type: 'background-terminals', byThread: { example: '摘要'.repeat(131_072) } }
+  send(update)
+  send(update)
+  assert.equal(signal.aborted, false)
+  send(update)
+  assert.equal(signal.aborted, true)
+  assert.equal((await reader.read()).done, true)
+  await clientClosed
+})
+
+test('SSE 大快照分块发送，续读检查点在完整快照之后到达', { timeout: 5000 }, async t => {
+  const text = '大型历史正文。'.repeat(110_000)
+  const { get } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'large', historyMode: 'paginated' } } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'turn', status: 'completed',
+      items: [{ id: 'reply', type: 'agentMessage', text }] }] } }),
+    'thread/items/list': () => ({ result: { data: [], backwardsCursor: 'after-snapshot' } }),
+  })
+  const reader = (await get('/api/codex/watch?threadId=large')).body.getReader()
+  t.after(() => reader.cancel())
+  const decoder = new TextDecoder()
+  let frame = ''
+  let chunks = 0
+  while (!frame.endsWith('\n\n')) {
+    const { done, value } = await reader.read()
+    assert.equal(done, false)
+    frame += decoder.decode(value, { stream: true })
+    chunks++
+  }
+  assert.equal(JSON.parse(frame.slice(6)).page.data[0].items[0].text, text)
+  assert.ok(chunks > 1)
+  assert.match(decoder.decode((await reader.read()).value), /^id: after-snapshot\nevent: history-checkpoint\n/)
 })
 
 test('只读 SSE 在原生历史变更后推送增量和状态，且不恢复线程', { timeout: 5000 }, async t => {

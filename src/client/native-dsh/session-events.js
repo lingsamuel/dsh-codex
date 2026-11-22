@@ -2,7 +2,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../../shared/pages.js'
 import { readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
-import { readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
+import { inlineAttachmentId, readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
 import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
 import { remoteFailure } from './catalog.js'
@@ -390,6 +390,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function forgetTurn(id) {
+    // 图片在投影前按原生条目缓存，隐藏的消息也需要随轮次释放。
+    for (const item of transcript.getTurn(id)?.items ?? []) {
+      if (item.type !== 'userMessage') continue
+      for (const index of item.content.keys()) attachments.delete(inlineAttachmentId(item.id, index))
+    }
     transcript.forgetTurn(id)
     rowsById.delete(id)
     liveTurns.delete(id)
@@ -425,7 +430,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       }
       const start = recent.findIndex(turn => transcript.getTurn(turn.id))
       const refreshed = recent.slice(Math.max(start, 0))
-      const anchor = recent.length ? rows.findIndex(row => row.id === recent[start]?.id) : 0
+      const anchor = rows.findIndex(row => row.id === recent[start]?.id)
       if (anchor < 0) {
         // 断线期间整个已加载窗口可能被回退。游标已找不到交集时从实际快照重建。
         clearHistory(cursor)

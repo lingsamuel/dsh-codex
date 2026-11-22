@@ -8,6 +8,9 @@ import { watchConversationQueue } from './queue-watch.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
 const encoder = new TextEncoder()
+const heartbeatFrame = encoder.encode('event: heartbeat\ndata: {}\n\n')
+const maxQueuedBytes = 2 * 1024 * 1024
+const chunkBytes = 64 * 1024
 const catalogMethods = new Set([
   'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
   'thread/settings/updated', 'thread/archived', 'thread/unarchived', 'thread/deleted', 'thread/section/changed', 'project/changed',
@@ -32,18 +35,77 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
       const abort = new AbortController()
       const signal = AbortSignal.any([request.signal, abort.signal, ...(ownerSignal ? [ownerSignal] : [])])
       let cancelled = false
+      let onPull
+      let clearFrames
 
       const stream = new ReadableStream({
         start(writer) {
-          const send = frame => {
-            if (!signal.aborted && !cancelled) writer.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`))
+          const frames = []
+          let queuedBytes = 0
+          let largeFrameQueued = false
+          let waiting = false
+          let ended = false
+
+          function flush() {
+            if (waiting && frames.length) {
+              const frame = frames[0]
+              const { bytes, offset, consumed } = frame
+              const end = Math.min(offset + chunkBytes, bytes.byteLength)
+              waiting = false
+              // HTTP 层只持有本次读取的块，连接关闭后可直接释放其余大帧字节。
+              writer.enqueue(end === bytes.byteLength && offset === 0 ? bytes : bytes.slice(offset, end))
+              frame.offset = end
+              if (end === bytes.byteLength) {
+                frames.shift()
+                if (consumed) consumed()
+                else if (bytes.byteLength > maxQueuedBytes) largeFrameQueued = false
+                else queuedBytes -= bytes.byteLength
+              }
+            }
+            if (ended && !frames.length) writer.close()
           }
+
+          function push(bytes, consumed) {
+            if (signal.aborted) { consumed?.(); return }
+            if (!consumed) {
+              const large = bytes.byteLength > maxQueuedBytes
+              if (large ? largeFrameQueued : queuedBytes + bytes.byteLength > maxQueuedBytes) {
+                abort.abort()
+                return
+              }
+              // 待发队列等原生快照可以单独超过预算，允许一帧随下游分块读取。
+              if (large) largeFrameQueued = true
+              else queuedBytes += bytes.byteLength
+            }
+            frames.push({ bytes, consumed, offset: 0 })
+            flush()
+          }
+
+          onPull = () => { waiting = true; flush() }
+          clearFrames = () => {
+            for (const { consumed } of frames) consumed?.()
+            frames.length = 0
+          }
+          function stop() {
+            if (ended) return
+            ended = true
+            clearFrames()
+            if (!cancelled) writer.close()
+          }
+          signal.addEventListener('abort', stop, { once: true })
+          if (signal.aborted) { stop(); return }
+
+          const encodeFrame = frame => encoder.encode(`data: ${JSON.stringify(frame)}\n\n`)
+          const send = frame => { if (!signal.aborted) push(encodeFrame(frame)) }
+          // 历史读取串行等待当前帧发完，积压时只保留正在发送的历史帧。
+          const sendHistory = frame => new Promise(resolve => push(encodeFrame(frame), resolve))
           const heartbeat = setInterval(() => {
-            if (!signal.aborted && !cancelled) writer.enqueue(encoder.encode('event: heartbeat\ndata: {}\n\n'))
+            if (waiting) push(heartbeatFrame)
           }, 15_000)
           heartbeat.unref()
           let timer
-          let reading = false
+          // 快照发送期间合并文件变化，避免并行读取和积压下一帧历史。
+          let reading = true
           let dirty = false
           let factsDirty = false
           let reset = false
@@ -68,10 +130,10 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
 
           function checkpoint(cursor = '') {
             cursor ??= ''
-            if (cursor === sentCursor || signal.aborted || cancelled) return
+            if (cursor === sentCursor || signal.aborted) return
             // SSE 断线后使用该 ID 请求续读，必须在这一批历史条目发完后确认进度。
             sentCursor = cursor
-            writer.enqueue(encoder.encode(`id: ${cursor}\nevent: history-checkpoint\ndata: {}\n\n`))
+            push(encoder.encode(`id: ${cursor}\nevent: history-checkpoint\ndata: {}\n\n`))
           }
 
           async function sendFacts() {
@@ -126,7 +188,10 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                     const reading = await connection.request('thread/read', { threadId })
                     await sendSnapshot(reading, true)
                   } else {
-                    for (const update of updates) send({ type: 'change', ...update })
+                    for (const update of updates) {
+                      await sendHistory({ type: 'change', ...update })
+                      signal.throwIfAborted()
+                    }
                     if (updates.length && steers?.list(observedThread.id).length) wakeQueue?.()
                     checkpoint(tail.itemCursor())
                     if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
@@ -224,13 +289,17 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             const fromCursor = !replace && itemCursor && resumeCursor ? resumeCursor : itemCursor
             tail = createHistoryTail(connection.request, thread, page, fromCursor)
             awaitingPreview = !thread.name && !thread.preview
-            send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
+            const writing = sendHistory({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
               planMode: readDraftPlanMode?.(threadId), goal,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
               mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
             if (fromCursor === itemCursor) checkpoint(itemCursor)
             else wake()
             questionObserver?.update(thread.status)
+            for (const message of early) notify(message)
+            early.length = 0
+            await writing
+            signal.throwIfAborted()
           }
 
           async function follow() {
@@ -250,35 +319,37 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 await connection.closed
                 return
               }
-              const [reading, config, goalResult] = await Promise.all([
+              const [initial, config, goalResult] = await Promise.all([
                 connection.request('thread/read', { threadId }),
                 configRead,
                 connection.request('thread/goal/get', { threadId }).catch(() => undefined),
               ])
               sqliteHome = sqliteDirectory(config)
-              await sendSnapshot(reading, false, goalResult?.goal)
-              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, reading.thread.id, sqliteHome, send, signal, steers)
-              for (const message of early) notify(message)
-              early.length = 0
+              await sendSnapshot(initial, false, goalResult?.goal)
+              reading = false
+              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, initial.thread.id, sqliteHome, send, signal, steers)
               wakeFacts()
               await connection.closed
             } catch {
               // 浏览器重连时重新读取一次原生尾部快照。
             } finally {
+              // App Server 正常结束时先发完已有通知，例如归档状态变化。
+              if (!signal.aborted) { ended = true; flush() }
               abort.abort()
               connection?.close()
               clearTimeout(timer)
               clearInterval(heartbeat)
-              if (!cancelled) writer.close()
             }
           }
           void follow()
         },
+        pull() { onPull() },
         cancel() {
           cancelled = true
+          clearFrames()
           abort.abort()
         },
-      })
+      }, { highWaterMark: 0 })
 
       return new Response(stream, {
         headers: {

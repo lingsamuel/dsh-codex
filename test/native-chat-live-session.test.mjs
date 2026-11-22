@@ -1398,23 +1398,38 @@ test('失败轮次的已读锚点是 DSH 原生错误消息而不是此前的提
   })
 })
 
-test('an authoritative reconnect tail drops rolled-back turns and keeps earlier records', async t => {
+test('重连快照移除回退轮次和对应图片，保留已有轮次的附件', async t => {
   const currentSource = mockTransport(t)
+  const originalImage = globalThis.Image
+  t.after(() => { globalThis.Image = originalImage })
+  globalThis.Image = class {
+    naturalWidth = 1
+    naturalHeight = 1
+    decode() {}
+  }
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
   const emit = frame => currentSource().onmessage({ data: JSON.stringify(frame) })
-  const older = turn('earlier', 'completed', [ask])
-  const removed = turn('removed', 'completed', [answer])
+  const image = id => ({ id, type: 'userMessage', content: [{ type: 'image', url: 'data:image/png;base64,AA==' }] })
+  const older = turn('earlier', 'completed', [image('keep-image')])
+  const removed = turn('removed', 'completed', [image('old-image'), answer])
   const snapshot = data => emit({ type: 'snapshot', page: { data, nextCursor: null }, mode: 'live' })
   await snapshot([removed, older])
+  const references = Object.fromEntries(history.events.getSnapshot().entries.filter(({ event }) => event.type === 'user/message')
+    .map(({ event }) => [event.data.id, event.data.content[0].attachment]))
+  const read = id => history.session.readAttachment(references[id])
+  assert.deepEqual((await read('old-image')).value.data, new Uint8Array([0]))
   const previous = history.events.getSnapshot().entries[0]
   await snapshot([older])
   const current = history.events.getSnapshot()
   assert.equal(current.change.kind, 'replace')
   assert.strictEqual(current.entries[0], previous)
   assert.equal(current.entries.some(entry => entry.event.data.codexTurnId === 'removed'), false)
+  assert.equal((await read('old-image')).ok, false)
+  assert.deepEqual((await read('keep-image')).value.data, new Uint8Array([0]))
   await snapshot([])
   assert.deepEqual(history.events.getSnapshot().entries, [])
   assert.equal(history.session.getSnapshot().live.lastTurnStatus, undefined)
+  assert.equal((await read('keep-image')).ok, false)
 })
 
 test('以问答开头的轮次保留答复定位，后续插话不会成为轮首编辑目标', async t => {
