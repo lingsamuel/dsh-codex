@@ -13,6 +13,7 @@ import { addressableThread, createThreadSubmissionQueue, readConversationQueue, 
 import { createThreadTitleScheduler } from './thread-titles.mjs'
 import { resolveInputSkills } from './skills.mjs'
 import { resolveWorktreeCwd, validateWorktreeSelection, worktreeConflict } from './git-worktrees.mjs'
+import { createQueuedSteers } from './queued-steers.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -155,26 +156,31 @@ export async function submissionRuntime(request, thread, { modelDraft, permissio
   return { runtime, ...(permission && { permission }) }
 }
 
-async function startQueued(request, threadId, fields, signal, permissions, scheduleTitle) {
+async function startQueued(request, threadId, fields, signal, permissions, scheduleTitle, steers) {
   const { queuedSubmissionId } = fields
   if (queuedSubmissionId !== undefined) required(queuedSubmissionId, '缺少待发消息 ID。')
   const thread = await submissionThread(request, threadId, fields, permissions)
+  if (steers.find(threadId, queuedSubmissionId)) throw uncertainQueueSteer()
   let permission
   function started(result) {
     if (result.turn?.id) scheduleTitle(thread, undefined, result.turn.id)
     return permission ? { ...result, permission } : result
   }
   const hasDraft = fields.modelDraft !== undefined || fields.permissionDraft !== undefined
-  if (thread.status?.type !== 'notLoaded' && fields.unarchive !== true && !hasDraft) {
+  const preparesRuntime = thread.status?.type === 'notLoaded' || fields.unarchive === true || hasDraft
+  const checkHead = queuedSubmissionId === undefined && steers.list(threadId).length
+  if (!preparesRuntime && !checkHead) {
     return started(await request('thread/queue/start', { threadId, queuedSubmissionId }))
   }
 
   const queue = await readConversationQueue(request, threadId)
   const target = queuedSubmissionId === undefined ? queue[0] : queue.find(item => item.id === queuedSubmissionId)
   if (!target) {
-    if (queuedSubmissionId === undefined && (fields.unarchive === true || hasDraft)) return { queueEmpty: true }
+    if (queuedSubmissionId === undefined && (checkHead || fields.unarchive === true || hasDraft)) return { queueEmpty: true }
     throw missingQueueItem()
   }
+  if (steers.find(threadId, target.id)) throw uncertainQueueSteer()
+  if (!preparesRuntime) return started(await request('thread/queue/start', { threadId, queuedSubmissionId: target.id }))
   const ready = await submissionRuntime(request, thread, fields, signal, permissions)
   permission = ready.permission
   async function claimedTurn() {
@@ -208,11 +214,47 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }) {
-  if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
-  if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
+function uncertainQueueSteer() {
+  return conflict('queue-steer-unknown', '待发消息的插话结果待确认。')
+}
+
+function rejectedQueueSteer(error) {
+  return error instanceof CodexRpcError && [-32600, -32601, -32602].includes(error.code)
+}
+
+async function restoreQueuedSteer(request, steers, record) {
+  const { threadId, item: { input, clientUserMessageId } } = record
+  try {
+    const restored = await request('thread/queue/add', { threadId, input, clientUserMessageId })
+    steers.done(record, { restored: restored.queuedSubmission })
+    return restored
+  } catch (error) {
+    // 原生恢复也可能已写入但未收到回执。仅明确拒绝入队时再次开放恢复。
+    const rejected = rejectedQueueSteer(error)
+    steers.setStatus(record, rejected ? 'recoverable' : 'unconfirmed')
+    throw rejected ? conflict('queue-steer-not-restored', '插话失败，暂时无法恢复待发消息。') : uncertainQueueSteer()
+  }
+}
+
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }, steers) {
+  if (operation === 'list') {
+    const { data, steers: records } = await steers.read(request, threadId)
+    return { data, ...(records.length && { steers: records }) }
+  }
+  if (!['edit', 'steer', 'remove', 'restore-steer'].includes(operation)) throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
+  const record = steers.find(threadId, queuedSubmissionId)
+  if (operation === 'restore-steer') {
+    if (!record) throw missingQueueItem()
+    if (record.status !== 'recoverable') throw uncertainQueueSteer()
+    await addressableThread(request, threadId)
+    await steers.match(request, threadId, await readConversationQueue(request, threadId))
+    if (!steers.find(threadId, queuedSubmissionId)) return {}
+    steers.setStatus(record, 'steering')
+    return restoreQueuedSteer(request, steers, record)
+  }
+  if (record) throw uncertainQueueSteer()
   if (operation === 'remove') return deleteQueued(request, target)
   if (operation === 'edit' && typeof text !== 'string') throw badRequest('缺少待发消息正文。')
   if (operation === 'steer') required(expectedTurnId, '缺少当前轮次 ID。')
@@ -238,26 +280,37 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     throw conflict('turn-unavailable', '原插话轮次已结束或发生变化。')
   }
   // 先原子取走待发项，以免轮次结束时同一条消息又被 Codex 自动领取。
-  await deleteQueued(request, target)
-  const input = { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId }
+  const queued = steers.begin(threadId, item, expectedTurnId)
   try {
-    return await steerTurn(request, { ...input, expectedTurnId })
+    await deleteQueued(request, target)
   } catch (error) {
-    // 原生明确拒绝时恢复待发内容。断线时无法判断是否已插话，不自动重发。
-    if (!(error instanceof CodexRpcError)) throw conflict('queue-steer-unknown', '无法确认插话是否已发送。请先检查会话。')
-    try {
-      await request('thread/queue/add', input)
-    } catch {
-      throw conflict('queue-steer-not-restored', '插话失败，无法自动恢复待发消息。')
+    if (rejectedQueueSteer(error) && error.data?.reason !== 'queue-item-not-found') {
+      steers.done(queued)
+      throw error
     }
+    steers.setStatus(queued, 'unconfirmed')
+    throw uncertainQueueSteer()
+  }
+  steers.removed(queued)
+  let result
+  try {
+    result = await steerTurn(request, { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId, expectedTurnId })
+  } catch (error) {
+    if (!rejectedQueueSteer(error)) {
+      steers.setStatus(queued, 'unconfirmed')
+      throw uncertainQueueSteer()
+    }
+    await restoreQueuedSteer(request, steers, queued)
     if (error.data?.reason === 'steer-unavailable') throw conflict('turn-unavailable', '原插话轮次已结束或发生变化。')
     throw error
   }
+  steers.done(queued)
+  return result
 }
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
 export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions,
-  openProject = createProjectOpener(), enablePlan) {
+  openProject = createProjectOpener(), enablePlan, steers = createQueuedSteers()) {
   const worktreeStarts = new Map()
   const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
 
@@ -421,11 +474,15 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           }))
         }
         const { operation } = fields
-        const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
-          ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle)
-          : queueAction(rpc, threadId, fields))
-        const serial = operation === 'start' || operation === 'steer'
-        return json(await (serial ? submit(threadId, run) : run()))
+        const keepsRunning = operation === 'steer' || operation === 'restore-steer'
+        const run = () => {
+          signal.throwIfAborted()
+          // 原生取走消息之后由 Host 跟到回执，切换视图或取消网页请求不提前关闭连接。
+          return withCodexReader(socketPath, keepsRunning ? ownerSignal : signal, rpc => operation === 'start'
+            ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle, steers)
+            : queueAction(rpc, threadId, fields, steers))
+        }
+        return json(await (operation !== 'list' ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

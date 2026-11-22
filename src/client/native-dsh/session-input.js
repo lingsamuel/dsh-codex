@@ -276,6 +276,12 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const options = kind === 'edit' ? { text: userInputText(action.content) }
         : kind === 'steer' ? { expectedTurnId: activeTurnId() } : {}
       try {
+        if (kind === 'check-steer') {
+          const accept = history.captureQueueView()
+          const { data, steers } = await native('queue', { operation: 'list' })
+          await accept(data, steers)
+          return accepted
+        }
         await native('queue', { queuedSubmissionId, operation: kind, ...options })
         return accepted
       } catch (error) {

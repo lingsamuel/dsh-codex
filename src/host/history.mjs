@@ -20,6 +20,7 @@ import { createSkillsRoute } from './skills.mjs'
 import { createCodexPluginRoutes } from './codex-plugins.mjs'
 import { createCodexMcpRoutes } from './codex-mcp.mjs'
 import { createWorktreeRoutes } from './worktree-actions.mjs'
+import { createQueuedSteers } from './queued-steers.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -65,6 +66,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()
+  const steers = createQueuedSteers()
   const openProject = createProjectOpener()
   const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
@@ -98,12 +100,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,
-    createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
-    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode),
+    createAsyncQuestionActionRoute(socketPath, ownerSignal, submit, steers),
+    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => {

@@ -20,12 +20,23 @@ function readArchivedQueue(path, threadId) {
 }
 
 /** 被动观察本地原生队列。App Server 明确拒绝读取归档线程时，使用只读的落盘快照。 */
-export function watchConversationQueue(request, threadId, sqliteHome, publish, signal) {
+export function watchConversationQueue(request, threadId, sqliteHome, publish, signal, steers) {
   const path = sqliteHome && isAbsolute(sqliteHome) ? join(sqliteHome, 'queue_1.sqlite') : undefined
   let last
+  let nativeQueue
   let timer
   let reading = false
   let dirty = false
+
+  async function readQueue() {
+    try {
+      return await readConversationQueue(request, threadId)
+    } catch (error) {
+      if (!path || signal.aborted || !(error instanceof CodexRpcError) || error.code !== -32600
+        || !error.message.startsWith(`session ${threadId} is archived.`)) throw error
+      return readArchivedQueue(path, threadId)
+    }
+  }
 
   function wake() {
     dirty = true
@@ -35,15 +46,17 @@ export function watchConversationQueue(request, threadId, sqliteHome, publish, s
       reading = true
       dirty = false
       try {
-        const submissions = await readConversationQueue(request, threadId).catch(error => {
-          if (!path || signal.aborted || !(error instanceof CodexRpcError) || error.code !== -32600
-            || !error.message.startsWith(`session ${threadId} is archived.`)) throw error
-          return readArchivedQueue(path, threadId)
-        })
-        const stamp = JSON.stringify(submissions)
-        if (!dirty && !signal.aborted && stamp !== last) {
-          last = stamp
-          publish({ type: 'queue', submissions })
+        const { data: submissions, steers: records, native } = steers ? await steers.read(request, threadId, () => nativeQueue, readQueue)
+          : { data: await readQueue(), steers: [] }
+        if (submissions === undefined && !records.length && last === undefined) return
+        const frame = { type: 'queue', submissions: submissions ?? [], ...(records.length && { steers: records }) }
+        const stamp = JSON.stringify(frame)
+        if (!dirty && !signal.aborted) {
+          if (native) nativeQueue = native
+          if (stamp !== last) {
+            last = stamp
+            publish(frame)
+          }
         }
       } catch {
         // 队列是可选的原生数据。临时读失败不影响聊天历史与状态流。
@@ -56,7 +69,16 @@ export function watchConversationQueue(request, threadId, sqliteHome, publish, s
   }
 
   if (path) watchNativeFiles([path, `${path}-wal`], wake, signal)
-  signal.addEventListener('abort', () => clearTimeout(timer), { once: true })
+  const unsubscribe = steers?.subscribe(threadId, change => {
+    // 原生读失败时沿用最后成功的原生队列，再应用已经确认的取走或重新入队回执。
+    if (change?.removedId && nativeQueue) nativeQueue = nativeQueue.filter(item => item.id !== change.removedId)
+    if (change?.restored && !nativeQueue?.some(item => item.id === change.restored.id)) nativeQueue = [...(nativeQueue ?? []), change.restored]
+    wake()
+  })
+  signal.addEventListener('abort', () => {
+    clearTimeout(timer)
+    unsubscribe?.()
+  }, { once: true })
   wake()
   return wake
 }

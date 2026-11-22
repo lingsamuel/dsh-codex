@@ -48,6 +48,10 @@ export function writeConversationAction(parameters, signal) {
     return writeWithConfirmation('conversation-action', parameters, signal,
       '等待发送确认超时。请查看会话和待发队列确认消息是否送达。')
   }
+  if (parameters.action === 'queue' && ['steer', 'restore-steer'].includes(parameters.operation)) {
+    return writeWithConfirmation('conversation-action', parameters, signal,
+      '等待待发消息确认超时。请查看队列中的投递状态。')
+  }
   return writeAction('conversation-action', parameters, signal)
 }
 

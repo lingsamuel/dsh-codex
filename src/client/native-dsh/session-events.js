@@ -428,7 +428,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   function publishQuestions() {
     const { canAcceptDirectInput } = state.getSnapshot()
     const latest = transcript.getTurn(rows.at(-1)?.id)
-    const asynchronous = canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, queueStore.getSnapshot())
+    const queued = queueStore.getSnapshot()
+    const steers = inbox.getSnapshot().queuedSteers
+    const awaitingDelivery = steers ? [...queued, ...steers.map(({ item }) => item)] : queued
+    const asynchronous = canAcceptDirectInput === false ? [] : projectAsyncQuestions(latest, awaitingDelivery)
     const requests = [...liveQuestions, ...asynchronous]
     if (JSON.stringify(requests) === JSON.stringify(codexQuestions.getSnapshot())) return
     codexQuestions.set(requests)
@@ -440,16 +443,31 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     catalog?.acceptThread({ ...summary, ...(state.getSnapshot().archived && { archived: true }) })
   }
 
-  async function publishQueue(submissions, lifetime) {
-    const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, lifetime, queueImages)))
+  async function publishQueue(submissions, lifetime, steers = []) {
+    const images = await Promise.all([...submissions, ...steers.map(({ item }) => item)]
+      .map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, lifetime, queueImages)))
     lifetime.throwIfAborted()
     // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
     queueImages = new Map(images.flat().filter(Boolean))
+    const queuedSteers = steers.map(({ item, status }) => {
+      const content = projectUserContent(`queue:${item.id}`, item.input, queueImages)
+      const attachments = content.flatMap(part => part.type === 'image'
+        ? [{ type: 'image', value: { previewUrl: queueImages.get(part.attachment.attachmentId).url } }] : [])
+      return { item, status, requestId: item.id, placement: 'queued', text: userInputText(content), attachments }
+    })
     inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
       source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
-    })), 'next-step': [] })
+    })), 'next-step': [], ...(queuedSteers.length && { queuedSteers }) })
     queueStore.set(submissions)
     publishQuestions()
+  }
+
+  /** 主动核对插话时，保留在请求期间到达的较新队列推送。 */
+  function captureQueueView() {
+    const queueBefore = queueStore.getSnapshot()
+    return (submissions, steers) => enqueue(async () => {
+      if (queueStore.getSnapshot() === queueBefore) await publishQueue(submissions, signal, steers)
+    })
   }
 
   function receive(frame, lifetime) {
@@ -463,7 +481,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (frame.type === 'approvals' && watchingInteractions) return codexApprovals.set(frame.requests)
       if (frame.type === 'mcp-requests' && watchingInteractions) return codexMcpRequests.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
-      if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime)
+      if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime, frame.steers)
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
         return
@@ -695,6 +713,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     ready,
     activeTurnId: () => state.getSnapshot().running ? state.getSnapshot().live.activeTurnId : undefined,
     queueStore,
+    captureQueueView,
     updateState: edit => state.update(edit),
     session: {
       getSnapshot: state.getSnapshot,

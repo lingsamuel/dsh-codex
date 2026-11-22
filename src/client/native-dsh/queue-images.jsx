@@ -1,15 +1,22 @@
 import { Button, InlineEditor, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useState } from 'react'
 import { userInputText } from '../../shared/user-input.js'
+import { QueueSteerDock } from './queue-steer.jsx'
 
 const dock = 'conversation.input.dock'
 const locale = 'codex.queue.images'
 const readOnlyQueue = { address: { mode: 'unknown' } }
 const copy = {
   zh: { edit: '编辑待发图片消息', message: '待发消息', image: '图片', text: '消息文字',
-    cancel: '取消', save: '保存', failed: '无法保存待发消息' },
+    cancel: '取消', save: '保存', failed: '无法保存待发消息',
+    steering: '插话中', unconfirmed: '投递待确认', recoverable: '未送达，可恢复',
+    check: '核对投递', restore: '恢复入队', download: '下载原稿',
+    checkFailed: '暂时无法核对投递状态', restoreFailed: '暂时无法恢复待发消息' },
   en: { edit: 'Edit queued image message', message: 'Queued message', image: 'Image', text: 'Message text',
-    cancel: 'Cancel', save: 'Save', failed: 'Could not save the queued message' },
+    cancel: 'Cancel', save: 'Save', failed: 'Could not save the queued message',
+    steering: 'Steering…', unconfirmed: 'Delivery unconfirmed', recoverable: 'Undelivered, ready to restore',
+    check: 'Check delivery', restore: 'Restore to queue', download: 'Download original',
+    checkFailed: 'Could not check delivery', restoreFailed: 'Could not restore the queued message' },
 }
 
 function QueueImageEdit({ useSession, useProjection, updateQueue, notify, t }) {
@@ -89,7 +96,9 @@ export function installQueueImages(ctx) {
         function useQueueSession(select) {
           return props.useSession(state => select(state.archived && !state.subagent ? { ...state, subagent: readOnlyQueue } : state))
         }
-        return <><Component {...props} useSession={useQueueSession} /><QueueImageEdit {...props} t={t} /></>
+        const dockProps = { ...props, useSession: useQueueSession }
+        return <><Component {...dockProps} /><QueueSteerDock Dock={Component} dockProps={dockProps} t={t} />
+          <QueueImageEdit {...props} t={t} /></>
       }
       entry.inject = injectQueue
       entry.component = Queue

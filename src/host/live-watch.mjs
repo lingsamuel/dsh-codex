@@ -15,7 +15,7 @@ const catalogMethods = new Set([
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode) {
+export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers) {
   return {
     path: '/api/codex/watch',
     methods: ['GET'],
@@ -109,6 +109,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                   await sendSnapshot(reading, true)
                 } else {
                   for (const update of updates) send({ type: 'change', ...update })
+                  if (updates.length && steers?.list(threadId).length) wakeQueue?.()
                   checkpoint(tail.itemCursor())
                   if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
                     // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
@@ -230,7 +231,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               }, wake, signal)
               mode = watching ? 'live' : 'history'
               await sendSnapshot(reading, false, goalResult?.goal)
-              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteDirectory(config), send, signal)
+              if (observeQueue) wakeQueue = watchConversationQueue(connection.request, threadId, sqliteDirectory(config), send, signal, steers)
               for (const message of early) notify(message)
               early.length = 0
               void sendFacts()

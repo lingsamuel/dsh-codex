@@ -63,18 +63,20 @@ async function readQuestionReplies(request, thread, turnId, itemId, answers, que
   return { latest, replies }
 }
 
-async function submit(request, threadId, turnId, itemId, answers, unarchive, signal) {
+async function submit(request, threadId, turnId, itemId, answers, unarchive, signal, steers) {
+  // 正在插话的答复可能已离开原生队列，原生历史还没有相同问题的答复记录。
+  const awaitingDelivery = steers?.list(threadId).map(({ item }) => item) ?? []
   const original = await addressableThread(request, threadId, unarchive)
   let thread = original
   if (unarchive) {
     // 原生归档线程只能读历史。确认题目仍待答后，才解除归档以读取队列。
-    const checked = await readQuestionReplies(request, original, turnId, itemId, answers)
+    const checked = await readQuestionReplies(request, original, turnId, itemId, answers, awaitingDelivery)
     if (checked instanceof Response) return checked
     thread = await unarchiveForSubmission(request, original)
   }
   // 优先读队列，再读历史，覆盖原生正在领取待发消息的情况。
   const queued = await readConversationQueue(request, threadId)
-  const checked = await readQuestionReplies(request, original, turnId, itemId, answers, queued)
+  const checked = await readQuestionReplies(request, original, turnId, itemId, answers, [...queued, ...awaitingDelivery])
   if (checked instanceof Response) return checked
   const { replies } = checked
   let { latest } = checked
@@ -108,7 +110,7 @@ async function submit(request, threadId, turnId, itemId, answers, unarchive, sig
 }
 
 /** 从已保存的原生问题构建答复。网页并发只限制同一条提问的提交。 */
-export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitThread = createThreadSubmissionQueue()) {
+export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitThread = createThreadSubmissionQueue(), steers) {
   const submitting = new Set()
   return {
     path: '/api/codex/async-question-answer',
@@ -125,7 +127,7 @@ export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitTh
       try {
         const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
         return await submitThread(threadId, () => withCodexReader(socketPath, signal, rpc =>
-          submit(rpc, threadId, turnId, itemId, answers, unarchive === true, signal)))
+          submit(rpc, threadId, turnId, itemId, answers, unarchive === true, signal, steers)))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

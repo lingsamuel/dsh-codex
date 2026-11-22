@@ -22,6 +22,7 @@ const hook = registerHooks({
   },
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
+const { createSessionInput } = await import('../src/client/native-dsh/session-input.js')
 const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
@@ -459,6 +460,51 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
   assert.equal(history.session.getSnapshot().running, false)
 })
 
+test('待发插话副本保留在队列区域，不参与再次插话或编辑器草稿提交', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const model = { getSnapshot: () => undefined }
+  const input = createSessionInput({ effect() {} }, 'thread', history, model)
+  const originalImage = globalThis.Image
+  t.after(() => { globalThis.Image = originalImage })
+  globalThis.Image = class {
+    naturalWidth = 1
+    naturalHeight = 1
+    decode() {}
+  }
+  const requests = []
+  const reply = Promise.withResolvers()
+  const image = 'data:image/png;base64,AA=='
+  globalThis.fetch = (url, options) => {
+    if (url === image) return new Response(new Uint8Array([0]), { headers: { 'Content-Type': 'image/png' } })
+    requests.push(JSON.parse(options.body))
+    return reply.promise
+  }
+  const emitter = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const item = { id: 'queued', clientUserMessageId: 'client-id', input: [{ type: 'text', text: 'A' }, { type: 'image', url: image }] }
+  const other = { id: 'other', clientUserMessageId: 'other-id', input: [{ type: 'text', text: '其他待发项' }] }
+  const active = { type: 'active', activeFlags: [] }
+  await emitter({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'history', status: active })
+  await emitter({ type: 'queue', submissions: [item, other] })
+  const sending = input.updateQueue(item.id, { kind: 'steer' })
+  assert.deepEqual(requests, [{ action: 'queue', threadId: 'thread', queuedSubmissionId: item.id, operation: 'steer', expectedTurnId: 'current' }])
+
+  await emitter({ type: 'queue', submissions: [other], steers: [{ item, status: 'steering' }] })
+  const inbox = history.session.projections.faceOf('inbox')
+  const pending = inbox.getSnapshot().queuedSteers[0]
+  assert.equal(pending.placement, 'queued')
+  assert.equal(pending.text, 'A')
+  assert.equal(pending.attachments[0].value.previewUrl, image)
+  assert.deepEqual(inbox.getSnapshot()['next-turn'].map(row => row.id), [other.id])
+  assert.deepEqual(history.session.getSnapshot().pendingSubmissions, [])
+  reply.resolve(Response.json({ error: '断线', reason: 'queue-steer-unknown' }, { status: 409 }))
+  assert.equal((await sending).ok, false)
+  await emitter({ type: 'queue', submissions: [other], steers: [{ item, status: 'unconfirmed' }] })
+  assert.equal(inbox.getSnapshot().queuedSteers[0].status, 'unconfirmed')
+  await emitter({ type: 'queue', submissions: [other] })
+  assert.equal(inbox.getSnapshot().queuedSteers, undefined)
+})
+
 test('取消的原始调用能补入已载入的历史轮次，并随原生回退移除', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
@@ -581,7 +627,10 @@ test('异步问答随当前轮次的原生条目弹出，即使没有等待状�
   await emit({ type: 'change', turn: { id: 'current', status: 'completed' }, items: [answer] })
   assert.deepEqual(displayed().map(question => question.itemId), ['ask-options'])
   const text = '<send_user_message_question_reply>{"questionItemId":"[\\"request_user_input_async\\",\\"ask-options\\",0]","question":"Choose an environment","answer":"Staging"}</send_user_message_question_reply>'
-  await emit({ type: 'queue', submissions: [{ id: 'pending-answer', input: [{ type: 'text', text }] }] })
+  const queued = { id: 'pending-answer', input: [{ type: 'text', text }] }
+  await emit({ type: 'queue', submissions: [queued] })
+  assert.deepEqual(displayed()[0].questions.map(question => question.index), [1])
+  await emit({ type: 'queue', submissions: [], steers: [{ item: queued, status: 'unconfirmed' }] })
   assert.deepEqual(displayed()[0].questions.map(question => question.index), [1])
   await emit({ type: 'change', turn: { id: 'next', status: 'inProgress' }, items: [] })
   assert.deepEqual(displayed(), [])

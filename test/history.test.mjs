@@ -11,6 +11,7 @@ import { WebSocketServer } from 'ws'
 import { readCodex } from '../src/host/app-server.mjs'
 import { createConversationActionRoute } from '../src/host/conversation-actions.mjs'
 import { createHistoryRoutes } from '../src/host/history.mjs'
+import { asyncQuestionItemId, encodeQuestionReplies } from '../src/shared/question-replies.js'
 
 async function fakeCodex(t, methods) {
   await mkdir('.runtime', { recursive: true })
@@ -1103,6 +1104,61 @@ test('继续归档会话的队列先取消归档，再确认目标消息', async
   assert.equal(messages.find(({ method }) => method === 'thread/queue/start').params.queuedSubmissionId, target.id)
 })
 
+test('继续归档队列时只在待核对的原始队首已离开后启动下一项', async t => {
+  const thread = { id: 'thread', status: { type: 'active' } }
+  const turn = { id: 'running', status: 'inProgress', items: [] }
+  const uncertain = { id: 'first', clientUserMessageId: 'first-msg', input: [{ type: 'text', text: 'A' }] }
+  const next = { id: 'next', clientUserMessageId: 'next-msg', input: [{ type: 'text', text: 'B' }] }
+  let queue = [uncertain, next]
+  let archived = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { ...thread, archived } } }),
+    'thread/list': () => ({ result: { data: archived ? [thread] : [] } }),
+    'thread/unarchive': () => {
+      archived = false
+      return { result: { thread } }
+    },
+    'thread/queue/list': () => archived ? { error: { code: -32600, message: 'session is archived' } }
+      : { result: { data: queue } },
+    'thread/queue/delete': (_, client) => {
+      client.terminate()
+    },
+    'thread/resume': () => {
+      thread.status = { type: 'active' }
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => ({ result: { data: [turn] } }),
+    'thread/queue/start': () => ({ result: { started: true } }),
+  })
+  const post = (operation, fields) => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation, threadId: thread.id, ...fields }),
+  })
+  const unknown = await post('steer', { queuedSubmissionId: uncertain.id, expectedTurnId: turn.id })
+  assert.equal((await unknown.json()).reason, 'queue-steer-unknown')
+
+  archived = true
+  thread.status = { type: 'notLoaded' }
+  const blocked = await post('start', { unarchive: true })
+  assert.equal((await blocked.json()).reason, 'queue-steer-unknown')
+  assert.equal(archived, false)
+  assert.equal(messages.some(({ method }) => ['thread/resume', 'thread/queue/start'].includes(method)), false)
+
+  archived = true
+  queue = [next]
+  const before = messages.length
+  assert.deepEqual(await (await post('start', { unarchive: true })).json(), { started: true })
+  const operations = messages.slice(before).filter(({ method }) =>
+    ['thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/start'].includes(method))
+  assert.deepEqual(operations.map(({ method }) => method), ['thread/unarchive', 'thread/queue/list', 'thread/resume', 'thread/queue/start'])
+  assert.equal(operations.at(-1).params.queuedSubmissionId, next.id)
+
+  queue = []
+  const beforeEmpty = messages.length
+  assert.deepEqual(await (await post('start', {})).json(), { queueEmpty: true })
+  assert.equal(messages.slice(beforeEmpty).some(({ method }) => method === 'thread/queue/start'), false)
+})
+
 test('技能候选读取冷会话和归档会话各自的目录，不改变原生会话状态', async t => {
   const threads = {
     cold: { id: 'cold', cwd: '/one', status: { type: 'notLoaded' } },
@@ -1290,6 +1346,278 @@ test('队列编辑保留原生附件，显式插话拒绝后保留待发文本',
   assert.equal(messages.slice(before).some(({ method }) => method === 'thread/queue/delete'), false)
   assert.deepEqual(await (await queue('start')).json(), { turn: { id: 'resumed-turn' } })
   assert.deepEqual(messages.at(-1).params, { threadId })
+})
+
+test('待发项从原生队列移除后保留完整原稿，直到重连在指定历史中看到原生 ID', async t => {
+  for (const outcome of ['删除回执丢失', '插话回执丢失', '原生先领取待发项']) {
+    await t.test(outcome, async t => {
+      const item = { id: 'queued-id', clientUserMessageId: 'queued-client-id', input: [
+        { type: 'text', text: '待发正文', text_elements: [] },
+        { type: 'image', url: 'data:image/png;base64,AA==' },
+        { type: 'localImage', path: '/mock/image.png' },
+      ] }
+      const other = { id: 'other', clientUserMessageId: 'other-client-id', input: [item.input[0]] }
+      const queued = [item, other]
+      const target = { id: 'target', status: 'inProgress', items: [] }
+      let holdQueueRead = outcome === '插话回执丢失'
+      const readStarted = Promise.withResolvers()
+      const replyToOldRead = Promise.withResolvers()
+      t.after(() => replyToOldRead.resolve())
+      const { get, messages } = await fakeCodex(t, {
+        'thread/read': () => ({ result: { thread: { id: 'thread', status: { type: 'active' } } } }),
+        'thread/turns/list': ({ cursor, limit }) => ({ result: limit === 1 || cursor
+          ? { data: [target] } : { data: [{ id: 'newer', status: 'inProgress', items: [] }], nextCursor: 'earlier' } }),
+        'thread/queue/list': async () => {
+          const data = [...queued]
+          if (holdQueueRead) {
+            holdQueueRead = false
+            readStarted.resolve()
+            await replyToOldRead.promise
+          }
+          return { result: { data } }
+        },
+        'thread/queue/delete': ({ queuedSubmissionId }, client) => {
+          assert.equal(queuedSubmissionId, item.id)
+          queued.shift()
+          if (outcome === '删除回执丢失') client.terminate()
+          return { result: { deleted: outcome !== '原生先领取待发项' } }
+        },
+        'turn/steer': ({ input, clientUserMessageId }, client) => {
+          assert.deepEqual(input, item.input)
+          assert.equal(clientUserMessageId, item.clientUserMessageId)
+          client.terminate()
+          return { result: { turnId: target.id } }
+        },
+      })
+      const post = (operation, fields = {}) => get('/api/codex/conversation-action', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'queue', threadId: 'thread', operation, ...fields }),
+      })
+      const steer = () => post('steer', { queuedSubmissionId: item.id, expectedTurnId: target.id })
+      const stale = holdQueueRead ? post('list') : undefined
+      if (stale) await readStarted.promise
+      const response = await steer()
+      assert.equal(response.status, 409)
+      assert.equal((await response.json()).reason, 'queue-steer-unknown')
+      target.items = [{ type: 'userMessage', clientId: 'different', content: item.input }]
+      if (stale) {
+        replyToOldRead.resolve()
+        assert.deepEqual(await (await stale).json(), { data: [other], steers: [{ item, status: 'unconfirmed' }] })
+      }
+      assert.deepEqual(await (await post('list')).json(), { data: [other], steers: [{ item, status: 'unconfirmed' }] })
+      assert.equal((await steer()).status, 409)
+      assert.equal((await post('restore-steer', { queuedSubmissionId: item.id })).status, 409)
+      assert.equal(messages.filter(({ method }) => method === 'thread/queue/delete').length, 1)
+      assert.equal(messages.filter(({ method }) => method === 'turn/steer').length, Number(outcome === '插话回执丢失'))
+      assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
+
+      target.items = [{ type: 'userMessage', clientId: item.clientUserMessageId, content: item.input }]
+      assert.deepEqual(await (await post('list')).json(), { data: [other] })
+    })
+  }
+})
+
+test('插话进行时队列流保留待发项，网页请求取消后仍可确认送达', async t => {
+  const item = { id: 'queued', clientUserMessageId: 'client-id', input: [{ type: 'text', text: '原稿' }] }
+  const target = { id: 'target', status: 'inProgress', items: [] }
+  const entered = Promise.withResolvers()
+  const finish = Promise.withResolvers()
+  const oldReadEntered = Promise.withResolvers()
+  const oldReadFinish = Promise.withResolvers()
+  let holdOldRead = false
+  let queue = [item]
+  let queueAvailable = true
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'thread', status: { type: 'active' } } } }),
+    'thread/turns/list': () => ({ result: { data: [target] } }),
+    'thread/queue/list': async () => {
+      if (!queueAvailable) return { error: { code: -32600, message: '暂时无法读取原生队列' } }
+      const data = queue
+      if (holdOldRead) {
+        holdOldRead = false
+        oldReadEntered.resolve()
+        await oldReadFinish.promise
+      }
+      return { result: { data } }
+    },
+    'thread/queue/delete': () => {
+      queue = []
+      return { result: { deleted: true } }
+    },
+    'turn/steer': async () => {
+      entered.resolve()
+      await finish.promise
+      return { result: { turnId: target.id } }
+    },
+  })
+  t.after(() => finish.resolve())
+  t.after(() => oldReadFinish.resolve())
+  const watch = await fixture.get('/api/codex/watch?threadId=thread&queue=1', { signal: AbortSignal.timeout(2_000) })
+  const reader = watch.body.getReader()
+  t.after(() => reader.cancel())
+  const queueFrame = async () => {
+    while (true) {
+      const frame = await reader.read()
+      assert.equal(frame.done, false)
+      const payload = Buffer.from(frame.value).toString()
+      if (!payload.startsWith('data: ')) continue
+      const parsed = JSON.parse(payload.slice(6))
+      if (parsed.type === 'queue') return parsed
+    }
+  }
+  assert.deepEqual((await queueFrame()).submissions, [item])
+
+  holdOldRead = true
+  const stale = fixture.get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation: 'list', threadId: 'thread' }),
+  })
+  await oldReadEntered.promise
+  const abort = new AbortController()
+  const steer = signal => fixture.get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
+    body: JSON.stringify({ action: 'queue', operation: 'steer', threadId: 'thread',
+      queuedSubmissionId: item.id, expectedTurnId: target.id }),
+  })
+  const first = steer(abort.signal)
+  await entered.promise
+  queueAvailable = false
+  assert.deepEqual((await queueFrame()).steers, [{ item, status: 'steering' }])
+  abort.abort()
+  const duplicate = steer()
+  queueAvailable = true
+  finish.resolve()
+  assert.equal((await first).status, 200)
+  assert.equal((await duplicate).status, 409)
+  oldReadFinish.resolve()
+  assert.deepEqual(await (await stale).json(), { data: [] })
+  assert.deepEqual(await queueFrame(), { type: 'queue', submissions: [] })
+  assert.deepEqual(fixture.messages.filter(({ method }) => ['thread/queue/delete', 'turn/steer'].includes(method))
+    .map(({ method }) => method), ['thread/queue/delete', 'turn/steer'])
+})
+
+test('暂时读不到队列时保留确定在队列中的原稿', async t => {
+  for (const outcome of ['删除被拒绝', '插话被拒绝后重新入队']) await t.test(outcome, async t => {
+    const item = { id: 'queued', clientUserMessageId: 'client-id', input: [{ type: 'text', text: '正文' }] }
+    const restored = { ...item, id: 'restored' }
+    const entered = Promise.withResolvers()
+    const finish = Promise.withResolvers()
+    let queueAvailable = true
+    const rejectDelete = outcome === '删除被拒绝'
+    const { get } = await fakeCodex(t, {
+      'thread/read': () => ({ result: { thread: { id: 'thread', status: { type: 'active' } } } }),
+      'thread/turns/list': () => ({ result: { data: [{ id: 'target', status: 'inProgress', items: [] }] } }),
+      'thread/queue/list': () => queueAvailable ? { result: { data: [item] } }
+        : { error: { code: -32600, message: '暂时无法读取原生队列' } },
+      'thread/queue/delete': async () => {
+        entered.resolve()
+        await finish.promise
+        return rejectDelete ? { error: { code: -32600, message: '原生拒绝删除' } } : { result: { deleted: true } }
+      },
+      'turn/steer': () => ({ error: { code: -32600, message: 'no active turn to steer' } }),
+      'thread/queue/add': () => ({ result: { queuedSubmission: restored } }),
+    })
+    t.after(() => finish.resolve())
+    const watch = await get('/api/codex/watch?threadId=thread&queue=1', { signal: AbortSignal.timeout(2_000) })
+    const reader = watch.body.getReader()
+    t.after(() => reader.cancel())
+    const queueFrame = async () => {
+      while (true) {
+        const { value, done } = await reader.read()
+        assert.equal(done, false)
+        const payload = Buffer.from(value).toString()
+        if (!payload.startsWith('data: ')) continue
+        const frame = JSON.parse(payload.slice(6))
+        if (frame.type === 'queue') return frame
+      }
+    }
+    assert.deepEqual((await queueFrame()).submissions, [item])
+    const operation = get('/api/codex/conversation-action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'queue', operation: 'steer', threadId: 'thread',
+        queuedSubmissionId: item.id, expectedTurnId: 'target' }),
+    })
+    await entered.promise
+    queueAvailable = false
+    assert.deepEqual((await queueFrame()).steers, [{ item, status: 'steering' }])
+    finish.resolve()
+    assert.equal((await operation).status, rejectDelete ? 400 : 409)
+    assert.deepEqual(await queueFrame(), { type: 'queue', submissions: [rejectDelete ? item : restored] })
+  })
+})
+
+test('原生插话回执丢失时按保留的异步问题身份避免重复答复', async t => {
+  const thread = { id: 'thread', status: { type: 'active' }, historyMode: 'legacy' }
+  const question = { id: 'ask', type: 'agentMessage', questions: [{ title: '要继续吗？' }] }
+  const turn = { id: 'target', status: 'inProgress', items: [question] }
+  const input = [{ type: 'text', text: encodeQuestionReplies([
+    { questionItemId: asyncQuestionItemId(question.id, 0), question: '要继续吗？', answer: '要' },
+  ]) }]
+  let queue = [{ id: 'reply', clientUserMessageId: 'client-id', input }]
+  let steers = 0
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [turn] } }),
+    'thread/queue/list': () => ({ result: { data: queue } }),
+    'thread/queue/delete': () => { queue = []; return { result: { deleted: true } } },
+    'turn/steer': (_, client) => {
+      if (++steers === 1) client.terminate()
+      return { result: { turnId: turn.id } }
+    },
+  })
+  const post = (route, body) => get(`/api/codex/${route}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId: thread.id, ...body }),
+  })
+  const first = await post('conversation-action', { action: 'queue', operation: 'steer', queuedSubmissionId: 'reply', expectedTurnId: turn.id })
+  assert.equal((await first.json()).reason, 'queue-steer-unknown')
+  const response = await post('async-question-answer', { turnId: turn.id, itemId: question.id, answers: [{ index: 0, answer: '不要' }] })
+  assert.deepEqual(await response.json(), { submitted: false })
+  assert.equal(steers, 1)
+  assert.equal(messages.some(({ method }) => method === 'thread/queue/add'), false)
+})
+
+test('插话明确拒绝且恢复失败时才允许手动恢复原生队列', async t => {
+  const item = { id: 'queued', clientUserMessageId: 'client-id', input: [{ type: 'text', text: '正文' },
+    { type: 'image', url: 'data:image/png;base64,AA==' }] }
+  const restored = { ...item, id: 'restored' }
+  let queue = [item]
+  let allowRestore = false
+  const restoring = Promise.withResolvers()
+  const finish = Promise.withResolvers()
+  t.after(() => finish.resolve())
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'thread', status: { type: 'active' } } } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'target', status: 'inProgress', items: [] }] } }),
+    'thread/queue/list': () => ({ result: { data: queue } }),
+    'thread/queue/delete': () => {
+      queue = []
+      return { result: { deleted: true } }
+    },
+    'turn/steer': () => ({ error: { code: -32600, message: 'no active turn to steer' } }),
+    'thread/queue/add': async params => {
+      assert.deepEqual(params, { threadId: 'thread', input: item.input, clientUserMessageId: item.clientUserMessageId })
+      if (!allowRestore) return { error: { code: -32600, message: '无法入队' } }
+      queue = [restored]
+      restoring.resolve()
+      await finish.promise
+      return { result: { queuedSubmission: restored } }
+    },
+  })
+  const post = operation => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'queue', operation, threadId: 'thread', queuedSubmissionId: item.id, expectedTurnId: 'target' }),
+  })
+  assert.equal((await post('steer')).status, 409)
+  assert.deepEqual(await (await post('list')).json(), { data: [], steers: [{ item, status: 'recoverable' }] })
+  allowRestore = true
+  const request = post('restore-steer')
+  await restoring.promise
+  assert.deepEqual(await (await post('list')).json(), { data: [], steers: [{ item, status: 'steering' }] })
+  finish.resolve()
+  assert.equal((await request).status, 200)
+  assert.deepEqual(await (await post('list')).json(), { data: [restored] })
+  assert.equal((await post('restore-steer')).status, 409)
+  assert.equal(messages.filter(({ method }) => method === 'thread/queue/add').length, 2)
 })
 
 test('并发发送共用首次恢复，原生只接收两条各自的消息', async t => {
@@ -2375,6 +2703,24 @@ test('归档队列按原生顺序只读显示，并跟随队列清空', { timeou
   assert.deepEqual(await read(), { type: 'queue', submissions: [] })
   assert.equal(fixture.messages.some(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/queue/start'].includes(method)), false)
   await reader.cancel()
+})
+
+test('首次原生队列读取失败时不向网页推送空队列', async t => {
+  const queueRead = Promise.withResolvers()
+  const { get } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'thread', status: { type: 'notLoaded' } } } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => {
+      queueRead.resolve()
+      return { error: { code: -32600, message: '暂时无法读取原生队列' } }
+    },
+  })
+  const watch = await get('/api/codex/watch?threadId=thread&queue=1', { signal: AbortSignal.timeout(2_000) })
+  const reader = watch.body.getReader()
+  t.after(() => reader.cancel())
+  assert.equal(JSON.parse(Buffer.from((await reader.read()).value).toString().slice(6)).type, 'snapshot')
+  await queueRead.promise
+  assert.equal(await Promise.race([reader.read().then(() => true), delay(80, false)]), false)
 })
 
 test('等待首条消息的原生新会话可以打开为空历史', { timeout: 5000 }, async t => {
