@@ -77,7 +77,8 @@ test('网页会话创建和显式加载沿用原生配置，普通发送只进�
   }))
 
   assert.equal((await post('thread/start', { cwd: thread.cwd })).status, 400)
-  assert.deepEqual((await (await post('create', { cwd: thread.cwd, projectId: 'project-id', approvalPolicy: 'never' })).json()).thread, thread)
+  assert.deepEqual((await (await post('create', { cwd: thread.cwd, projectId: 'project-id', approvalPolicy: 'never' })).json()).thread,
+    { ...thread, blank: true })
   assert.equal((await post('prompt', { threadId: thread.id, mode: 'queue', input, clientUserMessageId: 'browser-id' })).status, 409)
   assert.equal((await post('resume', { threadId: thread.id, path: '/another-rollout' })).status, 200)
   assert.equal((await post('resume', { threadId: thread.id })).status, 200)
@@ -534,6 +535,34 @@ test('Host 重启可以先返回磁盘清单，随后重新从 Codex 确认', as
   assert.equal(messages.filter(m => m.method === 'thread/list').length, 2)
 })
 
+test('首屏刷新直接纳入索引新会话与尚未保存的已加载会话', async t => {
+  const legacy = { id: 'legacy', cwd: '/work', historyMode: 'rollout' }
+  const saved = { id: 'saved', cwd: '/work', historyMode: 'paginated', preview: '原生首条消息' }
+  const unsent = { id: 'unsent', cwd: '/work', source: 'vscode', historyMode: 'paginated', preview: '', status: { type: 'idle' } }
+  const hidden = { id: 'hidden', cwd: '/work', ephemeral: true }
+  let indexed = []
+  let loaded = []
+  const { socketPath, directory, messages } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [], nextCursor: null } }),
+    'thread/list': ({ useStateDbOnly }) => ({ result: { data: useStateDbOnly ? indexed : [...indexed, legacy], nextCursor: null } }),
+    'thread/loaded/list': () => ({ result: { data: loaded, nextCursor: null } }),
+    'thread/read': ({ threadId }) => ({ result: { thread: threadId === unsent.id ? unsent : hidden } }),
+  })
+  function newHost() {
+    const route = createHistoryRoutes(socketPath, undefined, join(directory, 'cache'))
+      .find(route => route.path === '/api/codex/catalog')
+    return async query => (await route.fetch(new Request(`http://localhost${route.path}${query}`))).json()
+  }
+  const host = newHost()
+  assert.deepEqual((await host('?complete=1')).threads, [legacy])
+  indexed = [saved]
+  loaded = [saved.id, unsent.id, hidden.id]
+  assert.deepEqual((await host('?fresh=1')).threads, [saved, { ...unsent, blank: true }, legacy])
+  assert.deepEqual((await host('?complete=1&fresh=1')).threads, [saved, legacy, { ...unsent, blank: true }])
+  assert.equal((await newHost()('')).threads.some(thread => thread.id === unsent.id), false)
+  assert.equal(messages.some(message => message.method === 'thread/resume'), false)
+})
+
 test('Codex 状态库不可用时仍可从原生历史读取工作区', async t => {
   const legacy = { id: 'legacy', cwd: '/projects/old' }
   const { get } = await fakeCodex(t, {
@@ -701,6 +730,35 @@ test('等待首条消息的原生新会话可以打开为空历史', { timeout: 
   await reader.cancel()
 })
 
+test('首条消息写入时，正在运行的新会话推送 Codex 原生预览', { timeout: 5000 }, async t => {
+  const threadId = 'first-run'
+  const status = { type: 'active', activeFlags: [] }
+  const turn = { id: 'initial-turn', status: 'inProgress', items: [] }
+  const input = { id: 'first-input', type: 'userMessage', content: [{ type: 'text', text: '第一条原生消息' }] }
+  let saved = false
+  const fixture = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: threadId, status, historyMode: 'paginated',
+      preview: saved ? '第一条原生消息' : '', name: null,
+    } } }),
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/turns/list': () => ({ result: { data: saved ? [turn] : [] } }),
+    'thread/items/list': () => ({ result: { data: [{ item: input }] } }),
+  })
+  const reader = (await fixture.get(`/api/codex/watch?threadId=${threadId}`)).body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.equal((await read()).type, 'snapshot')
+  saved = true
+  await writeFile(join(fixture.directory, 'thread_history_1.sqlite-wal'), 'new native user message')
+  const change = await read()
+  assert.equal(change.type, 'change')
+  assert.deepEqual(change.items.map(({ id }) => id), [input.id])
+  const summary = await read()
+  assert.equal(summary.type, 'thread-summary')
+  assert.equal(summary.thread.preview, '第一条原生消息')
+  assert.equal(summary.thread.status.type, 'active')
+  await reader.cancel()
+})
+
 test('首个工作目录使用原生项目，重复选择同一路径复用它', async t => {
   const cwd = '/fixture/workspace'
   const project = { id: 'native-project', name: 'workspace', roots: [{ path: cwd }] }
@@ -721,6 +779,31 @@ test('首个工作目录使用原生项目，重复选择同一路径复用它',
   for (const response of await Promise.all([open(), open()])) assert.deepEqual((await response.json()).project, project)
   assert.deepEqual((await (await open()).json()).project, project)
   assert.equal(messages.filter(({ method }) => method === 'project/create').length, 1)
+})
+
+test('新建恢复同一工作区的未发送线程，待发或已写入历史的线程另开会话', async t => {
+  const cwd = '/fixture/workspace'
+  const draft = { id: 'original', cwd, projectId: 'project', name: null, preview: '', historyMode: 'paginated', status: { type: 'idle' } }
+  let queued = false
+  let materialized = false
+  let starts = 0
+  const { get } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: draft } }),
+    'thread/queue/list': () => ({ result: { data: queued ? [{ id: 'queued' }] : [], nextCursor: null } }),
+    'thread/turns/list': () => materialized ? { result: { data: [{ id: 'first' }] } }
+      : { error: { code: -32600, message: 'thread original is not materialized yet; thread/turns/list is unavailable before first user message' } },
+    'thread/start': () => ({ result: { thread: { ...draft, id: `new-${++starts}` } } }),
+  })
+  const open = async () => (await (await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'create', cwd, projectId: draft.projectId, reuseThreadId: draft.id }),
+  })).json()).thread
+  assert.equal((await open()).id, draft.id)
+  queued = true
+  assert.equal((await open()).id, 'new-1')
+  queued = false
+  materialized = true
+  assert.equal((await open()).id, 'new-2')
 })
 
 test('新回执在它对应的历史增量之后才进入会话阅读面', { timeout: 5000 }, async t => {
@@ -769,4 +852,24 @@ test('侧栏独立接收会话与项目增量，无需打开任何会话', { tim
   assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread: null })
   assert.equal(fixture.messages.some(message => ['thread/list', 'thread/turns/list', 'thread/resume'].includes(message.method)), false)
   await reader.cancel()
+})
+
+test('首轮结束后通过原生会话摘要更新侧栏预览', { timeout: 5000 }, async t => {
+  const status = { type: 'idle' }
+  const thread = { id: 'new', name: null, preview: '原生首条消息', status }
+  const fixture = await fakeCodex(t, {
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/read': ({ threadId }) => ({ result: { thread: { ...thread, id: threadId } } }),
+  })
+  const response = await fixture.get('/api/codex/watch?scope=catalog')
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  try {
+    assert.deepEqual(await read(), { type: 'catalog-ready' })
+    const notification = { method: 'thread/status/changed', params: { threadId: thread.id, status } }
+    fixture.broadcast(notification)
+    assert.deepEqual(await read(), { type: 'notification', notification, thread, workspacePaths: {} })
+  } finally {
+    await reader.cancel()
+  }
 })

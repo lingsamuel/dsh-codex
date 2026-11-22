@@ -15,7 +15,7 @@ const catalogMethods = new Set([
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal) {
+export function createWatchRoute(socketPath, ownerSignal, questions) {
   return {
     path: '/api/codex/watch',
     methods: ['GET'],
@@ -25,6 +25,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
       const threadId = params.get('threadId')
       const catalog = params.get('scope') === 'catalog'
       const observeQueue = params.get('queue') === '1'
+      const observeQuestions = !catalog && params.get('questions') === '1'
       if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
       const abort = new AbortController()
       const signal = AbortSignal.any([request.signal, abort.signal, ...(ownerSignal ? [ownerSignal] : [])])
@@ -45,6 +46,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let reset = false
           let tail
           let pendingReadState
+          let awaitingPreview
           let receiptSequence = 0
           let rolloutFacts
           let settingsStamp
@@ -54,6 +56,7 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let catalogQueue = Promise.resolve()
           let mode
           const early = []
+          const questionObserver = observeQuestions ? questions?.observe(threadId, send, signal) : undefined
 
           async function sendFacts() {
             const facts = await rolloutFacts?.read()
@@ -88,6 +91,14 @@ export function createWatchRoute(socketPath, ownerSignal) {
                   await sendSnapshot(reading, true)
                 } else {
                   for (const update of updates) send({ type: 'change', ...update })
+                  if (awaitingPreview && updates.some(({ items }) => items.some(item => item.type === 'userMessage'))) {
+                    // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
+                    const result = await connection.request('thread/read', { threadId }).catch(() => null)
+                    if (result?.thread.name || result?.thread.preview) {
+                      awaitingPreview = false
+                      send({ type: 'thread-summary', ...result })
+                    }
+                  }
                   // Codex 在保存新结果后才广播回执。在读取并发出该历史后暴露此版本。
                   if (readState !== undefined && receipt === receiptSequence) send({ type: 'reading-receipt', readState })
                 }
@@ -127,6 +138,8 @@ export function createWatchRoute(socketPath, ownerSignal) {
             const reverted = message.method === 'thread/reverted'
             if (!catalogMethods.has(message.method) && !goal && !settings && !reverted) return
             if (!tail) { early.push(message); return }
+            if (message.method === 'thread/status/changed') questionObserver?.update(message.params.status)
+            if (message.method === 'thread/archived' || message.method === 'thread/deleted') questionObserver?.update(null)
             if (reverted) {
               // 原生回退会使已有游标失效。尾部读取和原生通知均可触发快照重建。
               reset = true
@@ -150,9 +163,11 @@ export function createWatchRoute(socketPath, ownerSignal) {
               threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
             })
             tail = createHistoryTail(connection.request, thread, page)
+            awaitingPreview = !thread.name && !thread.preview
             send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
-              mode, ...(replace && { replace: true }) })
+              mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
+            questionObserver?.update(thread.status)
           }
 
           async function follow() {

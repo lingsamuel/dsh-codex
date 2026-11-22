@@ -12,6 +12,7 @@ import { installModelPicker } from './native-dsh/model-picker.js'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 import { installContinueSession } from './native-dsh/continue-session.jsx'
+import { installCodexQuestions } from './native-dsh/question-ui.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -24,6 +25,7 @@ export function apply(ctx) {
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog)
   installContinueSession(ctx)
+  installCodexQuestions(ctx)
   installLiveStatus(ctx, catalog.store)
   installMessageSearch(ctx)
   installArchiveView(ctx, deleteSession)

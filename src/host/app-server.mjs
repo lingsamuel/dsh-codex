@@ -24,8 +24,8 @@ export async function findCodexSocket(signal) {
   return daemon.socketPath
 }
 
-/** 接收原生 RPC 回复与 daemon 广播，退出时取消尚未完成的请求。 */
-export async function openCodexReader(socketPath, signal, onNotification = () => {}) {
+/** 接收原生 RPC 回复、服务端请求与 daemon 广播，退出时取消尚未完成的请求。 */
+export async function openCodexReader(socketPath, signal, onMessage = () => {}) {
   const setup = AbortSignal.any([signal, AbortSignal.timeout(15_000)])
   const endpoint = socketPath || await findCodexSocket(setup)
   setup.throwIfAborted()
@@ -61,7 +61,7 @@ export async function openCodexReader(socketPath, signal, onNotification = () =>
     try {
       const message = JSON.parse(data.toString())
       if (typeof message.method === 'string') {
-        onNotification(message)
+        onMessage(message)
         return
       }
       const waiter = pending.get(message.id)
@@ -90,6 +90,19 @@ export async function openCodexReader(socketPath, signal, onNotification = () =>
     return promise
   }
 
+  /** 沿同一连接回复 daemon 分配的原始请求 ID。对端通过通知报告请求何时结束。 */
+  async function respond(id, result) {
+    if (failure) throw failure
+    await new Promise((resolve, reject) => {
+      ws.send(JSON.stringify({ id, result }), error => {
+        if (error) {
+          close(error)
+          reject(error)
+        } else resolve()
+      })
+    })
+  }
+
   try {
     await once(ws, 'open', { signal: setup })
     // Codex 的 daemon 查询客户端标识不覆盖 CLI 正在使用的全局 originator 和 UA。
@@ -98,7 +111,7 @@ export async function openCodexReader(socketPath, signal, onNotification = () =>
       capabilities: { experimentalApi: true },
     })
     ws.send(JSON.stringify({ method: 'initialized' }))
-    return { request, initialize, close, closed }
+    return { request, respond, initialize, close, closed }
   } catch (error) {
     close(error)
     throw error

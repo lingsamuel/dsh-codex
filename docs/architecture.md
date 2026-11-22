@@ -36,6 +36,6 @@ DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用�
 
 新建和继续通过 `thread/start` 与 `thread/resume` 建立 Codex 运行时。DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `thread/queue/add`，由 Codex 在空闲时接纳；直接插话调用 `turn/steer` 并携带目标轮次 ID。停止通过 `turn/interrupt` 保留并暂停原生队列，手动继续调用 `thread/queue/start`。队列通过原生 API 回读，文件变更和原生通知只作失效提示。
 
-网页操作使用短连接，历史观察保持独立的只读连接。原生待处理的普通审批可以在 CLI 连接后接收。Windows 原生接入复用同一协议，前提是目标 Codex 实例提供共享端点。
+网页操作使用短连接，历史观察保持独立的只读连接。当前查看的会话进入待答状态时，Host 临时加入这个已加载的线程，重放待答请求并按原始请求 ID 回复。原生解析通知关闭 DSH 面板，CLI 也可处理同一请求。原生待处理的普通审批可以在 CLI 连接后接收。Windows 原生接入复用同一协议，前提是目标 Codex 实例提供共享端点。
 
 会话管理复用 DSH 同源连接，转发原生回执更新、改名、置顶和模型设置。模型选择器复用 DSH 原生组件，调用 Codex `model/list` 获取当前 provider 的模型和推理等级，对已加载的线程提交 `thread/settings/update`。网页旁路跟随原生设置落盘后读取当前值，历史轮次保持原来的模型信息。

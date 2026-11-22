@@ -5,6 +5,7 @@ import { readThreadTurns } from './live-history.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
 import { createConversationActionRoute } from './conversation-actions.mjs'
+import { createQuestionBridge } from './question-bridge.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 
@@ -29,6 +30,7 @@ function requiredParam(query, key, message) {
 /** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
 export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
+  const questions = createQuestionBridge(socketPath, ownerSignal)
   const route = (path, read) => ({
     path: `/api/codex/${path}`,
     methods: ['GET'],
@@ -49,7 +51,8 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   return [
     createThreadActionRoute(socketPath, ownerSignal),
     createConversationActionRoute(socketPath, ownerSignal),
-    createWatchRoute(socketPath, ownerSignal),
+    questions.route,
+    createWatchRoute(socketPath, ownerSignal, questions),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => readChildThreads(requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'), socketPath, signal, query.get('archived') === '1')),

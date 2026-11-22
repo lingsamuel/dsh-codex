@@ -4,6 +4,7 @@ import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText } from '../shared/user-input.js'
 import { readProjects } from './catalog.mjs'
+import { hasNoMaterializedHistory } from './live-history.mjs'
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -50,6 +51,29 @@ async function loadedThread(request, threadId) {
 
 async function workspaceThread(thread) {
   return { thread, workspacePaths: await resolveWorkspacePaths([thread.cwd]) }
+}
+
+/** DSH 提名的草稿只有仍是原生空线程、且不含待发内容时才能复用。 */
+async function reusableDraft(request, threadId, cwd, projectId) {
+  if (!threadId) return
+  const result = await request('thread/read', { threadId }).catch(error => {
+    if (error instanceof CodexRpcError && (error.code === -32600 || error.code === -32602)) return null
+    throw error
+  })
+  const thread = result?.thread
+  if (!thread || thread.status?.type !== 'idle' || thread.historyMode !== 'paginated' || thread.name || thread.preview
+    || thread.ephemeral || thread.archived || (thread.projectId ?? null) !== (projectId ?? null)) return
+  if (thread.cwd !== cwd) {
+    const paths = await resolveWorkspacePaths([thread.cwd, cwd])
+    if ((paths[thread.cwd] ?? thread.cwd) !== (paths[cwd] ?? cwd)) return
+  }
+  if ((await readConversationQueue(request, threadId)).length) return
+  try {
+    await request('thread/turns/list', { threadId, limit: 1, itemsView: 'notLoaded' })
+  } catch (error) {
+    if (hasNoMaterializedHistory(error)) return thread
+    throw error
+  }
 }
 
 async function openProject(request, cwd) {
@@ -148,7 +172,7 @@ export function createConversationActionRoute(socketPath, ownerSignal) {
       if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const fields = await request.json().catch(() => null)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
-      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId } = fields ?? {}
+      const { action, threadId, cwd, projectId, mode, input, clientUserMessageId, expectedTurnId, turnId, reuseThreadId } = fields ?? {}
       try {
         if (action === 'project') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
@@ -162,9 +186,11 @@ export function createConversationActionRoute(socketPath, ownerSignal) {
         if (action === 'create') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
           if (projectId !== undefined) required(projectId, '项目 ID 无效。')
+          if (reuseThreadId !== undefined) required(reuseThreadId, '草稿会话 ID 无效。')
           return json(await withCodexReader(socketPath, signal, async rpc => {
-            const { thread } = await rpc('thread/start', { cwd, historyMode: 'paginated', ...(projectId && { projectId }) })
-            return workspaceThread(thread)
+            const reused = await reusableDraft(rpc, reuseThreadId, cwd, projectId)
+            const thread = reused ?? (await rpc('thread/start', { cwd, historyMode: 'paginated', ...(projectId && { projectId }) })).thread
+            return workspaceThread({ ...thread, blank: true })
           }))
         }
         if (!['resume', 'prompt', 'cancel', 'queue'].includes(action)) throw badRequest('无效的会话操作。')

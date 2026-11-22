@@ -24,6 +24,11 @@ export function writeConversationAction(parameters, signal) {
   return writeAction('conversation-action', parameters, signal)
 }
 
+/** 使用正在等待的原生请求标识提交答案。 */
+export function writeQuestionAnswer(parameters, signal) {
+  return writeAction('question-answer', parameters, signal)
+}
+
 function writeAction(route, parameters, signal) {
   const url = new URL(`api/codex/${route}`, document.baseURI)
   return fetchResult(url, {

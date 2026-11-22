@@ -13,6 +13,12 @@ function applyChanges(entries, changes) {
   return [...byId.values()]
 }
 
+function withThreadStatus(thread, status, blank = thread.blank) {
+  return { ...thread, status, ...(blank !== undefined && {
+    blank: Boolean(blank && status?.type === 'idle' && !thread.name && !thread.preview),
+  }) }
+}
+
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
 export function createHistoryCatalog(signal) {
   const store = createSnapshotStore({
@@ -49,7 +55,7 @@ export function createHistoryCatalog(signal) {
     store.update(state => {
       state.projects = liveProjects ?? projects
       state.threads = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges).map(thread => observedStatuses.has(thread.id)
-        ? { ...thread, status: observedStatuses.get(thread.id) }
+        ? withThreadStatus(thread, observedStatuses.get(thread.id))
         : thread)
       state.readStates = Object.fromEntries(state.threads.flatMap(({ id, readState }) => {
         const receipt = observedReadStates.get(id) ?? readState
@@ -63,6 +69,17 @@ export function createHistoryCatalog(signal) {
       state.busy = false
       state.error = ''
     })
+  }
+
+  async function refreshCompleteCatalog() {
+    const earlier = new Map(threadChanges)
+    const snapshot = await readPage('catalog', { complete: 1, fresh: 1 }, signal)
+    // 原生快照涵盖读取前的增量。从此保留新的事件，避免旧启动事件盖住已保存的预览。
+    for (const thread of snapshot.threads) {
+      const previous = earlier.get(thread.id)
+      if (previous && threadChanges.get(thread.id) === previous) threadChanges.delete(thread.id)
+    }
+    publish(snapshot)
   }
 
   async function loadArchived() {
@@ -138,7 +155,7 @@ export function createHistoryCatalog(signal) {
         for (const changes of [threadChanges, childChanges, observedStatuses, observedReadStates]) changes.clear()
         liveProjects = undefined
         searchThreads.clear()
-        publish(await readPage('catalog', { complete: 1, fresh: 1 }, signal))
+        await refreshCompleteCatalog()
         verified = true
         await loadArchived()
         for (const parentId of Object.keys(store.getSnapshot().childCatalogs)) {
@@ -148,11 +165,12 @@ export function createHistoryCatalog(signal) {
         return
       }
       // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
-      const index = await readPage('catalog', {}, signal)
+      const index = await readPage('catalog', verified ? {} : { fresh: 1 }, signal)
       publish(index)
       // 缓存可先绘制一屏，新页面随后对照原生清单校验一次。
       if (!index.complete || !verified) {
-        publish(await readPage('catalog', { complete: 1, ...(!verified && { fresh: 1 }) }, signal))
+        if (verified) publish(await readPage('catalog', { complete: 1 }, signal))
+        else await refreshCompleteCatalog()
         verified = true
       }
     } catch (error) {
@@ -218,9 +236,18 @@ export function createHistoryCatalog(signal) {
     },
     setStatus(threadId, status) {
       observedStatuses.set(threadId, status)
+      const { childThreads, threads } = store.getSnapshot()
+      const child = childThreads[threadId]
+      const index = child ? -1 : threads.findIndex(thread => thread.id === threadId)
+      const thread = child ?? threads[index]
+      if (!thread) return
+      const updated = withThreadStatus(thread, status)
+      // 首次执行后，尚未重新读取的清单或启动增量也不能把该会话恢复成可复用草稿。
+      if (thread.blank && !updated.blank) threadChanges.set(threadId, updated)
       store.update(state => {
-        const thread = state.childThreads[threadId] ?? state.threads.find(item => item.id === threadId)
-        if (thread) thread.status = status
+        if (child) state.childThreads[threadId] = updated
+        else state.threads[index] = updated
+        if (state.selected?.id === threadId) state.selected = updated
       })
     },
     applyUnread({ replace, added, removed }) {
@@ -247,13 +274,19 @@ export function createHistoryCatalog(signal) {
     } else if (frame.type === 'unread') catalog.applyUnread(frame)
     else if (frame.type === 'notification') {
       const { method, params } = frame.notification
-      if (method === 'thread/status/changed') catalog.setStatus(params.threadId, params.status)
+      if (method === 'thread/status/changed') {
+        catalog.setStatus(params.threadId, params.status)
+        if (frame.thread) receive({ ...frame, type: 'thread', id: params.threadId })
+      }
       if (method === 'thread/readState/changed') catalog.setReadState(params.threadId, params.readState)
     } else if (frame.type === 'thread') {
       const { id, thread, readState, workspacePaths } = frame
-      const status = observedStatuses.get(id) ?? thread?.status
-      const current = thread && { ...thread, status }
-      const parent = subagentAddress(thread ?? store.getSnapshot().childThreads[id])?.parentSessionId
+      const { childThreads, threads } = store.getSnapshot()
+      const previous = childThreads[id] ?? threads.find(thread => thread.id === id)
+      const status = observedStatuses.get(id) ?? thread?.status ?? previous?.status
+      // 原生启动广播不带空白标记，可能先于或晚于创建响应。
+      const current = thread && withThreadStatus(thread, status, thread.blank ?? previous?.blank)
+      const parent = subagentAddress(thread ?? previous)?.parentSessionId
       if (parent) {
         childChanges.set(id, current)
         store.update(state => {

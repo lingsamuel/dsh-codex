@@ -43,7 +43,7 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
       cwd: thread.cwd || undefined,
       running: thread.status?.type === 'active',
       retainedBy: selected?.id === thread.id ? mainRetention : noRetention,
-      blank: false,
+      blank: Boolean(thread.blank) && thread.status?.type === 'idle',
       updatedAt: unixMillis(thread.updatedAt),
     }]
   }))

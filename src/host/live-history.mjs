@@ -3,13 +3,17 @@ import { CodexRpcError, readCodexPages } from './app-server.mjs'
 const turnList = 'thread/turns/list'
 const itemList = 'thread/items/list'
 
+/** 原生 App Server 的空线程尚无历史文件，和已经持久化的空历史不同。 */
+export function hasNoMaterializedHistory(error) {
+  return error instanceof CodexRpcError && error.message.includes('thread/turns/list is unavailable before first user message')
+}
+
 /** 新线程在首条消息落盘前仍然可以使用输入框。原生 CLI 对同一条错误也视为空历史。 */
 export async function readThreadTurns(request, params) {
   try {
     return await request(turnList, params)
   } catch (error) {
-    if (!params.cursor && error instanceof CodexRpcError
-      && error.message.includes('thread/turns/list is unavailable before first user message')) {
+    if (!params.cursor && hasNoMaterializedHistory(error)) {
       return { data: [], nextCursor: null, backwardsCursor: null }
     }
     throw error

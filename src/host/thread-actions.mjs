@@ -78,7 +78,7 @@ export function createThreadActionRoute(socketPath, ownerSignal) {
             // 回退会替换运行时。先查当前状态，避免在浏览时自动恢复线程或中断已开始的 CLI 轮次。
             if (modifiesHistory) {
               const status = thread.status?.type
-              if (status === 'notLoaded') return json({ error: 'Codex 尚未加载此会话。请先点击「继续会话」。' }, 409)
+              if (status === 'notLoaded') return json({ error: 'Codex 尚未加载此会话。请先从输入框继续。' }, 409)
               if (status === 'active') return json({ error: '会话仍在运行。请在 Codex CLI 中停止当前轮次，或等待它结束。' }, 409)
               if (status !== 'idle' || thread.historyMode !== 'paginated' || thread.archived
                 || thread.ephemeral || thread.canAcceptDirectInput === false) {

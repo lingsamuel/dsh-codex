@@ -57,6 +57,21 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
   assert.equal(history.activeTurnId(), undefined)
 })
 
+test('实时问题使用原生请求身份，原生确认完成后清理当前投影', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect() {} }, { id: 'thread' })
+  const pending = history.session.projections.faceOf('codexQuestions')
+  const emit = requests => source().onmessage({ data: JSON.stringify({ type: 'questions', requests }) })
+  const request = { requestId: 41, itemId: 'item-native', isBlocking: true,
+    questions: [{ id: 'native-question', question: '选哪个？', options: [{ label: '第一个' }] }],
+  }
+  assert.equal(source().url.searchParams.get('questions'), '1')
+  await emit([request])
+  assert.deepEqual(pending.getSnapshot(), [request])
+  await emit([])
+  assert.deepEqual(pending.getSnapshot(), [])
+})
+
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {
   const currentSource = mockTransport(t)
   const received = []

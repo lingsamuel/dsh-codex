@@ -72,6 +72,8 @@
       name: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
     - id: ui-conversation
       name: '@deepseek-ai/dsh-client-ui-conversation'
+    - id: ui-user-questions
+      name: '@deepseek-ai/dsh-client-ui-user-questions'
     - id: ui-input-trigger
       name: '@deepseek-ai/dsh-client-ui-input-trigger'
     - id: ui-commands

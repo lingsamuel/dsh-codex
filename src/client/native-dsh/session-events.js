@@ -10,6 +10,7 @@ import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
 import { userInputText } from '../../shared/user-input.js'
+import { projectNativeQuestions } from './native-questions.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
 // 导航占位符独立于视图事件序号，加载完成后 DSH 会用真实锚点替换它。
@@ -38,7 +39,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     hasMore: false,
     loadingOlder: false,
     promptError: null,
-    blank: false,
+    blank: Boolean(thread.blank),
     lastAgentError: null,
     promptAttempted: false,
     awaitingFirstTurn: false,
@@ -58,9 +59,11 @@ export function createCodexHistory(ctx, thread, catalog) {
   const contextPressure = createSnapshotStore(undefined)
   const queueStore = createSnapshotStore([])
   const inbox = createSnapshotStore({ 'next-turn': [], 'next-step': [] })
+  const codexQuestions = createSnapshotStore([])
+  const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
   const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
-    ['modelSelection', modelSelection], ['inbox', inbox]])
+    ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions]])
   const outlineTargets = new Map()
   const rows = []
   let nextCursor
@@ -102,6 +105,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       current.live.activeTurnId = lastTurn?.status === 'inProgress' ? lastTurn.id : undefined
       current.running = (current.live.mode === 'live' || current.live.mode === 'history') && current.live.status?.type === 'active'
       current.hasMore = Boolean(nextCursor)
+      if (lastTurn) current.blank = false
       if (opened) {
         current.openState = 'open'
         current.openError = null
@@ -223,7 +227,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, replace }) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, threadSummary, replace }) {
     if (!opened || replace) {
       if (replace) clearHistory()
       await addOlderPage(page)
@@ -259,6 +263,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     }
     publish()
     publishState({ mode, status, historyMode, canAcceptDirectInput, archived })
+    if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
     todos.set(undefined)
     contextPressure.set(undefined)
@@ -286,10 +291,22 @@ export function createCodexHistory(ctx, thread, catalog) {
     return queue
   }
 
+  function publishQuestions(requests) {
+    codexQuestions.set(requests)
+    userQuestions.set(projectNativeQuestions(requests))
+  }
+
+  function publishThreadSummary(summary) {
+    // 线程读取不会报告归档筛选的标签。保留目录已确认的归档状态。
+    catalog?.acceptThread({ ...summary, ...(state.getSnapshot().archived && { archived: true }) })
+  }
+
   function receive(frame) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
       if (frame.type === 'model-selection') return publishModel(frame.selection)
+      if (frame.type === 'questions') return publishQuestions(frame.requests)
+      if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'queue') {
         const { submissions } = frame
         queueStore.set(submissions)
@@ -339,6 +356,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   function changeMode(mode) {
     return enqueue(async () => {
       publishState({ mode })
+      if (mode === 'disconnected') publishQuestions([])
       if (mode !== 'disconnected' || opened || triedFallback) return
       triedFallback = true
       await receiveSnapshot({ page: await loadPage(), mode: 'history' })
@@ -427,7 +445,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       hasAttachments: message.content.some(part => part.type !== 'text') }
   }
 
-  openLiveWatch(thread.id, { receive, changeMode, queue: true }, signal)
+  openLiveWatch(thread.id, { receive, changeMode, queue: true, questions: !thread.archived }, signal)
   return {
     events,
     ready,

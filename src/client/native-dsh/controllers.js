@@ -111,12 +111,14 @@ export function provideCodexControllers(ctx, catalog) {
       }
       return { sessionId: id, binding, ready: binding.ready.then(() => binding), release, [Symbol.dispose]: release }
     },
-    async create({ workspaceId, cwd } = {}) {
+    async create({ workspaceId, cwd, sessionId } = {}) {
       const workspace = workspaces.list.getSnapshot().items.find(item => item.workspaceId === workspaceId)
       const directory = cwd ?? workspace?.path
       if (!directory) throw new Error('请先选择新会话的工作目录。')
       const projectId = workspace?.workspaceId.startsWith('project:') ? workspace.workspaceId.slice('project:'.length) : undefined
-      const { thread, workspacePaths } = await writeConversationAction({ action: 'create', cwd: directory, projectId })
+      const summaries = list.getSnapshot().byId
+      const reuseThreadId = sessionId ?? workspace?.sessionIds.find(id => summaries[id]?.blank)
+      const { thread, workspacePaths } = await writeConversationAction({ action: 'create', cwd: directory, projectId, reuseThreadId })
       catalog.acceptThread(thread, workspacePaths)
       return thread.id
     },
@@ -177,6 +179,11 @@ export function provideCodexControllers(ctx, catalog) {
   ctx.effect(() => catalog.store.subscribe(syncSessions))
   ctx.inject(['uiWorkspace'], scope => {
     scope.effect(() => {
+      const navigation = scope.uiWorkspace
+      const startSession = navigation.startSession
+      // RC2 的无参数入口会强制新建。传入原生默认草稿选项，让 DSH 沿用工作区的空白会话。
+      const startWithDraft = (workspaceId, options = {}) => startSession.call(navigation, workspaceId, options)
+      navigation.startSession = startWithDraft
       function reconcile() {
         const { busy, error, selected, threads, childThreads } = catalog.store.getSnapshot()
         if (initialization === 'ready' && selected && !childThreads[selected.id]
@@ -187,15 +194,21 @@ export function provideCodexControllers(ctx, catalog) {
           return
         }
         if (initialization !== 'waiting' || busy || error) return
-        // DSH 在两个列表就绪后恢复主视图。先打开已有会话，让它无需补建空白会话。
+        // DSH 自己保存上次选中的会话，包括只留草稿的空白会话。
         initialization = 'opening'
-        const thread = selected ?? threads.find(thread => !thread.archived) ?? threads[0]
+        const saved = navigation.selection?.getSnapshot()?.sessionId
+        const thread = selected ?? threads.find(thread => thread.id === saved)
+          ?? threads.find(thread => !thread.archived && !thread.blank) ?? threads[0]
         if (thread) scope.uiWorkspace.openSession(thread.id)
         initialization = 'ready'
         syncSessions()
       }
       reconcile()
-      return catalog.store.subscribe(reconcile)
+      const stop = catalog.store.subscribe(reconcile)
+      return () => {
+        stop()
+        if (navigation.startSession === startWithDraft) navigation.startSession = startSession
+      }
     })
   })
 
