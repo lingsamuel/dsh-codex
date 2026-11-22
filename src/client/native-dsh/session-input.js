@@ -33,6 +33,11 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     if (current === before || current?.permission?.source !== 'runtime') session.publishPermission(result.permission)
   }
 
+  function acceptSubmittedSettings(model, profileId, before, result) {
+    confirmPermission(profileId, before, result)
+    clearDrafts(model, profileId)
+  }
+
   function retire(requestId, settlement) {
     const submission = submissions.get(requestId)
     if (!submission) return
@@ -94,6 +99,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   }
 
   return {
+    acceptSubmittedSettings,
     beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
       const requestId = crypto.randomUUID()
       const { running, archived } = session.getSnapshot()
@@ -130,8 +136,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
           expectedTurnId, modelDraft: selection, permissionDraft: profileId,
           ...(unarchive && { unarchive: true }) }, signal)
-        confirmPermission(profileId, before, result)
-        clearDrafts(selection, profileId)
+        acceptSubmittedSettings(selection, profileId, before, result)
         return accepted
       } catch (error) {
         // 如果回显已被原生历史或队列确认，网络错误也不应恢复草稿造成重复发送。
@@ -160,6 +165,16 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         return failure(error)
       }
     },
+    async viewQueue() {
+      try {
+        const accept = history.captureQueueView()
+        const { data } = await native('queue', { operation: 'list', unarchive: true })
+        await accept(data)
+        return { ok: true, value: { empty: queueStore.getSnapshot().length === 0 } }
+      } catch (error) {
+        return failure(error)
+      }
+    },
     startQueue() {
       const model = modelDraft.getSnapshot()
       const profileId = permissionDraft?.getSnapshot()
@@ -167,8 +182,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       return control('queue', { operation: 'start', modelDraft: model, permissionDraft: profileId,
         ...(session.getSnapshot().archived && { unarchive: true }) }, 'send', result => {
         if (result?.queueEmpty) return
-        confirmPermission(profileId, before, result)
-        clearDrafts(model, profileId)
+        acceptSubmittedSettings(model, profileId, before, result)
       })
     },
   }

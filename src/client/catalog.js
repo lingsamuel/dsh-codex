@@ -3,6 +3,7 @@ import { mergePages } from '../shared/pages.js'
 import { readPage, writeProjectAction, writeThreadAction } from './api.js'
 import { openLiveWatch } from './live-watch.js'
 import { subagentAddress } from './native-dsh/subagents.js'
+import { searchCodexThreads } from './thread-search.js'
 
 function applyChanges(entries, changes) {
   const byId = new Map(entries.map(entry => [entry.id, entry]))
@@ -288,9 +289,9 @@ export function createHistoryCatalog(signal) {
         throw error
       }
     },
-    async search(searchTerm, searchSignal) {
+    async search(searchTerm, searchSignal, archiveFilter) {
       const requestSignal = AbortSignal.any([signal, searchSignal])
-      const { data, nextCursor, workspacePaths } = await readPage('search', { searchTerm }, requestSignal)
+      const { data, hasMore, workspacePaths } = await searchCodexThreads(searchTerm, requestSignal, archiveFilter)
       requestSignal.throwIfAborted()
       store.update(state => {
         // DSH 只显示已知会话的搜索结果。快速清单补齐期间保留搜索新发现的线程。
@@ -302,7 +303,7 @@ export function createHistoryCatalog(signal) {
         recordNewThreads(state, found)
         state.workspacePaths = { ...state.workspacePaths, ...workspacePaths }
       })
-      return { items: data.map(({ thread, snippet }) => ({ sessionId: thread.id, snippet })), hasMore: Boolean(nextCursor) }
+      return { items: data.map(({ thread, snippet }) => ({ sessionId: thread.id, snippet })), hasMore }
     },
     setStatus(threadId, status) {
       observedStatuses.set(threadId, status)
@@ -361,8 +362,10 @@ export function createHistoryCatalog(signal) {
       const { childThreads, threads } = store.getSnapshot()
       const previous = childThreads[id] ?? threads.find(thread => thread.id === id)
       const status = observedStatuses.get(id) ?? thread?.status ?? previous?.status
+      // 仅归档清单和显式归档事件提供这个字段。普通摘要更新应保留已有状态。
+      const archived = thread?.archived ?? previous?.archived
       // 原生启动广播不带空白标记，可能先于或晚于创建响应。
-      const current = thread && withThreadStatus(thread, status, thread.blank ?? previous?.blank)
+      const current = thread && withThreadStatus({ ...thread, ...(archived !== undefined && { archived }) }, status, thread.blank ?? previous?.blank)
       const parent = subagentAddress(thread ?? previous)?.parentSessionId
       if (parent) {
         childChanges.set(id, current)

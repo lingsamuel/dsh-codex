@@ -5,8 +5,8 @@ import { createSessionInput } from './session-input.js'
 import { subagentAddress } from './subagents.js'
 import { writeConversationAction, writeThreadAction } from '../api.js'
 import { workspaceProjectId } from '../workspaces.js'
+import { searchResultLimit } from '../thread-search.js'
 
-const searchResultLimit = 20
 const flatSessionOrderKey = '__flat_session_order__'
 const workspaceSlot = 'sidebar.workspaces'
 const unsupported = '此操作暂未开放，请使用 Codex CLI。'

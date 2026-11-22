@@ -77,3 +77,27 @@ test('归档草稿的模型和权限随提交传递，遇到失败或空队列�
   assert.deepEqual(requests.map(({ action, unarchive, modelDraft, permissionDraft }) => [action, unarchive, modelDraft, permissionDraft]),
     [['prompt', true, model, profileId], ['queue', true, model, profileId], ['queue', true, model, profileId]])
 })
+
+test('查看归档队列只请求取消归档和列表，保留草稿设置', async t => {
+  const modelSelection = { provider: 'openai', model: 'selected' }
+  const model = { getSnapshot: () => modelSelection, clear() { assert.fail('查看队列不能清除模型草稿') } }
+  const permission = { getSnapshot: () => ':read-only', clear() { assert.fail('查看队列不能清除权限草稿') } }
+  const state = { archived: true }
+  let queue = []
+  const history = {
+    session: { getSnapshot: () => state },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe: () => () => {} },
+    queueStore: { getSnapshot: () => queue, subscribe: () => () => {} },
+    captureQueueView: () => data => { queue = data },
+    updateState: edit => edit(state),
+  }
+  const originalDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = originalDocument })
+  t.mock.method(globalThis, 'fetch', async (_, request) => {
+    assert.deepEqual(JSON.parse(request.body), { threadId: 'native', action: 'queue', operation: 'list', unarchive: true })
+    return Response.json({ data: [{ id: 'queued' }] })
+  })
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, model, permission)
+  assert.deepEqual(await input.viewQueue(), { ok: true, value: { empty: false } })
+})

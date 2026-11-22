@@ -1,26 +1,27 @@
 import { pinnedSectionId } from '../shared/thread-sections.js'
 import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
-import { updateModelSelection, validateModelDraft } from './models.mjs'
+import { updateModelSelection } from './models.mjs'
+import { submissionRuntime, validateSubmissionSettings } from './conversation-actions.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { editedInput, sendAfterRevert } from './thread-edit.mjs'
 import { readThreads } from './catalog.mjs'
-import { createThreadSubmissionQueue, resumeThread } from './thread-runtime.mjs'
+import { createThreadSubmissionQueue, resumeThread, unarchiveForSubmission } from './thread-runtime.mjs'
 import { readLatestTurn } from './live-history.mjs'
 
 function json(value, status = 200) {
   return Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } })
 }
 
-function historyUnavailable(thread) {
+function historyUnavailable(thread, allowArchived = false) {
   if (thread.status?.type === 'active') return '会话仍在运行。请停止当前轮次，或等待它结束。'
-  if (thread.historyMode !== 'paginated' || thread.archived || thread.ephemeral || thread.canAcceptDirectInput === false
+  if (thread.historyMode !== 'paginated' || (!allowArchived && thread.archived) || thread.ephemeral || thread.canAcceptDirectInput === false
     || !['idle', 'notLoaded'].includes(thread.status?.type)) {
     return '修改历史需要一个支持分页历史且可直接操作的空闲会话。'
   }
 }
 
 /** 只开放会话管理动作。浏览器不能指定要转发的 RPC 或改变原生线程控制权。 */
-export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), backgroundTerminals) {
+export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), backgroundTerminals, permissions) {
   const historyActions = new Set()
   return {
     path: '/api/codex/thread-action',
@@ -31,7 +32,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
       if (contentType !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
       const input = await request.json().catch(() => null)
       const { threadId, action, expectedRevision, name, pinned, provider, model, reasoningEffort,
-        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId, modelDraft, processId } = input ?? {}
+        stopActivity, lastTurnId, beforeTurnId, itemId, text, headTurnId, modelDraft, permissionDraft, processId } = input ?? {}
       if (typeof threadId !== 'string' || !threadId.trim()) return json({ error: '缺少 Codex 线程 ID。' }, 400)
       const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
       let method
@@ -79,34 +80,48 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
         }
         if (modifiesHistory || (action === 'archive' && stopActivity !== true)) {
           const run = () => withCodexReader(socketPath, signal, async request => {
-            const replacement = action === 'edit' && await editedInput(request, threadId, beforeTurnId, itemId, text)
-            const { thread } = await request('thread/read', { threadId })
+            const { thread: initial } = await request('thread/read', { threadId })
             if (action === 'archive') {
-              const activity = await archiveActivity(request, thread)
+              const activity = await archiveActivity(request, initial)
               if (activity.length) return json({ reason: 'archiveActive', activity, error: '会话仍有运行中的操作。' }, 409)
               return json(await request(method, params))
             }
 
-            const unavailable = historyUnavailable(thread)
+            const unarchive = input.unarchive === true
+            const unavailable = historyUnavailable(initial, unarchive)
             if (unavailable) return json({ error: unavailable }, 409)
             const stale = async () => (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== headTurnId
             const historyChanged = () => json({ error: '会话历史已有变化。请核对记录后重新发起操作。' }, 409)
             if (await stale()) return historyChanged()
-            if (replacement) validateModelDraft(thread, modelDraft)
-
-            const cold = thread.status.type === 'notLoaded'
-            if (cold) {
-              // 冷恢复可能自行领取待发项。先确认队列为空，再尝试修改历史。
-              const { data } = await request('thread/queue/list', { threadId, limit: 1 })
-              if (data.length) return json({ error: '请先处理待发消息，再修改对话记录。' }, 409)
-              await resumeThread(request, thread)
+            const replacement = action === 'edit' && await editedInput(request, threadId, beforeTurnId, itemId, text)
+            const draft = { modelDraft, permissionDraft }
+            if (replacement) await validateSubmissionSettings(request, initial, draft, permissions)
+            if (unarchive && !replacement && beforeTurnId !== headTurnId) {
+              // 只在归档状态可能改变之前确认所选回复轮次仍存在。
+              const { data } = await request('thread/items/list', { threadId, turnId: beforeTurnId, limit: 1 })
+              if (!data.length) return historyChanged()
             }
-            if (replacement && modelDraft) await updateModelSelection(request, { ...modelDraft, threadId }, signal)
-            if (cold || (replacement && modelDraft)) {
+
+            const thread = unarchive ? await unarchiveForSubmission(request, initial) : initial
+            if (unarchive) {
+              const unavailable = historyUnavailable(thread)
+              if (unavailable) return json({ error: unavailable }, 409)
+              if (await stale()) return historyChanged()
+            }
+            const cold = thread.status.type === 'notLoaded'
+            const hasQueued = async () => (await request('thread/queue/list', { threadId, limit: 1 })).data.length > 0
+            const queued = () => json({ error: '请先处理待发消息，再修改对话记录。' }, 409)
+            // 冷恢复可能自行领取待发项。已取消归档的线程也可能被别的客户端先恢复。
+            if ((cold || unarchive) && await hasQueued()) return queued()
+            let permission
+            if (replacement) ({ permission } = await submissionRuntime(request, thread, draft, signal, permissions))
+            else if (cold) await resumeThread(request, thread)
+            if (cold || unarchive || (replacement && (modelDraft || permissionDraft))) {
               const { thread: current } = await request('thread/read', { threadId })
               if (current.status?.type !== 'idle' || historyUnavailable(current)) {
                 return json({ error: historyUnavailable(current) ?? '会话状态已变化，请重试。' }, 409)
               }
+              if (unarchive && await hasQueued()) return queued()
               if (await stale()) return historyChanged()
             }
             if (!replacement) return json(await request(method, params))
@@ -119,7 +134,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             }
             const sent = await sendAfterRevert(request, threadId, replacement, signal)
             if (sent.error) return json({ error: sent.error }, 409)
-            return json(sent)
+            return json(permission ? { ...sent, permission } : sent)
           })
           return await (modifiesHistory ? submit(threadId, run) : run())
         }

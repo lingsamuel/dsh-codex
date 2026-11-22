@@ -1,10 +1,11 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { Button, IconTrashOutlineRegular, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconPinFillRegular, IconTrashOutlineRegular, MenuItemButton, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useLayoutEffect, useRef, useState } from 'react'
 
 const locale = 'codex.archive'
 const row = 'sidebar.workspaces.session.row.action'
 const menu = 'sidebar.workspaces.session.menu.item'
+const trailing = 'sidebar.session.row.trailing'
 const overlay = 'shell.overlay'
 const labels = {
   zh: {
@@ -79,6 +80,36 @@ function preserveArchivedNavigation(navigation, workspaces) {
   }
 }
 
+function ArchivedPinIndicator({ useWorkspaces, sessionId, label }) {
+  const active = useWorkspaces(state => state.archivedSessionIds.includes(sessionId) && state.pinnedSessionIds.includes(sessionId))
+  return active && <span role="img" aria-label={label()} title={label()}><IconPinFillRegular size={14} /></span>
+}
+
+/** 归档置顶沿用原生菜单、权限和线程分组写入。 */
+function registerArchivedPinMenu(ctx) {
+  const t = ctx.locale.bind('workspace')
+  const access = (sessionId, action) => ctx.remoteAccess.source('session', sessionId, `workspace/${action}`)
+  ctx.effect(() => ctx.contextMenus.register({
+    id: 'codex.archived-pin', target: 'session', order: 100,
+    observe: ({ sessionId }) => [ctx.workspaces.list, ctx.locale, access(sessionId, 'pinSession'), access(sessionId, 'unpinSession')],
+    resolve({ sessionId }) {
+      const { archivedSessionIds, pinnedSessionIds } = ctx.workspaces.list.getSnapshot()
+      if (!archivedSessionIds.includes(sessionId)) return []
+      const pinned = pinnedSessionIds.includes(sessionId)
+      const action = pinned ? 'unpinSession' : 'pinSession'
+      if (!access(sessionId, action).getSnapshot()) return []
+      return [{
+        id: 'pin', label: t(`menu.${action}`), icon: { key: pinned ? 'workspace.unpin' : 'workspace.pin' },
+        failureLabel: t(pinned ? 'toast.unpinFailed' : 'toast.pinFailed'),
+        run: () => ctx.uiWorkspace[action](sessionId),
+      }]
+    },
+  }))
+  ctx.slots.inject(trailing, () => ctx.slots.register({
+    name: trailing, id: 'codex-archived-pin-indicator', inject: () => ({ label: () => t('row.pinned') }),
+  }, ArchivedPinIndicator))
+}
+
 function DeleteMenuAction({ useMenuOpenState, sessionId, displayTitle, requestDelete, t }) {
   const [, setOpen] = useMenuOpenState()
   return <MenuItemButton danger icon={<IconTrashOutlineRegular size={14} />} onSelect={() => {
@@ -135,6 +166,7 @@ export function installArchiveView(ctx, deleteSession) {
       inject: () => ({ open }),
     }, ArchivedRowNavigation))
   })
+  ctx.inject(['uiWorkspace', 'workspaces', 'contextMenus', 'remoteAccess'], registerArchivedPinMenu)
   ctx.slots.inject(menu, () => ctx.slots.register({
     name: menu, id: 'codex-delete-session', order: 500, locale,
     inject: () => ({ requestDelete: request => deleteRequest.set(request) }),

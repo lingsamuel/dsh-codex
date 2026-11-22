@@ -14,17 +14,20 @@ const editControls = { display: 'flex', alignItems: 'center', gap: '6px', margin
 const editWarning = { color: 'var(--dsw-alias-label-secondary)', fontSize: 'var(--dsh-content-font-size-secondary, 13px)' }
 const labels = {
   zh: { edit: '编辑消息', cancel: '取消', send: '发送', sending: '正在发送…',
-    warning: '发送会替换这一轮及之后的对话记录。',
+    warning: '发送会替换这一轮及之后的对话记录。', unarchiveWarning: '发送会取消归档，并替换这一轮及之后的对话记录。',
+    unarchiveAndSend: '取消归档并发送',
     failed: '无法提交编辑', copy: '复制修改后的消息', copied: '已复制', close: '关闭' },
   en: { edit: 'Edit message', cancel: 'Cancel', send: 'Send', sending: 'Sending…',
     warning: 'Sending replaces this turn and all later conversation history.',
+    unarchiveWarning: 'Sending unarchives this session and replaces this turn and all later conversation history.',
+    unarchiveAndSend: 'Unarchive and send',
     failed: 'Could not submit edit', copy: 'Copy revised message', copied: 'Copied', close: 'Close' },
 }
 
 function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, ...props }) {
   const { node, renderFactorySlot } = props
   const { archived, canAcceptDirectInput, historyMode, live, subagent } = useSyncExternalStore(session.subscribe, session.getSnapshot)
-  const source = !archived && !subagent && historyMode === 'paginated'
+  const source = !subagent && historyMode === 'paginated'
     ? session.editableInput(node.location.turn?.turn, node.data.seq) : undefined
   const editable = ['idle', 'notLoaded'].includes(live.status?.type) && canAcceptDirectInput !== false
   const anchor = useRef(null)
@@ -58,10 +61,13 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
     if (!canSend) return
     const { beforeTurnId, itemId } = source
     const modelDraft = session.modelDraft.getSnapshot()
+    const permissionDraft = session.permissionDraft.getSnapshot()
+    const before = permissionDraft && session.projections.faceOf('permissions').getSnapshot()
     setSaving(true)
     try {
-      await writeThreadAction({ threadId, action: 'edit', beforeTurnId, itemId, text: draft, headTurnId: headAtEdit.current, modelDraft })
-      session.modelDraft.clear(modelDraft)
+      const result = await writeThreadAction({ threadId, action: 'edit', beforeTurnId, itemId, text: draft, headTurnId: headAtEdit.current,
+        modelDraft, permissionDraft, ...(archived && { unarchive: true }) })
+      session.acceptSubmittedSettings(modelDraft, permissionDraft, before, result)
       setDraft(null)
     } catch (failure) {
       // 回退后原消息可能已移出视图。把草稿交给页面弹窗，供复制或核对发送结果。
@@ -80,10 +86,10 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
         <InlineEditor label={t('edit')} value={draft} onChange={value => { if (!saving) setDraft(value) }}
           onSave={send} onCancel={cancel} />
         <div style={editFooter}>
-          <small style={editWarning}>{t('warning')}</small>
+          <small style={editWarning}>{t(archived ? 'unarchiveWarning' : 'warning')}</small>
           <div style={editControls}>
             <Button size="sm" variant="ghost" disabled={saving} onClick={cancel}>{t('cancel')}</Button>
-            <Button size="sm" variant="primary" disabled={!canSend} onClick={send}>{t(saving ? 'sending' : 'send')}</Button>
+            <Button size="sm" variant="primary" disabled={!canSend} onClick={send}>{t(saving ? 'sending' : archived ? 'unarchiveAndSend' : 'send')}</Button>
           </div>
         </div>
       </div>

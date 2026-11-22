@@ -80,6 +80,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   let opened = false
   let triedFallback = false
   let outlineRevision = 0
+  let archiveRevision = 0
   let liveQuestions = []
   let watchingInteractions
   let markReady
@@ -104,6 +105,7 @@ export function createCodexHistory(ctx, thread, catalog) {
   }
 
   function publishState({ mode, status, historyMode, canAcceptDirectInput, archived } = {}) {
+    if (archived !== undefined) archiveRevision++
     const lastTurn = transcript.getTurn(rows.at(-1)?.id)
     state.update(current => {
       if (mode !== undefined) current.live.mode = mode
@@ -345,6 +347,33 @@ export function createCodexHistory(ctx, thread, catalog) {
     catalog?.acceptThread({ ...summary, ...(state.getSnapshot().archived && { archived: true }) })
   }
 
+  async function publishQueue(submissions, lifetime) {
+    const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, lifetime, queueImages)))
+    lifetime.throwIfAborted()
+    // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
+    queueImages = new Map(images.flat().filter(Boolean))
+    inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
+      source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
+    })), 'next-step': [] })
+    queueStore.set(submissions)
+    publishQuestions()
+  }
+
+  /** 主动查看带回原生队列。重连尚未送达时补齐界面，原生较新的推送仍优先。 */
+  function captureQueueView() {
+    const queueBefore = queueStore.getSnapshot()
+    const archiveBefore = archiveRevision
+    const catalogBefore = catalogArchiveRevision
+    return submissions => enqueue(async () => {
+      const summary = catalogThread(visibleCatalog?.getSnapshot())
+      if ((archiveRevision !== archiveBefore && state.getSnapshot().archived)
+        || (catalogArchiveRevision !== catalogBefore && summary?.archived)) return
+      if (state.getSnapshot().archived) publishState({ archived: false })
+      if (summary?.archived) catalog.acceptThread({ ...summary, archived: false })
+      if (queueStore.getSnapshot() === queueBefore) await publishQueue(submissions, signal)
+    })
+  }
+
   function receive(frame, lifetime) {
     return enqueue(async () => {
       if (frame.type === 'snapshot') return receiveSnapshot(frame)
@@ -355,18 +384,7 @@ export function createCodexHistory(ctx, thread, catalog) {
       }
       if (frame.type === 'approvals' && watchingInteractions) return codexApprovals.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
-      if (frame.type === 'queue') {
-        const { submissions } = frame
-        const images = await Promise.all(submissions.map(({ id, input }) => readInlineUserImages(`queue:${id}`, input, lifetime, queueImages)))
-        lifetime.throwIfAborted()
-        // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
-        queueImages = new Map(images.flat().filter(Boolean))
-        inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
-          source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
-        })), 'next-step': [] })
-        queueStore.set(submissions)
-        return publishQuestions()
-      }
+      if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime)
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
         return
@@ -527,10 +545,19 @@ export function createCodexHistory(ctx, thread, catalog) {
   }
 
   const visibleCatalog = catalog?.store
+  const catalogThread = snapshot => snapshot?.childThreads?.[thread.id] ?? snapshot?.threads?.find(summary => summary.id === thread.id)
+  let catalogArchived = Boolean(catalogThread(visibleCatalog?.getSnapshot())?.archived)
+  let catalogArchiveRevision = 0
   let watch
   function syncWatch() {
     if (signal.aborted) return
-    const selected = !visibleCatalog || visibleCatalog.getSnapshot().selected?.id === thread.id
+    const snapshot = visibleCatalog?.getSnapshot()
+    const archived = Boolean(catalogThread(snapshot)?.archived)
+    if (archived !== catalogArchived) {
+      catalogArchived = archived
+      catalogArchiveRevision++
+    }
+    const selected = !visibleCatalog || snapshot?.selected?.id === thread.id
     if (selected === watchingInteractions) return
     watchingInteractions = selected
     watch?.abort()
@@ -559,6 +586,7 @@ export function createCodexHistory(ctx, thread, catalog) {
     ready,
     activeTurnId: () => state.getSnapshot().running ? state.getSnapshot().live.activeTurnId : undefined,
     queueStore,
+    captureQueueView,
     updateState: edit => state.update(edit),
     session: {
       getSnapshot: state.getSnapshot,

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { projectCatalog } from '../src/client/native-dsh/catalog.js'
+import { readCatalogEvent } from '../src/host/catalog-events.mjs'
 
 test('projects native workspace membership and timestamps into DSH sidebar rows', () => {
   const first = {
@@ -85,9 +86,17 @@ test('DSH 列表根据原生固定分组与归档状态标记会话', () => {
     { id: 'custom-group', cwd: '/repo', section: { id: 'different-id', name: section.name } },
     { id: 'archived', cwd: '/repo', archived: true, section },
   ] })
-  assert.deepEqual(workspaces.pinnedSessionIds, ['native-pin'])
+  assert.deepEqual(workspaces.pinnedSessionIds, ['native-pin', 'archived'])
   assert.deepEqual(workspaces.archivedSessionIds, ['archived'])
   assert.deepEqual(sessions.ids, ['native-pin', 'custom-group', 'archived'])
+})
+
+test('原生归档变更明确更新归档标记，置顶广播不冒充取消归档', async () => {
+  const request = async () => ({ thread: { id: 'thread' } })
+  const event = method => readCatalogEvent({ method, params: { threadId: 'thread' } }, request)
+  assert.equal((await event('thread/archived')).thread.archived, true)
+  assert.equal((await event('thread/section/changed')).thread.archived, undefined)
+  assert.equal((await event('thread/unarchived')).thread.archived, false)
 })
 
 test('子代理可供原生子会话树读取，同时保留父工作区的根会话清单', () => {

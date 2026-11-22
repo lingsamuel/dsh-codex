@@ -1,6 +1,7 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { createElement } from 'react'
 import { workspaceProjectId } from '../workspaces.js'
+import { renderArchiveSearch } from './archive-search.js'
+import { renderArchiveOrder } from './archive-order.js'
 
 const sidebar = 'sidebar.workspaces'
 const locale = 'codex.workspace'
@@ -11,7 +12,7 @@ const labels = {
 const projectActions = new Set(['workspace/rename', 'workspace/delete', 'workspace/insertBefore'])
 
 /** 只有 Codex 已登记的项目可以持久化改名、移除与顺序。 */
-export function installProjectWorkspaces(ctx) {
+export function installProjectWorkspaces(ctx, search) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   const translate = ctx.locale.bind(locale)
   ctx.inject(['remoteAccess'], scope => scope.effect(() => {
@@ -38,7 +39,9 @@ export function installProjectWorkspaces(ctx) {
       const Native = entry?.component
       if (!Native) return
       function WorkspaceBrowser(props) {
-        return createElement(Native, { ...props, t: (key, ...args) => key === 'delete.desc' ? translate('remove', ...args) : props.t(key, ...args) })
+        return renderArchiveOrder(renderArchiveSearch(Native, {
+          ...props, t: (key, ...args) => key === 'delete.desc' ? translate('remove', ...args) : props.t(key, ...args),
+        }, search))
       }
       entry.component = WorkspaceBrowser
       restore = () => { if (entry.component === WorkspaceBrowser) entry.component = Native }

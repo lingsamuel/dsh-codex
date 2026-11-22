@@ -86,7 +86,7 @@ export function projectCatalog({ projects, threads, selected, workspacePaths, bu
     workspaces: {
       items,
       archivedSessionIds: threads.filter(thread => thread.archived).map(thread => thread.id),
-      pinnedSessionIds: threads.filter(thread => !thread.archived && thread.section?.id === pinnedSectionId).map(thread => thread.id),
+      pinnedSessionIds: threads.filter(thread => thread.section?.id === pinnedSectionId).map(thread => thread.id),
       phase,
       state: error ? 'error' : busy ? 'loading' : 'idle',
       error: error ? remoteFailure(error) : null,

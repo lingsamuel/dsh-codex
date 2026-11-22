@@ -38,7 +38,9 @@ export async function readCatalogEvent(notification, request) {
     case 'thread/archived':
     case 'thread/unarchived': {
       const details = await summarize(params.thread ? params : await request('thread/read', { threadId: params.threadId }))
-      if (method === 'thread/archived') details.thread = { ...details.thread, archived: true }
+      if (method === 'thread/archived' || method === 'thread/unarchived') {
+        details.thread = { ...details.thread, archived: method === 'thread/archived' }
+      }
       return { type: 'thread', id: details.thread.id, ...details }
     }
     case 'project/changed':

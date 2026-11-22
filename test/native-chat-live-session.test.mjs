@@ -22,6 +22,7 @@ const hook = registerHooks({
   },
 })
 const { createCodexHistory } = await import('../src/client/native-dsh/session-events.js')
+const { createSessionInput } = await import('../src/client/native-dsh/session-input.js')
 const { provideCodexControllers } = await import('../src/client/native-dsh/controllers.js')
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
@@ -239,6 +240,45 @@ test('实时问题使用原生请求身份，原生确认完成后清理当前�
   assert.deepEqual(pending.getSnapshot(), [request])
   await emit([])
   assert.deepEqual(pending.getSnapshot(), [])
+})
+
+test('查看归档队列可以从 HTTP 补齐投影，但不会覆盖更新的原生队列或归档事件', async t => {
+  const source = mockTransport(t)
+  const thread = { id: 'archived-thread', archived: true, name: '原生标题', folder: '原生字段' }
+  const store = createSnapshotStore({ selected: thread, threads: [thread] })
+  const catalog = { store, acceptThread(summary) { store.set({ selected: summary, threads: [summary] }) } }
+  const disposers = []
+  t.after(() => disposers.reverse().forEach(dispose => dispose()))
+  const ctx = { effect(install) { disposers.push(install()) } }
+  const history = createCodexHistory(ctx, thread, catalog)
+  const input = createSessionInput(ctx, thread.id, history, { getSnapshot: () => undefined })
+  await Promise.resolve()
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const archived = value => emit({ type: 'notification', notification: {
+    method: value ? 'thread/archived' : 'thread/unarchived', params: { threadId: thread.id },
+  } })
+  const queued = id => ({ id, input: [{ type: 'text', text: id }], clientUserMessageId: id })
+  let response = Promise.withResolvers()
+  globalThis.fetch = () => response.promise
+  const viewing = input.viewQueue()
+  response.resolve(Response.json({ data: [queued('http')] }))
+  assert.deepEqual(await viewing, { ok: true, value: { empty: false } })
+  assert.equal(history.session.getSnapshot().archived, false)
+  assert.deepEqual(store.getSnapshot().threads[0], { ...thread, archived: false })
+  assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0]?.content[0].text, 'http')
+
+  await archived(true)
+  catalog.acceptThread(thread)
+  response = Promise.withResolvers()
+  const stale = input.viewQueue()
+  await archived(false)
+  await emit({ type: 'queue', submissions: [queued('native')] })
+  await archived(true)
+  response.resolve(Response.json({ data: [queued('stale')] }))
+  assert.deepEqual(await stale, { ok: true, value: { empty: false } })
+  assert.equal(history.session.getSnapshot().archived, true)
+  assert.equal(store.getSnapshot().threads[0].archived, true)
+  assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0].content[0].text, 'native')
 })
 
 test('快速切走再返回会话时，已排入队列的旧审批不会出现在新连接', async t => {

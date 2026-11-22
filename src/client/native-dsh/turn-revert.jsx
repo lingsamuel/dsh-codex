@@ -11,12 +11,14 @@ const labels = {
     revert: '删除本轮及后续对话', unavailable: '当前会话暂不可修改历史。请在 Codex CLI 中检查会话状态。',
     running: '会话仍在运行。请在 Codex CLI 中停止当前轮次，或等待它结束。',
     description: '将删除本轮的提问、回复和工具记录，以及之后的所有轮次。此操作无法撤销。工作区文件和已执行操作的影响会保留。',
+    unarchive: '此操作会先取消会话归档。', unarchiveAndConfirm: '取消归档并删除历史',
     confirm: '确认删除', cancel: '取消', close: '关闭', pending: '正在删除对话记录…',
   },
   en: {
     revert: 'Delete this turn and later history', unavailable: 'This session’s history is unavailable for editing. Check its status in Codex CLI.',
     running: 'This session is running. Stop the current turn in Codex CLI or wait for it to finish.',
     description: 'This turn’s prompt, reply, and tool records will be deleted along with all later turns. This cannot be undone. Workspace files and the effects of completed actions will be kept.',
+    unarchive: 'This will unarchive the session first.', unarchiveAndConfirm: 'Unarchive and delete history',
     confirm: 'Delete conversation history', cancel: 'Cancel', close: 'Close', pending: 'Deleting conversation history…',
   },
 }
@@ -27,7 +29,7 @@ function matchNativeActionStyle(button) {
 }
 
 function TurnRevert({ messageId, useSession, requestRevert, t }) {
-  const paginated = useSession(state => state.historyMode === 'paginated' && !state.archived && !state.subagent)
+  const paginated = useSession(state => state.historyMode === 'paginated' && !state.subagent)
   const unavailable = useSession(({ live, canAcceptDirectInput }) => {
     if (live.status?.type === 'active') return 'running'
     return ['idle', 'notLoaded'].includes(live.status?.type) && canAcceptDirectInput !== false ? null : 'unavailable'
@@ -61,10 +63,11 @@ function RevertDialog({ request, close, t }) {
     if (!pending) close()
   }
 
-  return <Modal open title={t('revert')} tone="warning" description={t('description')} closeLabel={t('close')}
+  const description = request.unarchive ? `${t('unarchive')} ${t('description')}` : t('description')
+  return <Modal open title={t('revert')} tone="warning" description={description} closeLabel={t('close')}
     onClose={cancel} footer={<>
       <Button variant="outline" data-modal-autofocus disabled={pending} onClick={cancel}>{t('cancel')}</Button>
-      <Button variant="outline" disabled={pending} onClick={confirm}>{t('confirm')}</Button>
+      <Button variant="outline" disabled={pending} onClick={confirm}>{t(request.unarchive ? 'unarchiveAndConfirm' : 'confirm')}</Button>
     </>}>
     {pending && <p role="status">{t('pending')}</p>}
     {error && <p role="alert">{error}</p>}
@@ -88,7 +91,10 @@ export function installTurnRevert(ctx) {
           const session = scope.sessions.binding(threadId)?.session
           const beforeTurnId = session?.finishedTurnOfReply(messageId)
           const headTurnId = session?.latestTurnId()
-          if (beforeTurnId && headTurnId) request.set({ threadId, beforeTurnId, headTurnId })
+          if (beforeTurnId && headTurnId) {
+            const { archived } = session.getSnapshot()
+            request.set({ threadId, beforeTurnId, headTurnId, ...(archived && { unarchive: true }) })
+          }
         },
       }),
     }, TurnRevert))

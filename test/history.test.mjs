@@ -513,6 +513,30 @@ test('另一客户端已恢复归档会话并清空队列时，不提交草稿�
     ['thread/read', 'thread/list', 'thread/read', 'thread/queue/list'])
 })
 
+test('查看归档会话的队列只在确认后取消归档，保持运行时未加载', async t => {
+  const thread = { id: 'archive-queue-view', status: { type: 'notLoaded' } }
+  const target = { id: 'queued', input: [{ type: 'text', text: '待发送' }] }
+  let archived = true
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: archived ? [thread] : [] } }),
+    'thread/unarchive': () => { archived = false; return { result: { thread } } },
+    'thread/queue/list': () => archived ? { error: { code: -32600, message: 'session is archived' } }
+      : { result: { data: [target], nextCursor: null } },
+  })
+  const list = unarchive => get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'queue', operation: 'list', threadId: thread.id, unarchive,
+    }),
+  })
+  assert.equal((await list(false)).status, 400)
+  assert.equal(archived, true)
+  assert.deepEqual(await (await list(true)).json(), { data: [target] })
+  assert.equal(archived, false)
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
+    ['thread/queue/list', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/queue/list'])
+})
+
 test('继续归档会话的队列先取消归档，再确认目标消息', async t => {
   const thread = { id: 'archived-queue', status: { type: 'notLoaded' } }
   const target = { id: 'first', clientUserMessageId: 'browser' }
@@ -807,6 +831,97 @@ test('回退检查原生线程状态，并以所选轮次为排除边界', async
     { threadId: thread.id, beforeTurnId: 'earlier' },
   ])
   assert.equal(messages.filter(({ method }) => method === 'thread/resume').length, 1)
+})
+
+test('归档历史回退先核对目标，再取消归档并检查队列及恢复后的历史', async t => {
+  const thread = { id: 'archived-history', historyMode: 'paginated', status: { type: 'notLoaded' } }
+  let archived = true
+  let head = 'latest'
+  let queued = [{ id: 'pending' }]
+  let advanceOnResume = false
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': ({ archived: onlyArchived, includedThreadIds }) => ({
+      result: { data: archived && onlyArchived && includedThreadIds.includes(thread.id) ? [thread] : [] },
+    }),
+    'thread/turns/list': () => ({ result: { data: [{ id: head }] } }),
+    'thread/items/list': ({ turnId }) => ({ result: { data: turnId === 'earlier' ? [{ item: { id: 'reply' } }] : [] } }),
+    'thread/unarchive': () => { archived = false; return { result: { thread } } },
+    'thread/queue/list': () => archived ? { error: { code: -32600, message: 'session is archived' } }
+      : { result: { data: queued } },
+    'thread/resume': () => {
+      if (advanceOnResume) head = 'changed'
+      thread.status = { type: 'idle' }
+      return { result: { thread } }
+    },
+    'thread/revert': () => ({ result: { thread } }),
+  })
+  const revert = (fields = {}) => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'revert', threadId: thread.id, beforeTurnId: 'earlier', headTurnId: 'latest', unarchive: true, ...fields,
+    }),
+  })
+  const stale = await revert({ headTurnId: 'stale' })
+  assert.equal(stale.status, 409)
+  assert.match((await stale.json()).error, /历史已有变化/)
+  assert.equal((await revert({ beforeTurnId: 'missing' })).status, 409)
+  assert.equal(messages.some(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/revert'].includes(method)), false)
+
+  const pending = await revert()
+  assert.equal(pending.status, 409)
+  assert.match((await pending.json()).error, /待发/)
+  assert.equal(archived, false)
+  assert.equal(messages.some(({ method }) => ['thread/resume', 'thread/revert'].includes(method)), false)
+
+  queued = []
+  advanceOnResume = true
+  assert.equal((await revert()).status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/revert'), false)
+
+  head = 'latest'
+  assert.equal((await revert()).status, 200)
+  assert.deepEqual(messages.filter(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/revert'].includes(method))
+    .map(({ method }) => method), ['thread/unarchive', 'thread/resume', 'thread/revert'])
+})
+
+test('归档旧消息重发前确认草稿模型和权限，原生顺序保持先回退后发送', async t => {
+  const thread = { id: 'archived-edit', cwd: '/workspace', historyMode: 'paginated', status: { type: 'notLoaded' },
+    model: 'old', modelProvider: 'openai' }
+  const profile = ':read-only'
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'latest' }] } }),
+    'thread/items/list': () => ({ result: { data: [{ item: { id: 'original', type: 'userMessage',
+      content: [{ type: 'text', text: 'Original', text_elements: [] }] } }] } }),
+    'permissionProfile/list': () => ({ result: { data: [{ id: profile, allowed: true }] } }),
+    'thread/list': () => ({ result: { data: [thread] } }),
+    'thread/unarchive': () => ({ result: { thread } }),
+    'thread/queue/list': () => ({ result: { data: [] } }),
+    'thread/resume': ({ model, config, permissions }) => {
+      thread.status = { type: 'idle' }
+      thread.model = model
+      thread.reasoningEffort = config?.model_reasoning_effort
+      return { result: { thread, activePermissionProfile: { id: permissions } } }
+    },
+    'thread/revert': () => ({ result: { thread } }),
+    'turn/start': () => {
+      thread.status = { type: 'active' }
+      return { result: { turn: { id: 'replacement' } } }
+    },
+  })
+  const edited = await get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      action: 'edit', unarchive: true, threadId: thread.id, beforeTurnId: 'earlier', headTurnId: 'latest', itemId: 'original', text: 'Edited',
+      modelDraft: { provider: 'openai', model: 'selected', reasoningEffort: 'high' }, permissionDraft: profile,
+    }),
+  })
+  assert.equal(edited.status, 200)
+  assert.equal((await edited.json()).permission?.profileId, profile)
+  const transitions = messages.filter(({ method }) => ['thread/unarchive', 'thread/resume', 'thread/revert', 'turn/start'].includes(method))
+  assert.deepEqual(transitions.map(({ method }) => method), ['thread/unarchive', 'thread/resume', 'thread/revert', 'turn/start'])
+  assert.deepEqual(transitions[1].params, { threadId: thread.id, excludeTurns: true, model: 'selected',
+    config: { model_reasoning_effort: 'high' }, permissions: profile })
+  assert.equal(transitions[3].params.input[0].text, 'Edited')
 })
 
 test('首次发送等到草稿模型已应用再进入原生队列', async t => {

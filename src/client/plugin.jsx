@@ -30,7 +30,7 @@ export function apply(ctx) {
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog)
-  installProjectWorkspaces(ctx)
+  installProjectWorkspaces(ctx, catalog.search)
   installFileReferences(ctx)
   installPermissions(ctx, catalog.store, controller.signal)
   installCodexQuestions(ctx)

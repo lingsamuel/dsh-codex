@@ -128,18 +128,24 @@ async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId) {
   }
 }
 
-async function submissionThread(request, threadId, { unarchive, modelDraft, permissionDraft }, permissions) {
-  const current = await addressableThread(request, threadId, unarchive === true)
-  validateModelDraft(current, modelDraft)
+/** 在变更归档状态或恢复前确认所选设置仍可用于该线程。 */
+export async function validateSubmissionSettings(request, thread, { modelDraft, permissionDraft }, permissions) {
+  validateModelDraft(thread, modelDraft)
   if (permissionDraft !== undefined) {
     if (!permissions) throw badRequest('Codex 权限选择不可用。')
-    await permissions.validateSelection(request, current.cwd, required(permissionDraft, '缺少 Codex 权限预设。'))
+    await permissions.validateSelection(request, thread.cwd, required(permissionDraft, '缺少 Codex 权限预设。'))
   }
+}
+
+async function submissionThread(request, threadId, fields, permissions) {
+  const { unarchive } = fields
+  const current = await addressableThread(request, threadId, unarchive === true)
+  await validateSubmissionSettings(request, current, fields, permissions)
   return unarchive === true ? unarchiveForSubmission(request, current) : current
 }
 
 /** 原生可能在冷恢复时启动旧队列，因此草稿设置随恢复请求一起应用。 */
-async function submissionRuntime(request, thread, { modelDraft, permissionDraft }, signal, permissions) {
+export async function submissionRuntime(request, thread, { modelDraft, permissionDraft }, signal, permissions) {
   const settings = {
     ...(modelDraft && { model: modelDraft.model, ...(modelDraft.reasoningEffort && {
       config: { model_reasoning_effort: modelDraft.reasoningEffort },
@@ -212,8 +218,14 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }) {
-  if (operation === 'list') return { data: await readConversationQueue(request, threadId) }
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text, unarchive }) {
+  if (operation === 'list') {
+    if (unarchive === true) {
+      const thread = await addressableThread(request, threadId, true)
+      await unarchiveForSubmission(request, thread)
+    }
+    return { data: await readConversationQueue(request, threadId) }
+  }
   if (operation !== 'edit' && operation !== 'steer' && operation !== 'remove') throw badRequest('无效的队列操作。')
   required(queuedSubmissionId, '缺少待发消息 ID。')
   const target = { threadId, queuedSubmissionId }
@@ -329,11 +341,12 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             return rpc('turn/interrupt', { threadId, turnId })
           }))
         }
-        const { operation } = fields
+        const { operation, unarchive } = fields
         const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
           ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle)
           : queueAction(rpc, threadId, fields))
-        return json(await (operation === 'start' || operation === 'steer' ? submit(threadId, run) : run()))
+        const serial = operation === 'start' || operation === 'steer' || (operation === 'list' && unarchive === true)
+        return json(await (serial ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason
