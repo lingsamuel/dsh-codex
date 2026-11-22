@@ -10,6 +10,7 @@ import { subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
 import { modelSelectionOf } from '../../shared/model-selection.js'
 import { permissionOf } from '../../shared/permissions.js'
+import { planModeOf } from '../../shared/plan-mode.js'
 import { userInputText } from '../../shared/user-input.js'
 import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
@@ -45,6 +46,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     promptAttempted: false,
     awaitingFirstTurn: false,
     goalRevision: 0,
+    planMode: planModeOf(thread),
+    planRevision: 0,
     live: { mode: 'connecting', status: thread.status, lastTurnStatus: undefined },
   })
   const events = createSnapshotStore({
@@ -67,6 +70,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const permissions = createSnapshotStore({ permission: thread.webPermission })
   let lastSavedPermission
   let receivedSavedPermission = false
+  let lastSavedPlanMode
+  let planRevisionAtConnect = 0
   const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
   const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
@@ -156,6 +161,17 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (permission && JSON.stringify(permissions.getSnapshot().permission) !== JSON.stringify(permission)) {
       permissions.set({ permission })
     }
+  }
+
+  /** 命令回执与旁路通知可能交错。提交后的更新只填补期间没有收到的确认。 */
+  function publishPlanMode(mode, expectedRevision = state.getSnapshot().planRevision) {
+    if (!mode || expectedRevision !== state.getSnapshot().planRevision) return
+    state.update(current => { current.planMode = mode; current.planRevision++ })
+  }
+
+  function publishGoal(goal, expectedRevision = state.getSnapshot().goalRevision) {
+    if (expectedRevision !== state.getSnapshot().goalRevision) return
+    state.update(current => { current.goal = goal; current.goalRevision++ })
   }
 
   async function collectAttachments(turns) {
@@ -267,7 +283,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, canAcceptDirectInput, archived, threadSummary, replace }, lifetime = signal) {
     if (!opened || replace) {
       if (replace) clearHistory()
       await addOlderPage(page)
@@ -307,6 +323,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     publishState({ mode, status, historyMode, canAcceptDirectInput, archived })
     if (threadSummary) publishThreadSummary(threadSummary)
     if (selection !== undefined) publishModel(selection)
+    if (planMode && planMode !== state.getSnapshot().planMode) publishPlanMode(planMode)
     todos.set(undefined)
     contextPressure.set(undefined)
     if (status) catalog?.setStatus(thread.id, status)
@@ -409,6 +426,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
           lastSavedPermission = saved
           receivedSavedPermission = true
         }
+        if (frame.planMode) {
+          // 重连后的首次检查点可以补齐断线期间的变化，仍须让位给这次连接后已经收到的确认。
+          const initial = lastSavedPlanMode === undefined
+          if (frame.planMode !== lastSavedPlanMode && (!initial || state.getSnapshot().planRevision === planRevisionAtConnect)) {
+            publishPlanMode(frame.planMode)
+          }
+          lastSavedPlanMode = frame.planMode
+        }
         return
       }
       if (frame.type === 'change') {
@@ -429,13 +454,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
           const { effort, ...settings } = params.threadSettings
           publishModel(modelSelectionOf({ ...settings, reasoningEffort: effort }))
           publishPermission(permissionOf(settings))
+          publishPlanMode(planModeOf(settings))
         } else if (method === 'thread/archived' || method === 'thread/unarchived') {
           publishState({ archived: method === 'thread/archived' })
         } else if (method === 'thread/goal/updated' || method === 'thread/goal/cleared') {
-          state.update(current => {
-            current.goal = params.goal ?? null
-            current.goalRevision++
-          })
+          publishGoal(params.goal ?? null)
         }
       }
     }, lifetime)
@@ -444,7 +467,11 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   function changeMode(mode, lifetime) {
     return enqueue(async () => {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
-      if (mode === 'connecting') publishCancelledToolCalls([])
+      if (mode === 'connecting') {
+        publishCancelledToolCalls([])
+        lastSavedPlanMode = undefined
+        planRevisionAtConnect = state.getSnapshot().planRevision
+      }
       if (mode === 'disconnected') {
         liveQuestions = []
         codexApprovals.set([])
@@ -613,6 +640,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       editableInput,
       publishModel,
       publishPermission,
+      publishPlanMode,
+      publishGoal,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       queuedImageUrl: id => queueImages.get(id)?.url,
       async readAttachment({ attachmentId }) {

@@ -1,18 +1,11 @@
-import { Modal, PathLabel, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useRef, useState } from 'react'
-import { readPage } from '../api.js'
+import { Input, PathLabel, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useId, useState } from 'react'
+import { CommandButton, CommandModal, commandUnavailable, fieldLayout, textAreaStyle, useCommandAction, useCommandInfo } from './command-action.jsx'
+import { GoalCommand } from './goal-command.jsx'
+import { PlanCommand } from './plan-command.jsx'
 
-function Goal({ goal, t }) {
-  if (!goal) return <p>{t('noGoal')}</p>
-  return <>
-    <p>{goal.objective}</p>
-    <p>{t(goal.status)}</p>
-    <dl>
-      {goal.tokensUsed != null && <><dt>{t('used')}</dt><dd>{goal.tokensUsed.toLocaleString()}</dd></>}
-      {goal.tokenBudget != null && <><dt>{t('budget')}</dt><dd>{goal.tokenBudget.toLocaleString()}</dd></>}
-    </dl>
-  </>
-}
+const reviewValues = { uncommittedChanges: null, baseBranch: 'branch', commit: 'sha', custom: 'instructions' }
+const reviewChoice = { display: 'flex', alignItems: 'center', gap: 8 }
 
 function Terminals({ terminals, t }) {
   if (!terminals) return <p>{t('terminalsUnavailable')}</p>
@@ -37,29 +30,71 @@ function Status({ info, sessionId, useSessions, useProjection, t }) {
   </dl>
 }
 
-/** 命令打开时才读取详情。实时目标通知优先于打开时发出的请求。 */
-export function CommandDetails({ command, onClose, sessionId, useSession, useSessions, useProjection, t }) {
-  const [info, setInfo] = useState(null)
-  const [error, setError] = useState('')
-  const liveGoal = useSession(state => state.goal)
-  const goalRevision = useSession(state => state.goalRevision)
-  const revisionAtOpen = useRef(goalRevision)
-  useEffect(() => {
-    const abort = new AbortController()
-    readPage('thread-info', { threadId: sessionId, view: command }, abort.signal).then(data => {
-      if (!abort.signal.aborted) setInfo(data)
-    }).catch(failure => {
-      if (!abort.signal.aborted) setError(failure.message)
-    })
-    return () => abort.abort()
-  }, [command, sessionId])
-  const goalChanged = goalRevision > revisionAtOpen.current
-
-  return <Modal open title={t(command)} closeLabel={t('close')} onClose={onClose}>
-    {error && <p role="alert">{error}</p>}
-    {!info && !error && <p role="status">{t('loading')}</p>}
+function ReadOnlyCommand({ command, onClose, sessionId, useSessions, useProjection, t }) {
+  const { info, error } = useCommandInfo(sessionId, command)
+  return <CommandModal {...{ command, onClose, t, error }} unavailable={!info && !error ? 'loading' : undefined}>
     {command === 'status' && <Status {...{ info, sessionId, useSessions, useProjection, t }} />}
-    {command === 'goal' && (info || goalChanged) && <Goal goal={goalChanged ? liveGoal : info?.goal} t={t} />}
     {command === 'ps' && info && <Terminals terminals={info.terminals} t={t} />}
-  </Modal>
+  </CommandModal>
+}
+
+function turnUnavailable(state) {
+  return commandUnavailable(state) ?? (state.live.status?.type === 'active' || state.running ? 'busy' : undefined)
+}
+
+function CompactCommand({ command, onClose, session, useSession, t }) {
+  const unavailable = useSession(state => turnUnavailable(state) ?? (state.blank ? 'blank' : undefined))
+  const archived = useSession(state => state.archived)
+  const { error, pending, submit } = useCommandAction(session, archived)
+  return <CommandModal {...{ command, onClose, t, error, pending, unavailable }} description={t('compact.detail')}
+    footer={<CommandButton action="compact.run" variant="primary" {...{ archived, t }} disabled={Boolean(unavailable || pending)}
+      onClick={() => submit({ action: 'compact' }, onClose)} />} />
+}
+
+function ReviewCommand({ command, onClose, session, useSession, t }) {
+  const unavailable = useSession(turnUnavailable)
+  const archived = useSession(state => state.archived)
+  const { error, pending, submit } = useCommandAction(session, archived)
+  const [target, setTarget] = useState('uncommittedChanges')
+  const [values, setValues] = useState({})
+  const form = useId()
+  const field = reviewValues[target]
+  const value = values[target] ?? ''
+  const disabled = Boolean(unavailable || pending || (field && !value.trim()))
+  function review(event) {
+    event.preventDefault()
+    if (disabled) return
+    submit({ action: 'review', target: { type: target, ...(field && { [field]: value.trim() }) } }, onClose)
+  }
+  const setValue = event => setValues({ ...values, [target]: event.target.value })
+
+  return <CommandModal {...{ command, onClose, t, error, pending, unavailable }} description={t('review.detail')}
+    footer={<CommandButton type="submit" form={form} action="review.run" variant="primary" {...{ archived, t, disabled }} />}>
+    <form id={form} style={{ ...fieldLayout, gap: 12 }} onSubmit={review}>
+      <div role="radiogroup" aria-label={t('review.target')} style={fieldLayout}>
+        {Object.keys(reviewValues).map(type => <label key={type} style={reviewChoice}>
+          <input type="radio" name={form} checked={target === type} disabled={pending}
+            onChange={() => setTarget(type)} data-modal-autofocus={type === 'uncommittedChanges' ? '' : undefined} />
+          {t(`review.${type}`)}
+        </label>)}
+      </div>
+      {field && <label style={fieldLayout}>
+        {t(`review.${field}`)}
+        {target === 'custom'
+          ? <textarea rows={3} style={textAreaStyle} {...{ value }} onChange={setValue} disabled={pending} />
+          : <Input key={field} {...{ value }} onChange={setValue} disabled={pending} />}
+      </label>}
+    </form>
+  </CommandModal>
+}
+
+/** 在原生输入栏弹层中按命令类型挂载对应表单，表单状态随这次打开保留。 */
+export function CommandDetails(props) {
+  switch (props.command) {
+    case 'compact': return <CompactCommand {...props} />
+    case 'review': return <ReviewCommand {...props} />
+    case 'plan': return <PlanCommand {...props} />
+    case 'goal': return <GoalCommand {...props} />
+    default: return <ReadOnlyCommand {...props} />
+  }
 }

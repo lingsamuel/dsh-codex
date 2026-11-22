@@ -15,7 +15,7 @@ const catalogMethods = new Set([
 const goalMethods = new Set(['thread/goal/updated', 'thread/goal/cleared'])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals) {
+export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode) {
   return {
     path: '/api/codex/watch',
     methods: ['GET'],
@@ -184,6 +184,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             tail = createHistoryTail(connection.request, thread, page, fromCursor)
             awaitingPreview = !thread.name && !thread.preview
             send({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
+              planMode: readDraftPlanMode?.(threadId),
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
               mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) })
             if (fromCursor === itemCursor) checkpoint(itemCursor)

@@ -34,6 +34,27 @@ function types(entries, type) {
   return entries.map(({ event }) => event).filter(event => event.type === type)
 }
 
+test('压缩进行中使用原生生命周期，重开会话可看到完成状态', () => {
+  const item = { id: 'compact', type: 'contextCompaction' }
+  const running = projectCodexTurns([turn('turn', [item], { status: 'inProgress' })])
+  assert.deepEqual(types(running, 'compaction/start').map(({ data }) => data.compactionId), ['compact'])
+  assert.equal(types(running, 'compaction/end').length, 0)
+  const finished = projectCodexTurns([turn('turn', [{ ...item, completedAtMs: 199_000 }])])
+  assert.deepEqual(types(finished, 'compaction/end').map(({ data }) => data.compactionId), ['compact'])
+})
+
+test('原生审查目标和完成结果分别以进度与 Markdown 回复投影', () => {
+  const entries = projectCodexTurns([turn('review', [
+    { id: 'begin', type: 'enteredReviewMode', review: 'current changes' },
+    { id: 'end', type: 'exitedReviewMode', review: '**Regression** in [entry](/work/a.js:4).' },
+  ])])
+  const [started, completed] = types(entries, 'assistant/message')
+  assert.equal(started.data.codexPhase, 'commentary')
+  assert.equal(started.data.message.content[0].text, 'current changes')
+  assert.equal(completed.data.codexPhase, 'final_answer')
+  assert.match(completed.data.message.content[0].text, /^\*\*Regression\*\* in \[entry\]/)
+})
+
 test('projects native user, commentary, visible reasoning and final text in their original order', () => {
   const source = turn('turn-id', [
     { id: 'user-id', type: 'userMessage', startedAtMs: 100_012,

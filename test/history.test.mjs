@@ -49,7 +49,7 @@ async function fakeCodex(t, methods) {
   t.after(() => owner.abort())
   const routes = createHistoryRoutes(socketPath, owner.signal)
   const get = (path, options) => routes.find(route => path.split('?')[0] === route.path)
-    .fetch(new Request(`http://localhost${path}`, options))
+    ?.fetch(new Request(`http://localhost${path}`, options)) ?? Response.json({}, { status: 404 })
   return {
     get, messages, clientClosed, socketPath, directory,
     broadcast(message) {
@@ -57,6 +57,217 @@ async function fakeCodex(t, methods) {
     },
   }
 }
+
+function postCommand(get, action, fields) {
+  return get('/api/codex/command-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId: 'main', action, ...fields }),
+  })
+}
+
+test('网页命令仅在冷会话队列为空时恢复并压缩上下文', async t => {
+  const thread = { id: 'main', status: { type: 'notLoaded' } }
+  let queued = [{ id: 'later' }]
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ result: { data: queued } }),
+    'thread/resume': () => {
+      thread.status.type = 'idle'
+      return { result: { thread } }
+    },
+    'thread/turns/list': () => ({ result: { data: [{ id: 'previous', status: 'completed' }] } }),
+    'thread/compact/start': () => {
+      thread.status.type = 'active'
+      return { result: {} }
+    },
+  })
+  assert.equal((await postCommand(get, 'compact')).status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume' || method === 'thread/compact/start'), false)
+  queued = []
+  assert.equal((await postCommand(get, 'compact')).status, 200)
+  assert.deepEqual(messages.filter(({ method }) => ['thread/resume', 'thread/compact/start'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['thread/resume', { threadId: 'main', excludeTurns: true }],
+    ['thread/compact/start', { threadId: 'main' }],
+  ])
+  assert.equal((await postCommand(get, 'compact')).status, 409)
+  assert.equal(messages.filter(({ method }) => method === 'thread/compact/start').length, 1)
+})
+
+test('网页审查使用当前线程并传递四种原生目标', async t => {
+  let activity = 'idle'
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: activity } } } }),
+    'review/start': () => {
+      activity = 'active'
+      return { result: { reviewThreadId: 'main', turn: { id: 'review' } } }
+    },
+  })
+  const targets = [{ type: 'uncommittedChanges' }, { type: 'baseBranch', branch: 'release/v2' },
+    { type: 'commit', sha: 'abc123', title: null }, { type: 'custom', instructions: '核对配置兼容性' }]
+  for (const target of targets) {
+    assert.equal((await postCommand(get, 'review', { target })).status, 200)
+    activity = 'idle'
+  }
+  assert.equal((await postCommand(get, 'review', { target: { type: 'commit', sha: ' ' } })).status, 400)
+  assert.deepEqual(messages.filter(({ method }) => method === 'review/start').map(({ params }) => params),
+    targets.map(target => ({ threadId: 'main', target })))
+})
+
+test('网页审查在冷恢复期间启动了其他轮次时不打断它', async t => {
+  const thread = { id: 'main', status: { type: 'notLoaded' } }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ result: { data: [] } }),
+    'thread/resume': () => {
+      thread.status.type = 'active'
+      return { result: { thread: { ...thread, status: { type: 'idle' } } } }
+    },
+  })
+  const response = await postCommand(get, 'review', { target: { type: 'uncommittedChanges' } })
+  assert.equal(response.status, 409)
+  assert.equal(messages.some(({ method }) => method === 'review/start'), false)
+})
+
+test('网页计划模式目录只读，切换保留会话模型并等待原生确认', async t => {
+  const thread = { id: 'main', status: { type: 'idle' }, model: 'current-model', reasoningEffort: 'high' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [{ id: 'previous', status: 'completed' }] } }),
+    'collaborationMode/list': () => ({ result: { data: [
+      { name: 'Default', mode: 'default' }, { name: 'Plan', mode: 'plan', model: 'other-model' }, { name: 'Extra', mode: null },
+    ] } }),
+    'thread/resume': () => ({ result: { thread, collaborationMode: { mode: 'default' } } }),
+    'thread/settings/update': (params, client) => {
+      client.send(JSON.stringify({ method: 'thread/settings/updated', params: {
+        threadId: 'another-thread', threadSettings: { collaborationMode: { mode: 'default' } },
+      } }))
+      client.send(JSON.stringify({ method: 'thread/settings/updated', params: {
+        threadId: 'main', threadSettings: { collaborationMode: params.collaborationMode },
+      } }))
+      return { result: {} }
+    },
+  })
+  assert.deepEqual((await (await get('/api/codex/thread-info?threadId=main&view=plan')).json()).modes, ['default', 'plan'])
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+  assert.deepEqual(await (await postCommand(get, 'plan', { mode: 'plan' })).json(), { mode: 'plan', confirmed: true })
+  assert.deepEqual(messages.find(({ method }) => method === 'thread/settings/update').params, {
+    threadId: 'main', collaborationMode: { mode: 'plan', settings: {
+      model: 'current-model', reasoning_effort: 'high', developer_instructions: null,
+    } },
+  })
+})
+
+test('网页空白会话从原生创建连接确认计划模式', async t => {
+  const thread = { id: 'main', cwd: '/workspace', status: { type: 'idle' }, model: 'current-model' }
+  let creation
+  const { get, messages } = await fakeCodex(t, {
+    'thread/start': (params, client) => {
+      creation = client
+      return { result: { thread } }
+    },
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ result: { data: [] } }),
+    'collaborationMode/list': () => ({ result: { data: [{ mode: 'default' }, { mode: 'plan' }] } }),
+    'thread/settings/update': ({ collaborationMode }) => {
+      creation.send(JSON.stringify({ method: 'thread/settings/updated', params: {
+        threadId: 'main', threadSettings: { collaborationMode },
+      } }))
+      return { result: {} }
+    },
+  })
+  const created = await get('/api/codex/conversation-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'create', cwd: thread.cwd }),
+  })
+  assert.equal(created.status, 200)
+  assert.deepEqual(await (await postCommand(get, 'plan', { mode: 'plan' })).json(), { mode: 'plan', confirmed: true })
+  assert.deepEqual(await (await get('/api/codex/thread-info?threadId=main&view=plan')).json(), {
+    modes: ['default', 'plan'], mode: 'plan',
+  })
+  const watch = await get('/api/codex/watch?threadId=main')
+  const reader = watch.body.getReader()
+  t.after(() => reader.cancel())
+  const { value } = await reader.read()
+  const snapshot = JSON.parse(new TextDecoder().decode(value).slice(6))
+  assert.equal(snapshot.type, 'snapshot')
+  assert.equal(snapshot.planMode, 'plan')
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+})
+
+test('其他客户端的空白会话用原生设置回执确认计划模式', async t => {
+  const thread = { id: 'main', status: { type: 'idle' }, model: 'native-model' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/turns/list': () => ({ error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }),
+    'collaborationMode/list': () => ({ result: { data: [{ mode: 'plan' }] } }),
+    'thread/settings/update': () => ({ result: {} }),
+  })
+  assert.deepEqual(await (await postCommand(get, 'plan', { mode: 'plan' })).json(), { mode: 'plan', confirmed: true })
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+})
+
+test('网页目标的创建、暂停、恢复与清除使用原生用户身份', async t => {
+  let goal = null
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'active' } } } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+    'thread/goal/set': ({ objective, tokenBudget, status }) => {
+      goal = { ...goal, ...(objective && { objective, tokenBudget }), status }
+      return { result: { goal } }
+    },
+    'thread/goal/clear': () => { goal = null; return { result: { cleared: true } } },
+  })
+  const objective = '完成兼容性检查'
+  const tokenBudget = 4000
+  assert.deepEqual(await (await postCommand(get, 'goal-create', { objective, tokenBudget })).json(), {
+    goal: { objective, tokenBudget, status: 'active' },
+  })
+  assert.equal((await postCommand(get, 'goal-create', { objective: '新目标' })).status, 409)
+  assert.equal((await (await postCommand(get, 'goal-pause')).json()).goal.status, 'paused')
+  assert.equal((await (await postCommand(get, 'goal-resume')).json()).goal.status, 'active')
+  assert.deepEqual(await (await postCommand(get, 'goal-clear', { expectedGoal: { objective } })).json(), { goal: null })
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/goal/set' || method === 'thread/goal/clear')
+    .map(({ method, params }) => [method, params]), [
+    ['thread/goal/set', { threadId: 'main', origin: 'user', objective, tokenBudget, status: 'active' }],
+    ['thread/goal/set', { threadId: 'main', origin: 'user', status: 'paused' }],
+    ['thread/goal/set', { threadId: 'main', origin: 'user', status: 'active' }],
+    ['thread/goal/clear', { threadId: 'main', origin: 'user' }],
+  ])
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+})
+
+test('网页清除目标时拒绝移除后来创建的目标', async t => {
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'idle' } } } }),
+    'thread/goal/get': () => ({ result: { goal: { objective: '核对依赖', createdAt: 200, status: 'paused' } } }),
+  })
+  const response = await postCommand(get, 'goal-clear', { expectedGoal: { objective: '核对依赖', createdAt: 100 } })
+  assert.equal(response.status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/goal/clear'), false)
+})
+
+test('网页目标在显式取消归档后读取原生目标', async t => {
+  const thread = { id: 'main', archived: true, status: { type: 'notLoaded' } }
+  const goal = { objective: '已保存目标', status: 'paused' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: thread.archived ? [thread] : [] } }),
+    'thread/goal/get': () => thread.archived ? { error: { code: -32600, message: 'thread not found: main' } } : { result: { goal } },
+    'thread/unarchive': () => {
+      thread.archived = false
+      return { result: { thread } }
+    },
+  })
+  const opened = await get('/api/codex/thread-info?threadId=main&view=goal')
+  assert.deepEqual(await opened.json(), { goal: null, goalRequiresUnarchive: true })
+  assert.equal(thread.archived, true)
+  assert.deepEqual(await (await postCommand(get, 'goal-unarchive', { unarchive: true })).json(), { goal })
+  assert.equal(thread.archived, false)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume'), false)
+})
 
 test('工作区改名、排序和删除返回 Codex 原生项目列表', async t => {
   const alpha = { id: 'alpha', name: 'Alpha', roots: [] }

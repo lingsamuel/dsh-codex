@@ -19,6 +19,10 @@ export function writeThreadAction(parameters, signal) {
   return writeAction('thread-action', parameters, signal)
 }
 
+export function writeCommandAction(parameters, signal) {
+  return writeAction('command-action', parameters, signal)
+}
+
 export function writeProjectAction(parameters, signal) {
   return writeAction('project-action', parameters, signal)
 }

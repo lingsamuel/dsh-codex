@@ -41,7 +41,8 @@ function assistantBlock(item) {
     const text = item.summary?.join('\n\n')
     return text?.trim() ? { type: 'reasoning', text } : undefined
   }
-  const body = item.type === 'agentMessage' && item.text ? projectVisualizeReferences(item.text) : item.text
+  const nativeText = item.review ?? item.text
+  const body = item.type === 'agentMessage' && nativeText ? projectVisualizeReferences(nativeText) : nativeText
   const text = body?.trim() ? projectFileLinks(body) : undefined
   const questions = item.type === 'agentMessage' && item.questions?.length ? questionMarkdown(item.questions) : undefined
   if (!questions) return text && textBlock(text)
@@ -106,7 +107,8 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled) {
     if (isSubagentActivity && !subagentActivityKinds.includes(item.kind)) continue
     const isUser = item.type === 'userMessage'
     const replies = isUser ? questionReplies(item.content) : undefined
-    const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan'
+    const reviewPhase = item.type === 'enteredReviewMode' ? 'commentary' : item.type === 'exitedReviewMode' ? 'final_answer' : undefined
+    const isAssistant = item.type === 'agentMessage' || item.type === 'reasoning' || item.type === 'plan' || reviewPhase != null
     const block = isAssistant ? assistantBlock(item) : undefined
     if (isAssistant && !block) continue
 
@@ -142,12 +144,20 @@ function turnEvents(turn, number, source, createdAt, attachments, cancelled) {
       emit(subagentActivityEvent, end, { ...coordinates(), id, kind, agentThreadId, agentPath })
       continue
     }
+    if (item.type === 'contextCompaction') {
+      // 使用 DSH 自带的压缩行，完成时间来自原生条目。旧记录也可用成功结束的轮次确认完成。
+      const data = { ...coordinates(), compactionId: item.id }
+      emit('compaction/start', start, data)
+      if (item.completedAtMs != null || turn.status === 'completed') emit('compaction/end', end, data)
+      continue
+    }
     if (isAssistant) {
+      const phase = reviewPhase ?? item.phase
       emit('assistant/message', end, {
         ...coordinates(),
         message: { id: item.id, role: 'assistant', content: [block], source },
         stream: [],
-        ...(item.phase != null && { codexPhase: item.phase }),
+        ...(phase != null && { codexPhase: phase }),
       }, 'append')
       continue
     }

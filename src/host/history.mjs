@@ -12,8 +12,10 @@ import { createQuestionBridge } from './question-bridge.mjs'
 import { createAsyncQuestionActionRoute } from './async-question-actions.mjs'
 import { readModelCatalog } from './models.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
-import { createThreadSubmissionQueue } from './thread-runtime.mjs'
+import { createThreadSubmissionQueue, isArchived } from './thread-runtime.mjs'
 import { createBackgroundTerminalMonitor, readBackgroundTerminals } from './background-terminals.mjs'
+import { createCommandActionRoute, readPlanModes } from './command-actions.mjs'
+import { planModeOf } from '../shared/plan-mode.js'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -62,6 +64,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
+  const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
   const route = (path, read) => ({
     path: `/api/codex/${path}`,
     methods: ['GET'],
@@ -84,11 +87,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     permissions.catalogRoute,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
+    createCommandActionRoute(socketPath, ownerSignal, submit, permissions.observeDraftSettings),
     createConversationActionRoute(socketPath, ownerSignal, submit, permissions),
     questions.route,
     questions.approvalRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
-    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals),
+    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => {
@@ -104,9 +108,21 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
       const view = query.get('view')
       return withCodexReader(socketPath, signal, async request => {
+        if (view === 'plan') return { modes: await readPlanModes(request), mode: readDraftPlanMode(threadId) }
+        if (view === 'goal') {
+          try {
+            return await request('thread/goal/get', { threadId })
+          } catch (error) {
+            if (error.code === -32600 && error.message.startsWith('thread not found:') && await isArchived(request, threadId)) {
+              return { goal: null, goalRequiresUnarchive: true }
+            }
+            unavailable(error)
+            return { goal: null, goalAvailable: false }
+          }
+        }
         const [reading, goalResult] = await Promise.all([
-          view === 'goal' ? undefined : request('thread/read', { threadId }),
-          !view || view === 'goal' ? request('thread/goal/get', { threadId }).catch(unavailable) : undefined,
+          request('thread/read', { threadId }),
+          !view ? request('thread/goal/get', { threadId }).catch(unavailable) : undefined,
         ])
         const thread = reading?.thread
         const terminals = !view || view === 'ps'

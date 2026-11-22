@@ -32,7 +32,7 @@ function same(left, right) {
 
 function needsUpdate(item) {
   if (item.status === 'inProgress') return true
-  return item.completedAtMs == null && ['agentMessage', 'reasoning', 'plan'].includes(item.type)
+  return item.completedAtMs == null && ['agentMessage', 'reasoning', 'plan', 'contextCompaction'].includes(item.type)
 }
 
 function readThrough(request, method, parameters, cursor) {

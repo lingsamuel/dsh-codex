@@ -24,7 +24,9 @@ DSH 的会话搜索调用 Codex `thread/search`，按侧栏归档筛选读取对
 
 轮次尾部汇总成功的 Codex 文件变更，与工具行共享补丁解析结果。单文件汇总展开后直接显示 DSH 差异卡。多文件汇总展开后先列出前四个文件，可以显示全部文件行，点选后只渲染该文件的差异。相同路径的多次补丁按原顺序分别展示。无法解析的补丁保留路径和原文。
 
-原生 DSH 命令菜单按需执行 `/status`、`/goal`、`/ps` 和 `/rename`。状态读取 `thread/read`，目标读取 `thread/goal/get` 并消费实时通知，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
+原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review` 和 `/plan`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
+
+命令提交复用按线程串行的同源流程。`/compact` 和 `/review` 在原生空闲线程上开启轮次，历史投影复用 DSH 压缩行和 Markdown。冷恢复前读取原生待发队列，发现待发项则交由用户处理。`/plan` 读取 Codex 协作模式目录，显式切换时应用 `thread/settings/update`。当前模式来自原生设置通知和已落盘的检查点。`/goal` 用 `thread/goal/get` 读取，用带用户来源的原生请求创建、暂停、恢复或清除，面板跟随目标通知。写操作回执按线程修订号校验，避免覆盖期间送达的更新。
 
 `/ps` 在 Codex 确认会话未加载时显示空列表。如果线程在读取列表前卸载，重新确认运行时状态后同样显示空列表。这些读取沿用只读连接。
 

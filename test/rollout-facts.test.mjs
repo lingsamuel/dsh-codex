@@ -5,6 +5,24 @@ import test from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createRolloutFacts } from '../src/host/rollout-facts.mjs'
 
+test('计划模式优先使用当前线程的设置检查点，旧轮次和父会话不能覆盖它', async t => {
+  await mkdir('.runtime', { recursive: true })
+  const dir = await mkdtemp(join(process.cwd(), '.runtime', 'plan-mode-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const path = join(dir, 'native.jsonl')
+  const line = (type, payload) => JSON.stringify({ type, payload }) + '\n'
+  const settings = (thread_id, mode) => line('event_msg', { type: 'thread_settings_applied', thread_id,
+    thread_settings: { collaboration_mode: { mode } } })
+  await writeFile(path, line('turn_context', { collaboration_mode: { mode: 'default' } }))
+  const facts = createRolloutFacts(path, new AbortController().signal, 'child')
+  assert.equal((await facts.read()).planMode, 'default')
+  await appendFile(path, settings('child', 'plan') + settings('parent', 'default')
+    + line('turn_context', { collaboration_mode: { mode: 'default' } }))
+  assert.equal((await facts.read()).planMode, 'plan')
+  await appendFile(path, settings('child', 'default'))
+  assert.equal((await facts.read()).planMode, 'default')
+})
+
 test('只投影已确认的结构化计划，跟随追加并回放 Codex 回退', async t => {
   await mkdir('.runtime', { recursive: true })
   const dir = await mkdtemp(join(process.cwd(), '.runtime', 'facts-'))

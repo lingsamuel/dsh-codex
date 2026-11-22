@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import { isDeepStrictEqual } from 'node:util'
 import { permissionOf } from '../shared/permissions.js'
+import { planModeOf } from '../shared/plan-mode.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
 const userCancelled = /^(?:aborted by user(?: after \d[\d.msµnh ]*)?\.?|Wall time: \d+(?:\.\d+)? seconds\r?\naborted by user)\s*$/i
@@ -37,6 +38,7 @@ export function createRolloutFacts(path, signal, threadId) {
   let settingsChanges = 0
   let ownedPermission
   let legacyPermission
+  let savedPlanMode
   let followsOwner = false
   let permissionSequence = 0
   let publishedCancelledTools = false
@@ -61,6 +63,8 @@ export function createRolloutFacts(path, signal, threadId) {
     if (record.type === 'turn_context') {
       const permission = recordPermission(value)
       if (permission) currentTurn().permission = permission
+      const mode = planModeOf(value)
+      if (mode) currentTurn().planMode = mode
       return
     }
     if (record.type === 'event_msg') {
@@ -85,6 +89,7 @@ export function createRolloutFacts(path, signal, threadId) {
       } else if (value?.type === 'thread_settings_applied') {
         settingsChanges++
         if (value.thread_id) followsOwner = value.thread_id === threadId
+        if (followsOwner || !value.thread_id) savedPlanMode = planModeOf(value.thread_settings) ?? savedPlanMode
         const permission = recordPermission(value.thread_settings)
         if (!permission) return
         // 已开始的旧轮次可以晚写上下文。同一线程的完整设置检查点才是随后权限的依据。
@@ -133,6 +138,7 @@ export function createRolloutFacts(path, signal, threadId) {
         generation++
         settingsChanges = 0
         ownedPermission = legacyPermission = undefined
+        savedPlanMode = undefined
         followsOwner = false
         permissionSequence = 0
         turns = []
@@ -154,6 +160,7 @@ export function createRolloutFacts(path, signal, threadId) {
       const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
         ? turnPermission : legacyPermission
       const permission = displayPermission(ownedPermission ?? latestPermission, turnPermission)
+      const planMode = savedPlanMode ?? turns.findLast(turn => turn.planMode)?.planMode
       const cancelledToolCalls = turns.flatMap(turn => turn.cancelledToolCalls?.map(call => ({ ...call, turnId: turn.id })) ?? [])
       publishedCancelledTools ||= cancelledToolCalls.length > 0
       const facts = {
@@ -161,6 +168,7 @@ export function createRolloutFacts(path, signal, threadId) {
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,
         settingsStamp: settingsChanges ? `${generation}:${settingsChanges}` : undefined,
         ...(permission && { permission }),
+        ...(planMode && { planMode }),
         ...(publishedCancelledTools && { cancelledToolCalls }),
       }
       const serialized = JSON.stringify(facts)

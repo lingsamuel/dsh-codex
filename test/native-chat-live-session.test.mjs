@@ -146,6 +146,32 @@ test('切走会话时取消重连补页，不把已暂停的缓存重新标为�
     .map(({ event }) => event.data.codexTurnId), ['initial'])
 })
 
+test('命令结果不会覆盖期间收到的较新计划模式与目标通知', async t => {
+  const source = mockTransport(t)
+  const disposers = []
+  const { session } = createCodexHistory({ effect(install) { disposers.push(install()) } }, { id: 'thread' })
+  t.after(() => { for (const dispose of disposers.reverse()) dispose?.() })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  await emit({ type: 'rollout-facts', planMode: 'default' })
+  const { planRevision, goalRevision } = session.getSnapshot()
+  await emit({ type: 'notification', notification: { method: 'thread/settings/updated', params: {
+    threadId: 'thread', threadSettings: { collaborationMode: { mode: 'plan' } },
+  } } })
+  await emit({ type: 'notification', notification: { method: 'thread/goal/cleared', params: { threadId: 'thread' } } })
+  await emit({ type: 'rollout-facts', planMode: 'default' })
+  session.publishPlanMode('default', planRevision)
+  session.publishGoal({ status: 'active', objective: 'old' }, goalRevision)
+  assert.equal(session.getSnapshot().planMode, 'plan')
+  assert.equal(session.getSnapshot().goal, null)
+  session.publishPlanMode('default', session.getSnapshot().planRevision)
+  assert.equal(session.getSnapshot().planMode, 'default')
+
+  session.publishPlanMode('plan')
+  await source().onopen()
+  await emit({ type: 'rollout-facts', planMode: 'default' })
+  assert.equal(session.getSnapshot().planMode, 'default')
+})
+
 test('重连读取的权限缓存只填补缺失状态，不覆盖较新的原生权限', async t => {
   mockTransport(t)
   const owner = new AbortController()

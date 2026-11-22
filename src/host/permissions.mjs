@@ -122,8 +122,9 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
       connection = await openCodexReader(socketPath, lifetime, ({ method, params }) => {
         if (!draft || params?.threadId !== draft.id) return
         if (method === 'thread/settings/updated') {
-          draft.permission = remember(draft.id, params.threadSettings)
-          draft.confirm?.(draft.permission)
+          draft.settings = params.threadSettings
+          draft.permission = remember(draft.id, draft.settings)
+          draft.confirm?.(draft.settings)
         } else if (['turn/started', 'thread/archived', 'thread/deleted', 'thread/closed'].includes(method)) {
           // 原生开始首轮后可按普通线程处理。已在等待的设置确认仍使用创建订阅。
           draft.finished = true
@@ -132,7 +133,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
       })
       const result = await create(connection.request, started => {
         const id = started.thread.id
-        draft = { id, connection, permission: remember(id, started) }
+        draft = { id, connection, settings: started, permission: remember(id, started) }
         return draft.permission
       })
       signal.throwIfAborted()
@@ -148,6 +149,18 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     }
   }
 
+  /** 新建空白线程的设置确认由创建连接接收，供权限和计划模式共用。 */
+  function observeDraftSettings(threadId, observe) {
+    const draft = drafts.get(threadId)
+    if (!draft) return undefined
+    draft.confirm = observe
+    observe(draft.settings)
+    return () => {
+      draft.confirm = undefined
+      if (draft.finished) draft.connection.close()
+    }
+  }
+
   async function switchPermission(threadId, profileId, signal) {
     const deadline = new AbortController()
     const lifetime = AbortSignal.any([signal, deadline.signal, AbortSignal.timeout(15_000)])
@@ -156,7 +169,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     function confirm(permission) {
       if (permission?.profileId === profileId) resolve(permission)
     }
-    if (draft) draft.confirm = confirm
+    const stop = observeDraftSettings(threadId, settings => confirm(permissionOf(settings)))
     let connection
     try {
       connection = await openCodexReader(socketPath, lifetime, ({ method, params }) => {
@@ -173,10 +186,7 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
     } finally {
       deadline.abort()
       connection?.close()
-      if (draft) {
-        draft.confirm = undefined
-        if (draft.finished) draft.connection.close()
-      }
+      stop?.()
     }
   }
 
@@ -198,6 +208,8 @@ export function createPermissionActions(socketPath, ownerSignal, preferencePath,
   return {
     remember,
     withThreadCreation,
+    observeDraftSettings,
+    readDraftSettings: threadId => drafts.get(threadId)?.settings,
     validateSelection: requireProfile,
     switchPermission,
     async startOptions(request, cwd) {
