@@ -43,7 +43,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
 
   return [
     createWatchRoute(socketPath, ownerSignal),
-    route('catalog', query => readCatalog(query.get('complete') === '1')),
+    route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('projects', (query, signal) => readProjectPage(
       (method, params) => readCodex(method, params, socketPath, signal),
       { limit: 60, ...optionalParams(query, ['cursor']) },

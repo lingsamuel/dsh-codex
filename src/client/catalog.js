@@ -1,6 +1,16 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../shared/pages.js'
 import { readPage } from './api.js'
+import { openLiveWatch } from './live-watch.js'
+
+function applyChanges(entries, changes) {
+  const byId = new Map(entries.map(entry => [entry.id, entry]))
+  for (const [id, entry] of changes) {
+    if (entry) byId.set(id, entry)
+    else byId.delete(id)
+  }
+  return [...byId.values()]
+}
 
 /** 会话状态由侧栏和主区共享，原生数据仅留在页面内存。 */
 export function createHistoryCatalog(signal) {
@@ -14,33 +24,48 @@ export function createHistoryCatalog(signal) {
     error: '',
   })
   let refreshing = false
+  let pendingRefresh = false
+  let connected = false
   const observedStatuses = new Map()
   const observedReadStates = new Map()
   const searchThreads = new Map()
-  const searchPaths = {}
+  const threadChanges = new Map()
+  const projectChanges = new Map()
+  const changedPaths = {}
   let followsLocalReceipts = false
 
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
-      state.projects = projects
-      state.threads = mergePages(threads, searchThreads.values()).map(thread => observedStatuses.has(thread.id)
+      state.projects = applyChanges(projects, projectChanges).sort((a, b) => a.position - b.position)
+      state.threads = applyChanges(mergePages(threads, searchThreads.values()), threadChanges).map(thread => observedStatuses.has(thread.id)
         ? { ...thread, status: observedStatuses.get(thread.id) }
         : thread)
       if (!followsLocalReceipts) {
-        state.unreadIds = threads.filter(({ id, readState }) =>
-          (observedReadStates.get(id) ?? readState?.firstUnread != null)).map(thread => thread.id)
+        state.unreadIds = state.threads.filter(({ id, readState }) =>
+          (observedReadStates.get(id) ?? (readState?.firstUnread != null))).map(thread => thread.id)
       }
-      state.workspacePaths = { ...searchPaths, ...workspacePaths }
+      state.workspacePaths = { ...workspacePaths, ...changedPaths }
       state.selected = state.threads.find(thread => thread.id === state.selected?.id) ?? state.selected
       state.busy = false
       state.error = ''
     })
   }
 
-  async function refresh() {
-    if (refreshing || signal.aborted) return
+  async function refresh(fresh = false) {
+    if (signal.aborted) return
+    if (refreshing) {
+      pendingRefresh ||= fresh
+      return
+    }
     refreshing = true
     try {
+      if (fresh) {
+        // 重连只补一次断线间隔，期间到达的增量仍覆盖读取中的快照。
+        for (const changes of [threadChanges, projectChanges, observedStatuses, observedReadStates]) changes.clear()
+        searchThreads.clear()
+        publish(await readPage('catalog', { complete: 1, fresh: 1 }, signal))
+        return
+      }
       // 快速索引先填充导航，较慢的旧历史扫描完成后自动补齐。
       const index = await readPage('catalog', {}, signal)
       publish(index)
@@ -50,13 +75,14 @@ export function createHistoryCatalog(signal) {
     } finally {
       refreshing = false
       if (!signal.aborted) store.update(state => { state.busy = false })
+      if (pendingRefresh) {
+        pendingRefresh = false
+        void refresh(true)
+      }
     }
   }
 
-  void refresh()
-  window.addEventListener('focus', refresh, { signal })
-
-  return {
+  const catalog = {
     store,
     async search(searchTerm, searchSignal) {
       const requestSignal = AbortSignal.any([signal, searchSignal])
@@ -65,11 +91,11 @@ export function createHistoryCatalog(signal) {
       store.update(state => {
         // DSH 只显示已知会话的搜索结果。快速清单补齐期间保留搜索新发现的线程。
         const known = new Set(state.threads.map(thread => thread.id))
-        const found = data.map(result => result.thread).filter(thread => !known.has(thread.id))
+        const found = data.map(result => result.thread).filter(thread => !known.has(thread.id) && !threadChanges.has(thread.id))
         for (const thread of found) searchThreads.set(thread.id, thread)
-        Object.assign(searchPaths, workspacePaths)
+        Object.assign(changedPaths, workspacePaths)
         state.threads = mergePages(state.threads, found)
-        state.workspacePaths = { ...searchPaths, ...state.workspacePaths }
+        state.workspacePaths = { ...state.workspacePaths, ...workspacePaths }
       })
       return { items: data.map(({ thread, snippet }) => ({ sessionId: thread.id, snippet })), hasMore: Boolean(nextCursor) }
     },
@@ -102,4 +128,46 @@ export function createHistoryCatalog(signal) {
       store.update(state => { state.selected = thread })
     },
   }
+
+  function receive(frame) {
+    if (frame.type === 'catalog-ready') {
+      if (connected) void refresh(true)
+      connected = true
+    } else if (frame.type === 'unread') catalog.applyUnread(frame)
+    else if (frame.type === 'notification') {
+      const { method, params } = frame.notification
+      if (method === 'thread/status/changed') catalog.setStatus(params.threadId, params.status)
+      if (method === 'thread/readState/changed') catalog.setReadState(params.threadId, params.readState)
+    } else if (frame.type === 'thread') {
+      const { id, thread, readState, workspacePaths } = frame
+      const status = observedStatuses.get(id) ?? thread?.status
+      const current = thread && { ...thread, status }
+      threadChanges.set(id, current)
+      if (!current) {
+        searchThreads.delete(id)
+        observedStatuses.delete(id)
+        observedReadStates.delete(id)
+      }
+      Object.assign(changedPaths, workspacePaths)
+      store.update(state => {
+        state.threads = applyChanges(state.threads, [[id, current]]).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+        Object.assign(state.workspacePaths, workspacePaths)
+        if (current && state.selected?.id === id) state.selected = current
+      })
+      if (readState !== undefined) catalog.setReadState(id, readState)
+    } else if (frame.type === 'project') {
+      const { id, project, workspacePaths } = frame
+      projectChanges.set(id, project)
+      Object.assign(changedPaths, workspacePaths)
+      store.update(state => {
+        state.projects = applyChanges(state.projects, [[id, project]]).sort((a, b) => a.position - b.position)
+        Object.assign(state.workspacePaths, workspacePaths)
+      })
+    }
+  }
+
+  openLiveWatch(null, { receive }, signal)
+  void refresh()
+  window.addEventListener('focus', () => { void refresh() }, { signal })
+  return catalog
 }

@@ -293,15 +293,40 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
   db.exec(`PRAGMA journal_mode = WAL;
     CREATE TABLE thread_read_receipts (thread_id TEXT PRIMARY KEY, first_unread_turn TEXT);
     INSERT INTO thread_read_receipts VALUES ('other', 'previous-turn');`)
-  const response = await fixture.get('/api/codex/watch?threadId=selected')
+  const response = await fixture.get('/api/codex/watch?scope=catalog')
   const reader = response.body.getReader()
   const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
-  assert.deepEqual((await read()).readState, { firstUnread: null, revision: 'one' })
+  assert.deepEqual(await read(), { type: 'catalog-ready' })
   assert.deepEqual(await read(), { type: 'unread', replace: true, added: ['other'], removed: [] })
   db.exec(`UPDATE thread_read_receipts SET first_unread_turn = NULL WHERE thread_id = 'other';
     INSERT INTO thread_read_receipts VALUES ('new', '');`)
   assert.deepEqual(await read(), { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
   assert.deepEqual(fixture.messages.map(message => message.method).sort(),
-    ['initialize', 'initialized', 'thread/read', 'config/read', 'thread/turns/list'].sort())
+    ['initialize', 'initialized', 'config/read'].sort())
+  await reader.cancel()
+})
+
+test('侧栏独立接收会话与项目增量，无需打开任何会话', { timeout: 5000 }, async t => {
+  const project = { id: 'project', name: '新项目', roots: [] }
+  const thread = { id: 'thread', name: '新名字', projectId: project.id }
+  const fixture = await fakeCodex(t, {
+    'config/read': () => ({ result: { config: {} } }),
+    'thread/read': ({ threadId }) => ({ result: { thread: { ...thread, id: threadId } } }),
+    'project/read': ({ projectId }) => ({ result: { project: { ...project, id: projectId } } }),
+  })
+  const response = await fixture.get('/api/codex/watch?scope=catalog')
+  assert.equal(response.headers.get('content-type'), 'text/event-stream')
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
+  assert.deepEqual(await read(), { type: 'catalog-ready' })
+  fixture.broadcast({ method: 'thread/started', params: { thread: { id: thread.id, name: '最初名字' } } })
+  assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread: { id: thread.id, name: '最初名字' }, workspacePaths: {} })
+  fixture.broadcast({ method: 'thread/name/updated', params: { threadId: thread.id, threadName: thread.name } })
+  fixture.broadcast({ method: 'project/changed', params: { projectId: project.id, changeType: 'updated' } })
+  assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread, workspacePaths: {} })
+  assert.deepEqual(await read(), { type: 'project', id: project.id, project, workspacePaths: {} })
+  fixture.broadcast({ method: 'thread/deleted', params: { threadId: thread.id } })
+  assert.deepEqual(await read(), { type: 'thread', id: thread.id, thread: null })
+  assert.equal(fixture.messages.some(message => ['thread/list', 'thread/turns/list', 'thread/resume'].includes(message.method)), false)
   await reader.cancel()
 })

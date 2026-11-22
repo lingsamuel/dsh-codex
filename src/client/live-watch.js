@@ -1,11 +1,12 @@
-/** 打开认证后的原生历史 SSE，切换会话时关闭浏览器连接。 */
+/** 打开认证后的 SSE。侧栏的连接独立于当前会话的历史连接。 */
 export function openLiveWatch(threadId, { receive, changeMode }, signal) {
   if (signal.aborted) return
   const url = new URL('api/codex/watch', document.baseURI)
-  url.searchParams.set('threadId', threadId)
+  if (threadId) url.searchParams.set('threadId', threadId)
+  else url.searchParams.set('scope', 'catalog')
   const source = new EventSource(url)
-  source.onopen = () => changeMode('connecting')
-  source.onerror = () => changeMode('disconnected')
+  source.onopen = () => changeMode?.('connecting')
+  source.onerror = () => changeMode?.('disconnected')
   source.onmessage = event => receive(JSON.parse(event.data))
   signal.addEventListener('abort', () => source.close(), { once: true })
 }

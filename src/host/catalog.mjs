@@ -66,14 +66,14 @@ export function createCatalogReader(socketPath, signal, cacheDirectory) {
     return { endpoint, cachePath }
   }
 
-  return async function readCatalog(complete) {
+  return async function readCatalog(complete, freshRequired = false) {
     source ??= openSource().catch(error => {
       source = undefined
       throw error
     })
     const { endpoint, cachePath } = await source
     const fresh = refreshedAt !== null && Date.now() - refreshedAt < 60_000
-    if (snapshot && fresh && (!complete || snapshot.complete)) {
+    if (!freshRequired && snapshot && fresh && (!complete || snapshot.complete)) {
       return snapshot
     }
     // 完整快照过期后仍可显示，只有成功完成刷新才更新目录和会话。

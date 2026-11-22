@@ -1,4 +1,5 @@
 import { openCodexReader } from './app-server.mjs'
+import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail } from './live-history.mjs'
 import { watchNativeUnread } from './unread-watch.mjs'
@@ -6,7 +7,7 @@ import { watchNativeUnread } from './unread-watch.mjs'
 const encoder = new TextEncoder()
 const catalogMethods = new Set([
   'thread/started', 'thread/status/changed', 'thread/readState/changed', 'thread/name/updated', 'thread/project/updated',
-  'thread/archived', 'thread/unarchived', 'thread/deleted', 'project/changed',
+  'thread/archived', 'thread/unarchived', 'thread/deleted', 'thread/section/changed', 'project/changed',
 ])
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
@@ -16,8 +17,10 @@ export function createWatchRoute(socketPath, ownerSignal) {
     methods: ['GET'],
     requestBody: 'buffered',
     async fetch(request) {
-      const threadId = new URL(request.url).searchParams.get('threadId')
-      if (!threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
+      const params = new URL(request.url).searchParams
+      const threadId = params.get('threadId')
+      const catalog = params.get('scope') === 'catalog'
+      if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
       const abort = new AbortController()
       const signal = AbortSignal.any([request.signal, abort.signal, ...(ownerSignal ? [ownerSignal] : [])])
       let cancelled = false
@@ -36,6 +39,8 @@ export function createWatchRoute(socketPath, ownerSignal) {
           let dirty = false
           let tail
           let connection
+          let catalogReady = false
+          let catalogQueue = Promise.resolve()
           const early = []
 
           function wake() {
@@ -61,6 +66,19 @@ export function createWatchRoute(socketPath, ownerSignal) {
           function notify(message) {
             // 只处理通知。账户和服务端交互请求不进入此通道。
             if (message.id !== undefined || !catalogMethods.has(message.method)) return
+            if (catalog) {
+              if (!catalogReady) early.push(message)
+              else catalogQueue = catalogQueue.then(async () => {
+                if (signal.aborted) return
+                const update = await readCatalogEvent(message, connection.request)
+                if (update) send(update)
+              }).catch(error => {
+                // 实体可能在读回前已删除，紧随其后的删除事件仍会同步目录。
+                if (error.code !== -32602) connection.close(error)
+              })
+              return
+            }
+            if (message.params?.threadId !== threadId) return
             if (!tail) early.push(message)
             else send({ type: 'notification', notification: message })
             if (message.params?.threadId === threadId && message.method !== 'thread/readState/changed') wake()
@@ -69,14 +87,26 @@ export function createWatchRoute(socketPath, ownerSignal) {
           async function follow() {
             try {
               connection = await openCodexReader(socketPath, signal, notify)
+              const configRead = connection.request('config/read', { includeLayers: false }).catch(() => null)
+              const sqliteDirectory = config => config?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || connection.initialize.codexHome
+              if (catalog) {
+                const sqliteHome = sqliteDirectory(await configRead)
+                signal.throwIfAborted()
+                catalogReady = true
+                send({ type: 'catalog-ready' })
+                for (const message of early) notify(message)
+                early.length = 0
+                watchNativeUnread(sqliteHome, send, signal)
+                await connection.closed
+                return
+              }
               const [{ thread, readState }, config] = await Promise.all([
                 connection.request('thread/read', { threadId }),
-                connection.request('config/read', { includeLayers: false }).catch(() => null),
+                configRead,
               ])
-              const sqliteHome = config?.config?.sqlite_home || process.env.CODEX_SQLITE_HOME || connection.initialize.codexHome
               const watching = watchNativeHistory({
                 thread,
-                sqliteHome,
+                sqliteHome: sqliteDirectory(config),
               }, wake, signal)
               const page = await connection.request('thread/turns/list', {
                 threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
@@ -85,7 +115,6 @@ export function createWatchRoute(socketPath, ownerSignal) {
               send({ type: 'snapshot', page, status: thread.status, readState, mode: watching ? 'live' : 'history' })
               for (const message of early) send({ type: 'notification', notification: message })
               early.length = 0
-              watchNativeUnread(sqliteHome, send, signal)
               if (dirty) wake()
               await connection.closed
             } catch {
