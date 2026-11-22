@@ -5,6 +5,7 @@ import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText, userInputText } from '../shared/user-input.js'
 import { isComposerImageUrl } from '../shared/composer-images.js'
+import { fileAttachmentOf, splitFileAttachmentInput } from '../shared/file-attachments.js'
 import { createProjectOpener } from './project-actions.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
@@ -31,14 +32,20 @@ function required(value, message) {
   return value
 }
 
-function promptInput(input) {
+function promptInput(input, threadId, resolveFile) {
   if (!Array.isArray(input)) throw badRequest('请输入消息内容。')
   const parts = input.map(part => {
     if (part?.type === 'text' && typeof part.text === 'string') {
+      if (splitFileAttachmentInput(part).some(fileAttachmentOf)) throw badRequest('请使用上传回执提交附件。')
       return { type: 'text', text: part.text, text_elements: part.text_elements ?? [] }
     }
     if (part?.type === 'image' && isComposerImageUrl(part.url)) return { type: 'image', url: part.url }
-    throw badRequest('消息只接受文本和有效的内嵌图片。')
+    if (part?.type === 'file') {
+      const file = resolveFile?.(threadId, part.receiptId)
+      if (file) return file
+      throw badRequest('附件上传回执已失效，请重新添加文件。')
+    }
+    throw badRequest('消息只接受文本、内嵌图片和已上传的文件。')
   })
   if (!parts.some(part => part.type === 'image' || part.text.trim())) throw badRequest('请输入消息内容。')
   return parts
@@ -263,7 +270,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
 export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions,
-  openProject = createProjectOpener(), enablePlan) {
+  openProject = createProjectOpener(), enablePlan, resolveFile) {
   const worktreeStarts = new Map()
   const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
 
@@ -361,7 +368,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           if (mode !== 'queue' && mode !== 'steer') throw badRequest('无效的发送方式。')
           const planMode = fields.planMode
           if (planMode !== undefined && (planMode !== 'plan' || mode !== 'queue' || !enablePlan)) throw badRequest('无效的计划提交。')
-          const parts = promptInput(input)
+          const parts = promptInput(input, threadId, resolveFile)
           required(clientUserMessageId, '缺少消息 ID。')
           const worktree = fields.worktree === undefined ? undefined : validateWorktreeSelection(fields.worktree)
           if (worktree && (mode !== 'queue' || worktree.id !== clientUserMessageId || fields.unarchive === true)) {
@@ -430,7 +437,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
         const run = () => withCodexReader(socketPath, signal, rpc => operation === 'start'
           ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle)
           : queueAction(rpc, threadId, fields))
-        const serial = operation === 'start' || operation === 'steer' || (operation === 'list' && unarchive === true)
+        const serial = operation === 'start' || operation === 'steer' || operation === 'edit' || (operation === 'list' && unarchive === true)
         return json(await (serial ? submit(threadId, run) : run()))
       } catch (error) {
         if (error instanceof CodexRpcError) {

@@ -1,7 +1,6 @@
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
-import { isComposerImageType } from '../../shared/composer-images.js'
 import { commandUnavailable } from './command-action.jsx'
 import { installQueueImages } from './queue-images.jsx'
 
@@ -16,7 +15,7 @@ const copy = {
     commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
     viewQueue: '查看队列', unarchiveAndView: '取消归档并查看', queueEmpty: '没有待发消息。',
     viewQueueDescription: '查看队列需要先取消归档。待发消息继续由你手动启动。', cancel: '取消', close: '关闭',
-    imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
+    filesOnly: '请选择文件。工作区目录可以用 @ 引用。', fileInputUnavailable: '当前无法添加文件。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
     goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
     changingPlan: 'Waiting for Codex to confirm Plan mode…',
@@ -24,7 +23,7 @@ const copy = {
     commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
     viewQueue: 'View queue', unarchiveAndView: 'Unarchive and view', queueEmpty: 'No queued messages.',
     viewQueueDescription: 'Viewing the queue unarchives this session. You can start pending messages manually.', cancel: 'Cancel', close: 'Close',
-    imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
+    filesOnly: 'Choose files. Use @ to reference a workspace folder.', fileInputUnavailable: 'Files cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
 const noGoalDraft = createSnapshotStore(undefined)
@@ -213,13 +212,13 @@ export function installComposer(ctx, catalog) {
         const props = inject(sessionId, ...args)
         if (sessionId === undefined) return props
         return { ...props, goalDraft: sessions.binding(sessionId)?.session.goalDraft, addFiles(files, directories) {
-          if (!sessions.binding(sessionId)) return t('imageInputUnavailable')
-          if (files.some(file => directories?.has(file) || !isComposerImageType(file.type))) return t('imagesOnly')
-          // 原生草稿负责缩略图、移除和编码，提交时才把图片随消息交给 Codex。
+          if (!sessions.binding(sessionId)) return t('fileInputUnavailable')
+          if (directories?.size) return t('filesOnly')
+          // DSH 会暂存普通文件。图片草稿仍由原生组件在提交时编码。
           const drafts = conversation.createDrafts(sessionId, files, false)
           if (props.keyboard.addFiles([], drafts.map(draft => draft.id))) return null
           conversation.releaseDraftAttachments(drafts)
-          return t('imageInputUnavailable')
+          return t('fileInputUnavailable')
         } }
       }
       function Composer(props) {

@@ -227,7 +227,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         const input = (plan === undefined ? content : replaceUserInputText(content, plan)).map(part => {
           if (part.type === 'text') return { type: 'text', text: part.text, text_elements: [] }
           if (part.type === 'image') return { type: 'image', url: `data:${part.mediaType};base64,${part.data}` }
-          throw new Error('当前仅支持发送文本和图片。')
+          if (part.type === 'file') return { type: 'file', receiptId: part.receiptId }
+          throw new Error('消息包含不支持的附件。')
         })
         const { planRevision } = session.getSnapshot()
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,

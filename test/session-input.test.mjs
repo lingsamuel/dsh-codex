@@ -35,6 +35,30 @@ test('直接发送 /plan 正文只投递任务，裸命令只切换模式', asyn
   assert.equal(state.planMode, 'default')
 })
 
+test('普通文件发送只提交原生草稿的上传回执', async t => {
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  const requests = []
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    requests.push([url.pathname, JSON.parse(options.body)])
+    return Response.json({})
+  })
+  const state = { pendingSubmissions: [] }
+  const subscribe = () => () => {}
+  const history = {
+    session: { getSnapshot: () => state }, events: { getSnapshot: () => ({ entries: [] }), subscribe },
+    queueStore: { getSnapshot: () => [], subscribe }, updateState: edit => edit(state),
+  }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history,
+    { getSnapshot: () => undefined, clear() {} })
+  const file = { type: 'file', receiptId: 'uploaded-receipt' }
+  assert.equal((await input.prompt([file], 'queue', undefined, 'request')).ok, true)
+  assert.deepEqual(requests, [['/api/codex/conversation-action', {
+    threadId: 'native', action: 'prompt', mode: 'queue', clientUserMessageId: 'request', input: [file],
+  }]])
+})
+
 test('直接发送完整 /goal 命令走同一个原生目标提交', async t => {
   const requests = []
   const previousDocument = globalThis.document

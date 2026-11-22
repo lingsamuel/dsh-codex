@@ -204,7 +204,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function project(turns, options) {
-    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls, turnWorkingDirectories, goalInputs, goalCompletions, ...options })
+    return projectCodexTurns(turns, { provider: thread.modelProvider, createdAt: thread.createdAt, attachments, cancelledToolCalls,
+      turnWorkingDirectories, goalInputs, goalCompletions, fileThreadId: thread.id, ...options })
   }
 
   async function addOlderPage(page) {
@@ -448,7 +449,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     // 待发缩略图只跟随当前队列，正文的原生图片缓存由历史引用持有。
     queueImages = new Map(images.flat().filter(Boolean))
     inbox.set({ 'next-turn': submissions.map(({ id, input, clientUserMessageId }) => ({ id, role: 'user',
-      source: { kind: 'user', rpcId: clientUserMessageId }, content: projectUserContent(`queue:${id}`, input, queueImages),
+      source: { kind: 'user', rpcId: clientUserMessageId },
+      content: projectUserContent(`queue:${id}`, input, queueImages, { threadId: thread.id, queuedSubmissionId: id }),
     })), 'next-step': [] })
     queueStore.set(submissions)
     publishQuestions()
@@ -664,7 +666,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     // 问答可在轮首投影为问答卡，后续第一个可见的普通气泡仍然属于插话。
     if (!message || input?.seq !== sequence || input?.data.id !== message.id) return
     return { beforeTurnId: source.id, itemId: message.id, text: userInputText(message.content), headTurnId: latestTurnId(),
-      hasAttachments: message.content.some(part => part.type !== 'text') }
+      hasAttachments: input.data.content.some(part => part.type !== 'text') }
   }
 
   const visibleCatalog = catalog?.store

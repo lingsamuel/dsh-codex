@@ -9,11 +9,6 @@ import { searchResultLimit } from '../thread-search.js'
 
 const flatSessionOrderKey = '__flat_session_order__'
 const workspaceSlot = 'sidebar.workspaces'
-const unsupported = '此操作暂未开放，请使用 Codex CLI。'
-
-async function rejectWrite() {
-  throw new Error(unsupported)
-}
 
 // 切换会话会释放历史绑定。输入设置与原生文本草稿一样在返回后可继续使用。
 function sessionDraft(storage, threadId) {
@@ -262,7 +257,6 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
 
   ctx.provide('sessions', sessions)
   ctx.provide('workspaces', workspaces)
-  ctx.provide('fileUpload', { upload: rejectWrite })
   ctx.effect(() => catalog.store.subscribe(syncSessions))
   ctx.effect(() => ctx.slots.subscribe(workspaceSlot, syncManualOrder))
   ctx.inject(['uiWorkspace'], scope => {
