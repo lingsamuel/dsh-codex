@@ -1,6 +1,7 @@
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
+import { isDeepStrictEqual } from 'node:util'
 import { permissionOf } from '../shared/permissions.js'
 
 const statuses = new Set(['pending', 'in_progress', 'completed'])
@@ -8,6 +9,17 @@ const statuses = new Set(['pending', 'in_progress', 'completed'])
 function normalizePlan(value) {
   if (!Array.isArray(value?.plan) || !value.plan.every(step => typeof step?.step === 'string' && statuses.has(step.status))) return
   return value.plan.map(({ step, status }) => ({ content: step, status }))
+}
+
+function displayPermission(recorded, turn) {
+  const permission = recorded?.permission
+  const sandbox = turn?.permission.sandbox
+  // 设置检查点保存完整规则，轮次还保存 Codex 给这些规则的沙箱名称。
+  if (permission?.sandbox === 'managed' && sandbox && sandbox !== 'managed'
+    && recorded.cwd && recorded.cwd === turn.cwd && recorded.profile && isDeepStrictEqual(recorded.profile, turn.profile)) {
+    return { ...permission, sandbox }
+  }
+  return permission
 }
 
 /** 仅消费 Codex 原生 rollout 中已落盘的结构化事实。后续读取从上次字节位置继续。 */
@@ -33,14 +45,19 @@ export function createRolloutFacts(path, signal, threadId) {
     return turns.at(-1)
   }
 
+  function recordPermission(settings) {
+    const permission = permissionOf(settings, 'saved')
+    if (permission) return { sequence: ++permissionSequence, permission, cwd: settings.cwd, profile: settings.permission_profile }
+  }
+
   function consume(text) {
     if (!/task_started|turn_started|thread_rolled_back|plan_update|update_plan|function_call_output|token_count|thread_settings_applied|turn_context/.test(text)) return
     let record
     try { record = JSON.parse(text) } catch { return }
     const value = record.payload
     if (record.type === 'turn_context') {
-      const permission = permissionOf(value, 'saved')
-      if (permission) currentTurn().permission = { sequence: ++permissionSequence, permission }
+      const permission = recordPermission(value)
+      if (permission) currentTurn().permission = permission
       return
     }
     if (record.type === 'event_msg') {
@@ -63,11 +80,11 @@ export function createRolloutFacts(path, signal, threadId) {
       } else if (value?.type === 'thread_settings_applied') {
         settingsChanges++
         if (value.thread_id) followsOwner = value.thread_id === threadId
-        const permission = permissionOf(value.thread_settings, 'saved')
+        const permission = recordPermission(value.thread_settings)
         if (!permission) return
         // 已开始的旧轮次可以晚写上下文。同一线程的完整设置检查点才是随后权限的依据。
         if (followsOwner) ownedPermission = permission
-        if (!value.thread_id) legacyPermission = { sequence: ++permissionSequence, permission }
+        if (!value.thread_id) legacyPermission = permission
       }
       return
     }
@@ -114,7 +131,7 @@ export function createRolloutFacts(path, signal, threadId) {
       const turnPermission = turns.findLast(turn => turn.permission)?.permission
       const latestPermission = (turnPermission?.sequence ?? 0) > (legacyPermission?.sequence ?? 0)
         ? turnPermission : legacyPermission
-      const permission = ownedPermission ?? latestPermission?.permission
+      const permission = displayPermission(ownedPermission ?? latestPermission, turnPermission)
       const facts = {
         todos: turns.findLast(turn => turn.todos !== undefined)?.todos,
         contextPressure: turns.findLast(turn => turn.contextPressure !== undefined)?.contextPressure,

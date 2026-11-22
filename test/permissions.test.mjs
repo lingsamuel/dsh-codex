@@ -90,6 +90,41 @@ test('历史权限优先采用该线程的设置检查点，运行中的旧轮�
   assert.deepEqual((await facts.read()).permission, { profileId: ':workspace', sandbox: 'managed', approvalPolicy: 'on-request', approvalsReviewer: 'auto_review', source: 'saved' })
 })
 
+test('旧式工作区写入沿用规则相同的 Codex 原生沙箱名称', async t => {
+  const { appendFile, writeFile } = await import('node:fs/promises')
+  const { createRolloutFacts } = await import('../src/host/rollout-facts.mjs')
+  const directory = await mkdtemp(join(process.cwd(), '.runtime', 'perm-history-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const path = join(directory, 'history.jsonl')
+  const cwd = '/repo'
+  const profile = {
+    type: 'managed', network: 'restricted', file_system: { type: 'restricted', entries: [
+      { path: { type: 'special', value: { kind: 'root' } }, access: 'read' },
+      { path: { type: 'path', path: cwd }, access: 'write' },
+    ] },
+  }
+  const settings = (permissionProfile, workdir = cwd) => ({ type: 'event_msg', payload: {
+    type: 'thread_settings_applied', thread_id: 'this-thread', thread_settings: {
+      cwd: workdir, permission_profile: permissionProfile, approval_policy: 'on-request', approvals_reviewer: 'user',
+    },
+  } })
+  const turn = { type: 'turn_context', payload: {
+    cwd, permission_profile: profile, sandbox_policy: { type: 'workspace-write' }, approval_policy: 'never',
+  } }
+  const line = row => `${JSON.stringify(row)}\n`
+  await writeFile(path, line(settings(profile)) + line(turn))
+  const facts = createRolloutFacts(path, new AbortController().signal, 'this-thread')
+  assert.deepEqual((await facts.read()).permission, {
+    profileId: null, sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalsReviewer: 'user', source: 'saved',
+  })
+
+  await appendFile(path, line(settings({ ...profile, network: 'enabled' })))
+  assert.equal((await facts.read()).permission.sandbox, 'managed')
+
+  await appendFile(path, line(settings(profile, '/other')))
+  assert.equal((await facts.read()).permission.sandbox, 'managed')
+})
+
 test('首条消息前可设置权限，同时把原生尚未确认的选择单独标记', async () => {
   const { updateThreadPermission } = await import('../src/host/permissions.mjs')
   const { CodexRpcError } = await import('../src/host/app-server.mjs')
