@@ -89,8 +89,7 @@ export function createQuestionBridge(socketPath, ownerSignal) {
     }
     if (method === 'item/tool/requestUserInput') {
       const { questions } = params
-      // DSH 的问答面板会在本地保存答复。要求保密的请求仍可在 Codex CLI 作答。
-      if (Array.isArray(questions) && questions.length && !questions.some(question => question.isSecret)) {
+      if (Array.isArray(questions) && questions.length) {
         publishRequest(state, id, 'questions', params)
       }
       return

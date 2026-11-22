@@ -2,16 +2,22 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { nativeQuestionAnswers, projectNativeQuestions } from '../src/client/native-dsh/native-questions.js'
 
-test('只有可安全显示的 Codex 待答请求进入 DSH 原生问答卡', () => {
+test('普通和保密 Codex 请求都进入 DSH 原生问答卡', () => {
   const options = [{ label: 'Staging', description: 'Use the staging environment' }]
   const result = projectNativeQuestions([
     { itemId: 'public', questions: [{ id: 'env', header: 'Deploy', question: 'Where?', options }] },
     { itemId: 'private', questions: [
       { id: 'host', question: 'Hostname?' }, { id: 'password', question: 'Password?', isSecret: true },
     ] },
+    { itemId: 'empty', questions: [] },
   ])
   assert.deepEqual(result, {
-    active: [{ callId: 'public', state: 'continued', questions: [{ id: 'env', header: 'Deploy', question: 'Where?', options }] }],
+    active: [
+      { callId: 'public', state: 'continued', questions: [{ id: 'env', header: 'Deploy', question: 'Where?', options }] },
+      { callId: 'private', state: 'continued', questions: [
+        { id: 'host', question: 'Hostname?' }, { id: 'password', question: 'Password?' },
+      ] },
+    ],
     settled: [],
   })
 })

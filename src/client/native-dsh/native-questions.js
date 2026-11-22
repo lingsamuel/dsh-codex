@@ -3,13 +3,9 @@ import { answeredAsyncQuestions, asyncQuestionItemId } from '../../shared/questi
 const empty = { active: [], settled: [] }
 const otherLabel = 'None of the above'
 
-export function isBrowserQuestion(request) {
-  return request.questions.length > 0 && request.questions.every(question => !question.isSecret)
-}
-
 /** 仅把 Codex 此刻仍可回答的请求交给 DSH 的原生问答卡。 */
 export function projectNativeQuestions(requests) {
-  const active = requests.filter(isBrowserQuestion).map(({ itemId, questions }) => ({
+  const active = requests.filter(({ questions }) => questions.length > 0).map(({ itemId, questions }) => ({
     callId: itemId,
     // RC2 的远程应答通道从 continued 投影创建卡片。等待文案使用原生请求的实际状态。
     state: 'continued',
