@@ -1,6 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { CodeBlock, MarkdownText, TerminalBlock } from '@deepseek-ai/dsh-client-ui-primitives'
-import { formatTime, mergePages, readPage } from './api.js'
+import {
+  CodeBlock,
+  DisclosureRow,
+  IconCodeOutlineRegular,
+  IconEditOutlineRegular,
+  IconFolderCloseRegular,
+  IconSparkleRegular,
+  IconThinkOutlineRegular,
+  MarkdownText,
+  TerminalBlock,
+} from '@deepseek-ai/dsh-client-ui-primitives'
+import { groupCommands } from './activities.js'
+import { directoryTitle, formatTime, mergePages, readPage } from './api.js'
 
 const copyLabels = { copyLabel: '复制', copiedLabel: '已复制' }
 const markdownLabels = { code: copyLabels, footnotes: '脚注' }
@@ -21,34 +32,47 @@ const terminalLabels = {
   expand: lines => `展开 ${lines} 行`,
 }
 
-function Message({ item }) {
+function Message({ item, startedAt }) {
   return (
-    <div className="dsh-codex-user">
-      {item.content.map((part, index) => {
-        if (part.type === 'text') return <div key={index}>{part.text}</div>
-        if (part.type === 'image' && /^data:image\//i.test(part.url)) {
-          return <img key={index} src={part.url} alt="会话中的图片" loading="lazy" />
-        }
-        return <code key={index}>{part.path || part.name || (part.type === 'image' ? '图片附件' : part.type)}</code>
-      })}
+    <div className="dsh-codex-user-row">
+      <div className="dsh-codex-user">
+        {item.content.map((part, index) => {
+          if (part.type === 'text') return <div key={index}>{part.text}</div>
+          if (part.type === 'image' && /^data:image\//i.test(part.url)) {
+            return <img key={index} src={part.url} alt="会话中的图片" loading="lazy" />
+          }
+          return <code key={index}>{part.path || part.name || (part.type === 'image' ? '图片附件' : part.type)}</code>
+        })}
+      </div>
+      {Number.isFinite(startedAt) && <time>{formatTime(startedAt)}</time>}
     </div>
   )
 }
 
-function RawItem({ item }) {
+function Activity({ title, icon = <IconCodeOutlineRegular />, summary, children }) {
   const [open, setOpen] = useState(false)
   return (
-    <details className="dsh-codex-event" onToggle={event => setOpen(event.currentTarget.open)}>
-      <summary>{item.type}</summary>
-      {open && <pre>{JSON.stringify(item, null, 2)}</pre>}
-    </details>
+    <DisclosureRow className="dsh-codex-event" {...{ title, icon, open }}
+      expandable expandOnRowClick onToggle={() => setOpen(value => !value)}
+      collapsedContent={summary && <span className="dsh-codex-event-summary">{summary}</span>}>
+      {open && <div className="dsh-codex-event-content">{children()}</div>}
+    </DisclosureRow>
   )
 }
 
-function Item({ item }) {
+function Command({ item }) {
+  return (
+    <Activity title="运行命令" summary={item.command}>
+      {() => <TerminalBlock command={item.command} cwd={item.cwd} output={item.aggregatedOutput}
+        exitCode={item.exitCode} running={item.status === 'inProgress'} labels={terminalLabels} />}
+    </Activity>
+  )
+}
+
+function Item({ item, startedAt }) {
   switch (item.type) {
     case 'userMessage':
-      return <Message item={item} />
+      return <Message {...{ item, startedAt }} />
     case 'agentMessage':
     case 'plan':
       return (
@@ -56,43 +80,71 @@ function Item({ item }) {
           <MarkdownText text={item.text} labels={markdownLabels} codeLabels={copyLabels} omitHtml />
         </div>
       )
-    case 'commandExecution':
-      return (
-        <details className="dsh-codex-event">
-          <summary><code>{item.command}</code></summary>
-          <TerminalBlock command={item.command} cwd={item.cwd} output={item.aggregatedOutput}
-            exitCode={item.exitCode} running={item.status === 'inProgress'} labels={terminalLabels} />
-        </details>
-      )
     case 'fileChange':
       return (
-        <details className="dsh-codex-event">
-          <summary>文件变更 · {item.changes.length}</summary>
-          {item.changes.map((change, index) => (
+        <Activity title="文件变更" icon={<IconEditOutlineRegular />}
+          summary={item.changes.map(change => directoryTitle(change.path)).join('、')}>
+          {() => item.changes.map((change, index) => (
             <div className="dsh-codex-change" key={index}>
               <code>{change.path}</code>
               {change.diff && <CodeBlock code={change.diff} lang="diff" {...copyLabels} />}
             </div>
           ))}
-        </details>
+        </Activity>
       )
     case 'reasoning':
       return item.summary?.length ? (
-        <details className="dsh-codex-event">
-          <summary>推理摘要</summary>
-          <MarkdownText text={item.summary.join('\n\n')} labels={markdownLabels} codeLabels={copyLabels} omitHtml />
-        </details>
+        <Activity title="推理摘要" icon={<IconThinkOutlineRegular />} summary={item.summary[0]}>
+          {() => <MarkdownText text={item.summary.join('\n\n')} labels={markdownLabels} codeLabels={copyLabels} omitHtml />}
+        </Activity>
       ) : null
     case 'webSearch':
       return <p className="dsh-codex-muted">网页搜索 · {item.query}</p>
     default:
-      return <RawItem item={item} />
+      return <Activity title={item.type === 'mcpToolCall' ? '已调用工具' : item.type}
+        icon={<IconSparkleRegular />} summary={item.tool}>
+        {() => <pre>{JSON.stringify(item, null, 2)}</pre>}
+      </Activity>
   }
 }
 
-const turnStatus = { failed: '失败', interrupted: '已中断', inProgress: '进行中' }
+const turnStatus = { completed: '已完成', failed: '失败', interrupted: '已中断', inProgress: '进行中' }
 
-export function Transcript({ thread, title, onBack }) {
+function Turn({ turn }) {
+  const firstUserId = turn.items.find(item => item.type === 'userMessage')?.id
+  const content = groupCommands(turn.items)
+  const answerIndex = content.findIndex(([item]) => item.type !== 'userMessage')
+  const status = turnStatus[turn.status]
+  const duration = Number.isFinite(turn.durationMs) ? `，用时 ${Math.round(turn.durationMs / 1000)} 秒` : ''
+  const showStatus = status && (turn.status !== 'completed' || duration)
+
+  return (
+    <section className="dsh-codex-turn">
+      {content.map((items, index) => {
+        const item = items[0]
+        let row
+        if (item.type !== 'commandExecution') {
+          row = <Item item={item} startedAt={item.id === firstUserId ? turn.startedAt : undefined} />
+        } else if (items.length === 1) {
+          row = <Command item={item} />
+        } else {
+          row = <Activity title={`执行了 ${items.length} 条命令`}>
+            {() => items.map(command => <Command key={command.id} item={command} />)}
+          </Activity>
+        }
+        return (
+          <div key={item.id}>
+            {index === answerIndex && showStatus && <div className="dsh-codex-turn-status">{status}{duration}</div>}
+            {row}
+          </div>
+        )
+      })}
+      {turn.error?.message && <p className="dsh-codex-error">{turn.error.message}</p>}
+    </section>
+  )
+}
+
+export function Transcript({ thread, title }) {
   const [turns, setTurns] = useState([])
   const [nextCursor, setNextCursor] = useState(null)
   const [busy, setBusy] = useState(true)
@@ -134,11 +186,11 @@ export function Transcript({ thread, title, onBack }) {
   return (
     <>
       <header className="dsh-codex-header">
-        <button className="dsh-codex-back" type="button" onClick={onBack} aria-label="返回会话列表">‹</button>
-        <div>
-          <h1 title={title}>{title}</h1>
-          {thread.cwd && <p className="dsh-codex-path" title={thread.cwd}>{thread.cwd}</p>}
-        </div>
+        <h1 title={title}>{title}</h1>
+        {thread.cwd && <span className="dsh-codex-path" title={thread.cwd}>
+          <IconFolderCloseRegular />
+          <span>{directoryTitle(thread.cwd)}</span>
+        </span>}
       </header>
       <div className="dsh-codex-viewport" ref={viewport}>
         <div className="dsh-codex-transcript">
@@ -146,16 +198,7 @@ export function Transcript({ thread, title, onBack }) {
           {error && <p className="dsh-codex-error" role="alert">{error}</p>}
           {busy && turns.length === 0 && <p className="dsh-codex-muted" role="status">正在载入历史…</p>}
           {!busy && !error && turns.length === 0 && <p className="dsh-codex-muted">暂无历史消息</p>}
-          {turns.map(turn => (
-            <section className="dsh-codex-turn" key={turn.id}>
-              <div className="dsh-codex-meta">
-                {turn.startedAt != null && <time>{formatTime(turn.startedAt)}</time>}
-                {turnStatus[turn.status] && <span>{turnStatus[turn.status]}</span>}
-              </div>
-              {turn.items.map(item => <Item key={item.id} item={item} />)}
-              {turn.error?.message && <p className="dsh-codex-error">{turn.error.message}</p>}
-            </section>
-          ))}
+          {turns.map(turn => <Turn key={turn.id} turn={turn} />)}
         </div>
       </div>
     </>

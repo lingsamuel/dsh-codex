@@ -18,3 +18,7 @@ export function formatTime(seconds) {
     ? new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(seconds * 1000)
     : null
 }
+
+export function directoryTitle(directory) {
+  return directory.split(/[/\\]/).filter(Boolean).at(-1) || directory
+}
