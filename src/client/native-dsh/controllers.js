@@ -66,7 +66,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
 }
 
 /** 为 DSH 提供 Codex 会话与工作区控制器。选择与保留引用都留在当前页面。 */
-export function provideCodexControllers(ctx, catalog) {
+export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   const projected = observe(catalog.store, projectCatalog)
   const list = createSnapshotStore({ ...projected.getSnapshot().sessions, phase: 'pending' })
   let initialization = 'waiting'
@@ -199,13 +199,20 @@ export function provideCodexControllers(ctx, catalog) {
       return thread.id
     },
     async fork({ sessionId: threadId, atSeq, onCreated }) {
-      const lastTurnId = atSeq === undefined ? undefined : sessions.binding(threadId)?.session.turnAtEnd(atSeq)
-      if (atSeq !== undefined && !lastTurnId) throw new Error('找不到可分支的 Codex 轮次。')
-      const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'fork', lastTurnId })
-      // DSH 的回复分支会立即打开新会话，必须先让保留引用能从原生目录找到它。
-      catalog.acceptThread(thread, workspacePaths, true)
-      onCreated?.(thread.id)
-      return thread.id
+      const archived = workspaces.list.getSnapshot().archivedSessionIds.includes(threadId)
+      const perform = async () => {
+        const lastTurnId = atSeq === undefined ? undefined : sessions.binding(threadId)?.session.turnAtEnd(atSeq)
+        if (atSeq !== undefined && !lastTurnId) throw new Error('找不到可分支的 Codex 轮次。')
+        const { thread, workspacePaths } = await writeThreadAction({ threadId, action: 'fork', lastTurnId,
+          ...(archived && { unarchive: true }) })
+        // DSH 的回复分支会立即打开新会话，必须先让保留引用能从原生目录找到它。
+        catalog.acceptThread(thread, workspacePaths, true)
+        onCreated?.(thread.id)
+        // 仅显示归档时侧栏会滤掉新分支，归档菜单分叉也直接打开结果。
+        if (archived && atSeq === undefined) navigation?.openSession(thread.id)
+        return thread.id
+      }
+      return withForkFeedback ? withForkFeedback(archived, perform) : perform()
     },
     async using(target, options, operation) {
       const reference = sessions.retain(target, options)

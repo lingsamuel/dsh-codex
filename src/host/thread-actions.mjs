@@ -1,5 +1,5 @@
 import { pinnedSectionId } from '../shared/thread-sections.js'
-import { CodexRpcError, readCodex, withCodexReader } from './app-server.mjs'
+import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { updateModelSelection } from './models.mjs'
 import { submissionRuntime, validateSubmissionSettings } from './conversation-actions.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
@@ -147,8 +147,16 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
           })
           return await (modifiesHistory ? submit(threadId, run) : run())
         }
-        const run = () => readCodex(method, params, socketPath, signal)
-        const result = await (action === 'rename' ? submit(threadId, run) : run())
+        const restoreForFork = action === 'fork' && input.unarchive === true
+        const run = () => withCodexReader(socketPath, signal, async request => {
+          if (restoreForFork) {
+            const { thread } = await request('thread/read', { threadId })
+            await unarchiveForSubmission(request, thread)
+          }
+          // 分叉只需要可读取的原生历史。源线程不需要恢复运行时。
+          return request(method, params)
+        })
+        const result = await (action === 'rename' || restoreForFork ? submit(threadId, run) : run())
         if (action === 'fork' || action === 'unarchive') {
           return json({ ...result, workspacePaths: await resolveWorkspacePaths([result.thread.cwd]) })
         }

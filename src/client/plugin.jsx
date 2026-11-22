@@ -5,6 +5,7 @@ import { installMessageSearch } from './native-dsh/message-search.jsx'
 import { installArchiveView } from './native-dsh/archive-view.jsx'
 import { installTurnChanges } from './native-dsh/turn-changes.jsx'
 import { installTurnFork } from './native-dsh/turn-fork.jsx'
+import { installForkFeedback } from './native-dsh/fork-feedback.jsx'
 import { installTurnRevert } from './native-dsh/turn-revert.jsx'
 import { installMessageEdit } from './native-dsh/message-edit.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
@@ -35,7 +36,7 @@ export function apply(ctx) {
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
-  const deleteSession = provideCodexControllers(ctx, catalog)
+  const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installProjectWorkspaces(ctx, catalog.search)
   installFileReferences(ctx)
   installCodexSkills(ctx)

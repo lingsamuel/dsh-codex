@@ -1179,6 +1179,38 @@ test('会话生命周期使用原生归档、删除和按轮次分支', async t 
   ])
 })
 
+test('已归档源会话收到明确确认后才取消归档，并直接使用原生分叉', async t => {
+  const source = { id: 'archived-source', cwd: '/mock', status: { type: 'notLoaded' } }
+  const branch = { id: 'forked-thread', cwd: source.cwd, forkedFromId: source.id }
+  let archived = true
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: source } }),
+    'thread/list': ({ archived: filter, includedThreadIds }) => ({ result: {
+      data: filter && archived && includedThreadIds.includes(source.id) ? [source] : [],
+    } }),
+    'thread/unarchive': () => { archived = false; return { result: { thread: source } } },
+    'thread/fork': () => archived ? { error: { code: -32600, message: 'source is archived' } } : { result: { thread: branch } },
+  })
+  const fork = unarchive => get('/api/codex/thread-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+      threadId: source.id, action: 'fork', lastTurnId: 'selected-turn', ...(unarchive && { unarchive: true }),
+    }),
+  })
+  const refused = await fork(false)
+  assert.equal(refused.status, 400)
+  assert.equal((await refused.json()).error, 'source is archived')
+  assert.equal(archived, true)
+  const result = await fork(true)
+  assert.equal(result.status, 200)
+  assert.deepEqual((await result.json()).thread, branch)
+  assert.equal(archived, false)
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
+    ['thread/fork', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/fork'])
+  assert.deepEqual(messages.at(-1).params, {
+    threadId: source.id, lastTurnId: 'selected-turn', excludeTurns: true, deferGoalContinuation: true,
+  })
+})
+
 test('回退检查原生线程状态，并以所选轮次为排除边界', async t => {
   const thread = { id: 'source', status: { type: 'active' }, historyMode: 'paginated' }
   let queued = [{ id: 'queued' }]
