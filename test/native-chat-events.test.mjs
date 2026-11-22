@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { codexTurnChanges } from '../src/client/native-chat/turn-changes.js'
+import { visualizeFence } from '../src/client/native-chat/visualize.js'
 
 test('轮次改动按原生路径归组，保留同一文件的多次变更并排除拒绝项', () => {
   function edit(id, status, path, diff) {
@@ -179,4 +180,28 @@ test('uses known dates for older records and preserves failed, interrupted and s
   assert.equal(types(entries, 'tool/call')[0].data.name, 'nativeTool')
   assert.equal(types(entries, 'tool/result').length, 0)
   assert.equal(entries.at(-1).event.type, 'tool/call')
+})
+
+test('在助手正文原位投影 Visualize，原样保留用户输入和代码中的引用', () => {
+  const moon = 'visualize{"path":"/work/moon phases.html"}'
+  const wide = 'visualize{"path":"/work/compare.html","mode":"wide","title":"比较"}'
+  const invalid = 'visualize{"path":"relative.html"}'
+  const examples = ['```codex-visualize', moon, '```', '', `    ${wide}`, '', '`code', moon, 'example`', '', '<!--', wide, '-->'].join('\n')
+  const input = [
+    { id: 'user', type: 'userMessage', content: [{ type: 'text', text: moon }] },
+    { id: 'assistant', type: 'agentMessage', text: `说明\n${moon}\n中间\n${wide}\n\n${examples}\n\n${invalid}` },
+  ]
+  const entries = projectCodexTurns([turn('visualize', input)])
+  assert.equal(types(entries, 'user/message')[0].data.content[0].text, moon)
+  assert.equal(types(entries, 'assistant/message')[0].data.message.content[0].text,
+    `说明\n\n\`\`\`${visualizeFence}\n${moon}\n\`\`\`\n\n中间\n\n\`\`\`${visualizeFence}\n${wide}\n\`\`\`\n\n${examples}\n\n${invalid}`)
+})
+
+test('识别紧跟 Markdown 引用段落或列表的独立 Visualize 行', () => {
+  const reference = 'visualize{"path":"/work/example.html"}'
+  for (const paragraph of ['> 摘要', '- 摘要']) {
+    const entries = projectCodexTurns([turn('visualize', [{ id: 'reply', type: 'agentMessage', text: `${paragraph}\n${reference}` }])])
+    assert.equal(types(entries, 'assistant/message')[0].data.message.content[0].text,
+      `${paragraph}\n\n\`\`\`${visualizeFence}\n${reference}\n\`\`\``)
+  }
 })

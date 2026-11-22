@@ -1,6 +1,7 @@
 import { inlineAttachmentId } from './attachments.js'
 import { projectQuestionReply, projectTool } from './tools.js'
 import { projectFileLinks } from './file-links.js'
+import { projectVisualizeReferences } from './visualize.js'
 import { questionReplies } from '../../shared/question-replies.js'
 
 // 最新页从固定位置向前分配序号，为后续向前分页留下空间，已发布序号无需重排。
@@ -34,7 +35,8 @@ function assistantBlock(item) {
     const text = item.summary?.join('\n\n')
     return text?.trim() ? { type: 'reasoning', text } : undefined
   }
-  const text = item.text?.trim() ? projectFileLinks(item.text) : undefined
+  const body = item.type === 'agentMessage' && item.text ? projectVisualizeReferences(item.text) : item.text
+  const text = body?.trim() ? projectFileLinks(body) : undefined
   const questions = item.type === 'agentMessage' && item.questions?.length ? questionMarkdown(item.questions) : undefined
   if (!questions) return text && textBlock(text)
   return textBlock(text ? `${text}\n\n${questions}` : questions)

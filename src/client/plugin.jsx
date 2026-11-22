@@ -13,6 +13,7 @@ import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 import { installContinueSession } from './native-dsh/continue-session.jsx'
 import { installCodexQuestions } from './native-dsh/question-ui.jsx'
+import { installVisualizePreview } from './native-dsh/visualize-preview.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -30,6 +31,7 @@ export function apply(ctx) {
   installMessageSearch(ctx)
   installArchiveView(ctx, deleteSession)
   installTurnChanges(ctx)
+  installVisualizePreview(ctx)
   installTurnFork(ctx)
   installTurnRevert(ctx)
   installMessageEdit(ctx)

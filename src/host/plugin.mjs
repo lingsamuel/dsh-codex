@@ -1,5 +1,6 @@
 import { createHistoryRoutes } from './history.mjs'
 import { readCodex } from './app-server.mjs'
+import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs'
 
 export const name = 'dsh-chatgpt'
 export const inject = ['connection', 'loader']
@@ -19,6 +20,17 @@ export async function apply(ctx) {
   for (const route of createHistoryRoutes(undefined, owner.signal, process.env.DSH_CHATGPT_CACHE_DIR)) {
     ctx.effect(() => ctx.connection.fetch.register(route))
   }
+  ctx.inject(['workspaceFiles', 'typert'], scope => {
+    const preview = createVisualizeRoute(async (threadId, path, signal) => {
+      const files = await scope.typert.lookups.get('workspaceFileScope')?.resolve(threadId)
+      if (!files) throw new Error('找不到 Visualize 引用的工作区。')
+      const { data } = await scope.workspaceFiles.readBytes(files, path, {
+        range: { offset: 0, length: visualizeMaxBytes + 1 },
+      }, signal)
+      return data
+    })
+    scope.effect(() => scope.connection.fetch.register(preview))
+  })
   // 仅复用 DSH 的目录选择入口。工作区列表和持久化仍由 Codex 提供。
   const { DirectoryPickerController } = await ctx.loader.import('@deepseek-ai/dsh-api-workspace-controller')
   ctx.plugin(DirectoryPickerController)
