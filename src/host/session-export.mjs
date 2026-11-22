@@ -2,6 +2,19 @@ import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs
 import { readThreadTurns } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
 
+async function readExportTurns(rpc, thread) {
+  const threadId = thread.id
+  const legacy = thread.historyMode === 'legacy'
+  if (!legacy || thread.status?.type !== 'active') {
+    const turns = await readCodexPages(cursor => readThreadTurns(rpc, {
+      threadId, sortDirection: 'desc', itemsView: 'full', limit: 25, ...(cursor && { cursor }),
+    }))
+    if (!legacy || turns[0]?.status !== 'inProgress') return turns.reverse()
+  }
+  // 旧会话分页会叠加内存中的当前轮次，完整读取则取已写入的 rollout。
+  return (await rpc('thread/read', { threadId, includeTurns: true })).thread.turns
+}
+
 /** 从当前历史头倒序读取全部原生分页，导出时保留会话的加载与归档状态。 */
 export function createSessionExportRoute(socketPath, ownerSignal, renderMarkdown) {
   return {
@@ -16,13 +29,11 @@ export function createSessionExportRoute(socketPath, ownerSignal, renderMarkdown
         const markdown = await withCodexReader(socketPath, signal, async rpc => {
           const { thread } = await rpc('thread/read', { threadId })
           const [turns, facts] = await Promise.all([
-            readCodexPages(cursor => readThreadTurns(rpc, {
-              threadId, sortDirection: 'desc', itemsView: 'full', limit: 25, ...(cursor && { cursor }),
-            })),
+            readExportTurns(rpc, thread),
             createRolloutFacts(thread.path, signal, threadId)?.read(),
           ])
           signal.throwIfAborted()
-          return renderMarkdown(thread, turns.reverse(), facts?.cancelledToolCalls)
+          return renderMarkdown(thread, turns, facts?.cancelledToolCalls)
         }, 90_000)
         return new Response(markdown, {
           headers: { 'Content-Type': 'text/markdown; charset=utf-8', 'Cache-Control': 'no-store' },

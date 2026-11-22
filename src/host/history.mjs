@@ -16,6 +16,10 @@ import { createThreadSubmissionQueue, isArchived } from './thread-runtime.mjs'
 import { createBackgroundTerminalMonitor, readBackgroundTerminals } from './background-terminals.mjs'
 import { createCommandActionRoute, readPlanModes } from './command-actions.mjs'
 import { planModeOf } from '../shared/plan-mode.js'
+import { createSkillsRoute } from './skills.mjs'
+import { createCodexPluginRoutes } from './codex-plugins.mjs'
+import { createCodexMcpRoutes } from './codex-mcp.mjs'
+import { createWorktreeRoutes } from './worktree-actions.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -83,6 +87,10 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const native = (method, parameters) => (query, signal) => readCodex(method, parameters(query), socketPath, signal)
 
   return [
+    createSkillsRoute(socketPath, ownerSignal),
+    ...createCodexPluginRoutes(socketPath, ownerSignal),
+    ...createCodexMcpRoutes(socketPath, ownerSignal),
+    ...createWorktreeRoutes(socketPath, ownerSignal, submit),
     createProjectActionRoute(socketPath, ownerSignal),
     permissions.catalogRoute,
     permissions.actionRoute,
@@ -91,6 +99,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     createConversationActionRoute(socketPath, ownerSignal, submit, permissions),
     questions.route,
     questions.approvalRoute,
+    questions.mcpRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit),
     createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),

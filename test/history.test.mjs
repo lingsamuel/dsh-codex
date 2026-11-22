@@ -107,6 +107,28 @@ test('Markdown 导出用原生分页读取归档会话的全部已保存内容',
     [undefined, 'older-page'])
 })
 
+test('Markdown 导出运行中的旧会话只读取已保存的 rollout 轮次', async t => {
+  const legacy = { id: 'legacy-active', historyMode: 'legacy', status: { type: 'active' } }
+  const saved = { id: 'saved', status: 'inProgress', items: [{ id: 'reply', type: 'agentMessage', text: '已写入的片段' }] }
+  const { socketPath, messages } = await fakeCodex(t, {
+    'thread/read': ({ includeTurns }) => ({ result: { thread: { ...legacy, turns: includeTurns ? [saved] : [] } } }),
+    'thread/turns/list': () => ({ result: { data: [{ ...saved, items: [{ ...saved.items[0], text: '尚未落盘的片段' }] }] } }),
+  })
+  const { createSessionExportRoute } = await import('../src/host/session-export.mjs')
+  const route = createSessionExportRoute(socketPath, undefined, (_, turns) => turns[0].items[0].text)
+  const response = await route.fetch(new Request('http://localhost/api/codex/session-export?threadId=legacy-active'))
+  assert.equal(response.status, 200)
+  assert.equal(await response.text(), '已写入的片段')
+  assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method, params }) => [method, params.includeTurns]),
+    [['thread/read', undefined], ['thread/read', true]])
+
+  // Native CLI may launch another turn between the summary and the first history page.
+  legacy.status.type = 'idle'
+  const changed = await route.fetch(new Request('http://localhost/api/codex/session-export?threadId=legacy-active'))
+  assert.equal(changed.status, 200)
+  assert.equal(await changed.text(), '已写入的片段')
+})
+
 test('网页命令仅在冷会话队列为空时恢复并压缩上下文', async t => {
   const thread = { id: 'main', status: { type: 'notLoaded' } }
   let queued = [{ id: 'later' }]

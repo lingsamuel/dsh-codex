@@ -79,6 +79,9 @@ test('在首次提交时以所选 Git 分支启动原生工作树会话；失败
       return { thread }
     },
     'thread/read': ({ threadId }) => ({ thread: threads.get(threadId) }),
+    'skills/list': ({ cwds }) => ({ data: [{ cwd: cwds[0], skills: [
+      { name: 'repo-skill', path: join(cwds[0], 'SKILL.md'), enabled: true },
+    ] }] }),
     'thread/queue/list': () => ({ data: [] }),
     'thread/turns/list': () => ({ error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }),
     'thread/queue/add': () => ++queueAttempts === 1 ? { error: { code: -32602, message: 'fixture transient failure' } }
@@ -92,7 +95,7 @@ test('在首次提交时以所选 Git 分支启动原生工作树会话；失败
   assert.equal(calls.length, 0)
 
   const id = randomUUID()
-  const fields = { action: 'prompt', mode: 'queue', input: [{ type: 'text', text: 'Start in Git' }],
+  const fields = { action: 'prompt', mode: 'queue', input: [{ type: 'text', text: '$repo-skill Start in Git' }],
     threadId: 'draft', clientUserMessageId: id, worktree: { kind: 'new', id, baseRef: 'refs/heads/alternate' } }
   assert.equal((await post(conversation, { ...fields, input: [] })).status, 400)
   assert.equal((await (await lookup(list, repo)).json()).worktrees.length, 1)
@@ -106,6 +109,9 @@ test('在首次提交时以所选 Git 分支启动原生工作树会话；失败
   }
   assert.equal(calls.filter(call => call.method === 'thread/start').length, 1)
   assert.equal(calls.filter(call => call.method === 'thread/queue/add').length, 2)
+  for (const { params } of calls.filter(call => call.method === 'thread/queue/add')) {
+    assert.deepEqual(params.input.at(-1), { type: 'skill', name: 'repo-skill', path: join(nativeCwd, 'SKILL.md') })
+  }
   assert.equal(editedFile, 'selected base\n')
   assert.equal(await readFile(join(repo, 'tracked.txt'), 'utf8'), 'local edits\n')
   assert.equal(await readFile(join(repo, 'private.txt'), 'utf8'), 'local private data\n')

@@ -19,6 +19,10 @@ import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
+import { installCodexSkills } from './native-dsh/skills.js'
+import { installCodexCapabilities } from './native-dsh/codex-capabilities.jsx'
+import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
+import { installWorktrees } from './native-dsh/worktree.jsx'
 
 export const inject = ['slots', 'locale']
 
@@ -32,9 +36,13 @@ export function apply(ctx) {
   const deleteSession = provideCodexControllers(ctx, catalog)
   installProjectWorkspaces(ctx, catalog.search)
   installFileReferences(ctx)
+  installCodexSkills(ctx)
+  installCodexCapabilities(ctx)
+  installWorktrees(ctx, catalog)
   installPermissions(ctx, catalog.store, controller.signal)
   installCodexQuestions(ctx)
   installCodexApprovals(ctx)
+  installCodexMcpInteractions(ctx)
   installLiveStatus(ctx, catalog.store)
   installMessageSearch(ctx)
   installArchiveView(ctx, deleteSession)
