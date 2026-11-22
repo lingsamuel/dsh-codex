@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   Button,
   CodeBlock,
@@ -12,7 +12,7 @@ import {
   MarkdownText,
   TerminalBlock,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import { groupCommands } from './activities.js'
+import { groupVisibleItems } from './activities.js'
 import { directoryTitle, formatTime, mergePages, readPage } from './api.js'
 import { toDiffHunks } from './file-change.js'
 
@@ -113,11 +113,11 @@ function Item({ item, startedAt }) {
         </Activity>
       )
     case 'reasoning':
-      return item.summary?.length ? (
+      return (
         <Activity title="推理摘要" icon={<IconThinkOutlineRegular />} summary={item.summary[0]}>
           {() => <MarkdownText text={item.summary.join('\n\n')} labels={markdownLabels} codeLabels={copyLabels} omitHtml />}
         </Activity>
-      ) : null
+      )
     case 'webSearch':
       return <p className="dsh-codex-muted">网页搜索 · {item.query}</p>
     default:
@@ -132,11 +132,14 @@ const turnStatus = { completed: '已完成', failed: '失败', interrupted: '已
 
 function Turn({ turn }) {
   const firstUserId = turn.items.find(item => item.type === 'userMessage')?.id
-  const content = groupCommands(turn.items)
+  const content = groupVisibleItems(turn.items)
   const answerIndex = content.findIndex(([item]) => item.type !== 'userMessage')
   const status = turnStatus[turn.status]
   const duration = Number.isFinite(turn.durationMs) ? `，用时 ${Math.round(turn.durationMs / 1000)} 秒` : ''
   const showStatus = status && (turn.status !== 'completed' || duration)
+  const statusRow = showStatus ? <div className="dsh-codex-turn-status">{status}{duration}</div> : null
+  const error = turn.error?.message
+  if (!content.length && !statusRow && !error) return null
 
   return (
     <section className="dsh-codex-turn">
@@ -153,13 +156,14 @@ function Turn({ turn }) {
           </Activity>
         }
         return (
-          <div key={item.id}>
-            {index === answerIndex && showStatus && <div className="dsh-codex-turn-status">{status}{duration}</div>}
+          <Fragment key={item.id}>
+            {index === answerIndex && statusRow}
             {row}
-          </div>
+          </Fragment>
         )
       })}
-      {turn.error?.message && <p className="dsh-codex-error">{turn.error.message}</p>}
+      {answerIndex < 0 && statusRow}
+      {error && <p className="dsh-codex-error">{error}</p>}
     </section>
   )
 }
