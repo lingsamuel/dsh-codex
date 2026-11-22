@@ -389,7 +389,8 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     rebuildWindow = true
   }
 
-  function clearHistory() {
+  function clearHistory(cursor) {
+    nextCursor = cursor
     clearOlder()
     for (const { id } of rows) forgetTurn(id)
     rows.length = 0
@@ -400,7 +401,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (!opened || replace) {
       const images = await readInlineCodexAttachments(page.data, lifetime)
       lifetime.throwIfAborted()
-      if (replace) clearHistory()
+      if (replace) clearHistory(page.nextCursor)
       const entries = addOlderPage(page, images)
       if (entries.length) rebuildWindow = true
       opened = true
@@ -419,8 +420,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       const anchor = recent.length ? rows.findIndex(row => row.id === recent[start]?.id) : 0
       if (anchor < 0) {
         // 断线期间整个已加载窗口可能被回退。游标已找不到交集时从实际快照重建。
-        clearHistory()
-        nextCursor = cursor
+        clearHistory(cursor)
       } else {
         // 最新快照可能来自 CLI 回退。只移除刷新窗口中的失效轮次，保留其前面的已加载历史。
         const currentIds = new Set(refreshed.map(turn => turn.id))
@@ -645,7 +645,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   function clearOlder(status = 'idle') {
+    const request = olderRequest
     olderRequest = undefined
+    // 历史窗口可以在会话仍被查看时失效，旧页请求也随窗口结束。
+    request?.controller.abort()
     if (state.getSnapshot().historyLoadStatus !== status) setHistoryLoadStatus(status)
   }
 
@@ -663,8 +666,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (!nextCursor) return
     if (!olderRequest) {
       const cursor = nextCursor
-      const lifetime = AbortSignal.any([signal, historyView.signal])
-      const request = { cursor, lifetime }
+      const requestController = new AbortController()
+      const lifetime = AbortSignal.any([signal, historyView.signal, requestController.signal])
+      const request = { cursor, lifetime, controller: requestController }
       olderRequest = request
       request.promise = Promise.resolve().then(async () => {
         try {
