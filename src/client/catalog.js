@@ -8,10 +8,19 @@ import { searchCodexThreads } from './thread-search.js'
 function applyChanges(entries, changes) {
   const byId = new Map(entries.map(entry => [entry.id, entry]))
   for (const [id, entry] of changes) {
-    if (entry) byId.set(id, entry)
+    if (entry) {
+      // 项目归属或改名通知可能先于归档清单。只有显式归档状态才覆盖清单里的状态。
+      const archived = byId.get(id)?.archived
+      byId.set(id, entry.archived === undefined && archived !== undefined ? { ...entry, archived } : entry)
+    }
     else byId.delete(id)
   }
   return [...byId.values()]
+}
+
+function mergeArchiveCatalog(threads, archived) {
+  const ids = new Set(archived.map(thread => thread.id))
+  return mergePages(threads.filter(thread => !thread.archived && !ids.has(thread.id)), archived)
 }
 
 function withThreadStatus(thread, status, blank = thread.blank) {
@@ -84,7 +93,7 @@ export function createHistoryCatalog(signal) {
   function publish({ projects, threads, workspacePaths }) {
     store.update(state => {
       state.projects = liveProjects ?? projects
-      const merged = applyChanges(mergePages(threads, [...archivedThreads, ...searchThreads.values()]), threadChanges)
+      const merged = applyChanges(mergePages(mergeArchiveCatalog(threads, archivedThreads), searchThreads.values()), threadChanges)
       state.threads = merged.map(thread => observedStatuses.has(thread.id)
         ? withThreadStatus(thread, observedStatuses.get(thread.id))
         : thread)
@@ -122,7 +131,7 @@ export function createHistoryCatalog(signal) {
       archivedThreads = threads
       Object.assign(changedPaths, workspacePaths)
       store.update(state => {
-        state.threads = applyChanges(mergePages(state.threads.filter(thread => !thread.archived), threads), threadChanges)
+        state.threads = applyChanges(mergeArchiveCatalog(state.threads, threads), threadChanges)
         recordNewThreads(state, threads)
         for (const { id, readState } of threads) {
           if (readState && !state.readStates[id]) state.readStates[id] = readState
@@ -262,9 +271,23 @@ export function createHistoryCatalog(signal) {
     },
     async updateProject(action) {
       const previous = store.getSnapshot().projects
-      const snapshot = await writeProjectAction(action, signal)
+      const { projectId, moved = [], failed = [], ...snapshot } = await writeProjectAction(action, signal)
       // 广播可能已应用更近的原生列表。操作回读只补齐尚未观察到的更新。
       if (store.getSnapshot().projects === previous) receive({ type: 'projects', ...snapshot })
+      if (moved.length) {
+        const ids = new Set(moved)
+        store.update(state => {
+          state.threads = state.threads.map(thread => {
+            if (!ids.has(thread.id) || thread.projectId) return thread
+            // 只应用项目归属，保留同时收到的归档、状态和标题等其他更新。
+            const current = { ...thread, projectId }
+            threadChanges.set(thread.id, current)
+            if (state.selected?.id === thread.id) state.selected = current
+            return current
+          })
+        })
+      }
+      return { moved, failed }
     },
     removeThread(id) {
       receive({ type: 'thread', id, thread: null })

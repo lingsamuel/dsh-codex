@@ -511,6 +511,95 @@ test('工作区改名、排序和删除返回 Codex 原生项目列表', async t
   ])
 })
 
+test('目录转为项目时迁移分页中的普通及归档会话，并复用同时添加的项目', async t => {
+  const cwd = '/repo/example'
+  const threads = [
+    { id: 'active', cwd, status: { type: 'active' } },
+    { id: 'archived', cwd, archived: true },
+    { id: 'nested', cwd: `${cwd}/nested` },
+    { id: 'assigned', cwd, projectId: 'other' },
+  ]
+  const projects = []
+  const { get, messages } = await fakeCodex(t, {
+    'project/list': async () => {
+      const data = projects.slice()
+      // 让普通添加和目录转换都能在首个创建完成前进入服务端。
+      if (data.length === 0) await delay(30)
+      return { result: { data } }
+    },
+    'project/create': ({ name, roots }) => {
+      const project = { id: 'promoted', name, roots }
+      projects.push(project)
+      return { result: { project } }
+    },
+    'thread/list': ({ archived, cursor, projectId }) => {
+      assert.equal(projectId, null)
+      return { result: { data: cursor ? threads.filter(thread => Boolean(thread.archived) === archived && !thread.projectId) : [],
+        ...(!cursor && { nextCursor: 'later' }) } }
+    },
+    'thread/read': ({ threadId }) => ({ result: { thread: threads.find(thread => thread.id === threadId) } }),
+    'thread/metadata/update': ({ threadId, projectId }) => {
+      const thread = threads.find(thread => thread.id === threadId)
+      thread.projectId = projectId
+      return { result: { thread } }
+    },
+  })
+  const promote = () => get('/api/codex/project-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'promote', cwd }),
+  })
+  const [added, ...results] = await Promise.all([
+    get('/api/codex/conversation-action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'project', cwd }),
+    }),
+    promote(), promote(),
+  ])
+  assert.equal(added.status, 200)
+  assert.deepEqual((await added.json()).project, projects[0])
+  for (const response of results) {
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { projects, workspacePaths: {}, projectId: 'promoted', moved: ['active', 'archived'], failed: [] })
+  }
+  assert.deepEqual(projects, [{ id: 'promoted', name: 'example', roots: [{ path: cwd }] }])
+  assert.deepEqual(threads.map(thread => thread.projectId), ['promoted', 'promoted', undefined, 'other'])
+  assert.equal(threads[1].archived, true)
+  assert.equal(threads[0].status.type, 'active')
+  assert.equal(messages.filter(({ method }) => method === 'thread/metadata/update').length, 2)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume' || method === 'thread/unarchive'), false)
+})
+
+test('目录转换部分失败后重试，仅向同目录已有项目迁移余下会话', async t => {
+  const cwd = '/repo/example'
+  const project = { id: 'existing', name: '自定义项目名', roots: [{ path: cwd }] }
+  const active = { id: 'active', cwd }
+  const archived = { id: 'archived', cwd, archived: true }
+  let unavailable = true
+  const { get, messages } = await fakeCodex(t, {
+    'project/list': () => ({ result: { data: [project] } }),
+    'thread/list': (params) => ({ result: { data: [params.archived ? archived : active].filter(thread => !thread.projectId) } }),
+    'thread/read': ({ threadId }) => ({ result: { thread: threadId === archived.id ? archived : active } }),
+    'thread/metadata/update': ({ threadId, projectId }) => {
+      const thread = threadId === archived.id ? archived : active
+      if (thread === archived && unavailable) return { error: { code: -32603, message: '暂时无法更新' } }
+      thread.projectId = projectId
+      return { result: { thread } }
+    },
+  })
+  const promote = () => get('/api/codex/project-action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'promote', cwd }),
+  })
+  const first = await promote()
+  assert.equal(first.status, 200)
+  assert.deepEqual(await first.json(), { projects: [project], workspacePaths: {}, projectId: project.id,
+    moved: [active.id], failed: [{ threadId: archived.id, message: '暂时无法更新' }] })
+  unavailable = false
+  const retry = await promote()
+  assert.equal(retry.status, 200)
+  assert.deepEqual(await retry.json(), { projects: [project], workspacePaths: {}, projectId: project.id, moved: [archived.id], failed: [] })
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/metadata/update').map(({ params }) => params.threadId),
+    [active.id, archived.id, archived.id])
+  assert.equal(messages.some(({ method }) => method === 'project/create'), false)
+})
+
 async function titleFixture(t, { initialItem, modelResult = 'success', waitForModel, waitForClaim, provider = 'openai',
   account = 'chatgpt', luna = true, defer = false, emptyRollout = false, unindexedHistory = false } = {}) {
   const thread = { id: 'main', cwd: '/workspace', historyMode: 'paginated', status: { type: 'idle' },

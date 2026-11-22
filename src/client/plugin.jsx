@@ -37,7 +37,7 @@ export function apply(ctx) {
   installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
   const deleteSession = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
-  installProjectWorkspaces(ctx, catalog.search)
+  installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)

@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { basename, isAbsolute } from 'node:path'
+import { createHash } from 'node:crypto'
+import { isAbsolute } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, withCodexReader } from './app-server.mjs'
 import { resolveWorkspacePaths } from './workspace-paths.mjs'
 import { replaceUserInputText, userInputText } from '../shared/user-input.js'
 import { isComposerImageUrl } from '../shared/composer-images.js'
-import { readProjects } from './catalog.mjs'
+import { createProjectOpener } from './project-actions.mjs'
 import { hasNoMaterializedHistory, readLatestTurn } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
 import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread,
@@ -74,18 +74,6 @@ async function reusableDraft(request, threadId, cwd, projectId) {
     if (hasNoMaterializedHistory(error)) return thread
     throw error
   }
-}
-
-async function openProject(request, cwd) {
-  const workspacePaths = await resolveWorkspacePaths([cwd])
-  const path = workspacePaths[cwd] ?? cwd
-  const projects = await readProjects(request)
-  const existing = projects.find(project => project.roots.some(root => root.path === path || root.path === cwd))
-  if (existing) return { project: existing, workspacePaths }
-  const { project } = await request('project/create', {
-    name: basename(path) || path, roots: [{ path }], idempotencyKey: randomUUID(),
-  })
-  return { project, workspacePaths }
 }
 
 function missingQueueItem() {
@@ -274,8 +262,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 }
 
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
-export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions) {
-  const creatingProjects = new Map()
+export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions, openProject = createProjectOpener()) {
   const worktreeStarts = new Map()
   const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
 
@@ -349,12 +336,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
       try {
         if (action === 'project') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')
-          if (!creatingProjects.has(cwd)) {
-            const pending = withCodexReader(socketPath, signal, rpc => openProject(rpc, cwd))
-              .finally(() => creatingProjects.delete(cwd))
-            creatingProjects.set(cwd, pending)
-          }
-          return json(await creatingProjects.get(cwd))
+          return json(await withCodexReader(socketPath, signal, rpc => openProject(rpc, cwd)))
         }
         if (action === 'create') {
           if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw badRequest('请选择绝对路径的工作目录。')

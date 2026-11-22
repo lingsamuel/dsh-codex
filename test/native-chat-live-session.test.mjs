@@ -691,6 +691,28 @@ test('实时活动与历史回放共享子智能体状态，重复条目保留�
   assert.equal(history.events.getSnapshot().entries.some(({ event }) => event.type === 'tool/call'), false)
 })
 
+test('项目归属通知早于归档清单时保留归档状态，显式取消归档仍生效', async t => {
+  const source = mockTransport(t)
+  const archived = Promise.withResolvers()
+  const thread = { id: 'archive', cwd: '/workspace', name: 'Archive' }
+  globalThis.fetch = async url => {
+    if (url.pathname.endsWith('/archived')) return archived.promise
+    return Response.json({ projects: [], threads: [], workspacePaths: {}, complete: true })
+  }
+  const lifetime = new AbortController()
+  t.after(() => lifetime.abort())
+  const catalog = createHistoryCatalog(lifetime.signal)
+  const emit = current => source().onmessage({ data: JSON.stringify({ type: 'thread', id: thread.id, thread: current }) })
+  const moved = { ...thread, projectId: 'project' }
+  await emit(moved)
+  archived.resolve(Response.json({ threads: [{ ...thread, archived: true }], workspacePaths: {} }))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(catalog.store.getSnapshot().threads[0].archived, true)
+  assert.equal(catalog.store.getSnapshot().threads[0].projectId, 'project')
+  await emit({ ...moved, archived: false })
+  assert.equal(catalog.store.getSnapshot().threads[0].archived, false)
+})
+
 test('从活动打开的未展开子会话仍跟随原生目录更新与删除', async t => {
   const source = mockTransport(t)
   const root = { id: 'root' }

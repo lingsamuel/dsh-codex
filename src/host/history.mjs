@@ -5,7 +5,7 @@ import { createWatchRoute } from './live-watch.mjs'
 import { readThreadTurns } from './live-history.mjs'
 import { readTurnOutline } from './turn-outline.mjs'
 import { createThreadActionRoute } from './thread-actions.mjs'
-import { createProjectActionRoute } from './project-actions.mjs'
+import { createProjectActionRoute, createProjectOpener } from './project-actions.mjs'
 import { createPermissionActions } from './permissions.mjs'
 import { createConversationActionRoute } from './conversation-actions.mjs'
 import { createQuestionBridge } from './question-bridge.mjs'
@@ -65,6 +65,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()
+  const openProject = createProjectOpener()
   const backgroundTerminals = createBackgroundTerminalMonitor(socketPath, ownerSignal)
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
@@ -91,12 +92,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET,
     ...createCodexPluginRoutes(socketPath, ownerSignal),
     ...createCodexMcpRoutes(socketPath, ownerSignal),
     ...createWorktreeRoutes(socketPath, ownerSignal, submit),
-    createProjectActionRoute(socketPath, ownerSignal),
+    createProjectActionRoute(socketPath, ownerSignal, submit, openProject),
     permissions.catalogRoute,
     permissions.actionRoute,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,
