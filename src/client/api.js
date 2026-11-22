@@ -29,7 +29,7 @@ export function writeQuestionAnswer(parameters, signal) {
   return writeAnswer('question-answer', parameters, signal)
 }
 
-/** 异步问题通过 Codex 原生用户输入入队。 */
+/** 异步答复优先通过 Codex 原生输入送进提问所在的轮次。 */
 export function writeAsyncQuestionAnswer(parameters, signal) {
   return writeAnswer('async-question-answer', parameters, signal)
 }

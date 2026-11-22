@@ -102,7 +102,8 @@ function steerUnavailable(error) {
     || error.message === 'cannot steer a review turn' || error.message === 'cannot steer a compact turn')
 }
 
-async function steer(request, params) {
+/** 向指定的原生轮次插话，并区分明确拒绝接纳与投递结果未知。 */
+export async function steerTurn(request, params) {
   try {
     return await request('turn/steer', params)
   } catch (error) {
@@ -189,7 +190,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
   await deleteQueued(request, target)
   const input = { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId }
   try {
-    return await steer(request, { ...input, expectedTurnId })
+    return await steerTurn(request, { ...input, expectedTurnId })
   } catch (error) {
     // 原生明确拒绝时恢复待发内容。断线时无法判断是否已插话，不自动重发。
     if (!(error instanceof CodexRpcError)) throw conflict('queue-steer-unknown', '无法确认插话是否已发送。请先检查会话。')
@@ -249,7 +250,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
             if (modelDraft) await updateModelSelection(rpc, { ...modelDraft, threadId }, signal)
             if (thread.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
               try {
-                return await steer(rpc, { ...params, expectedTurnId })
+                return await steerTurn(rpc, { ...params, expectedTurnId })
               } catch (error) {
                 if (error.data?.reason !== 'steer-unavailable') throw error
               }

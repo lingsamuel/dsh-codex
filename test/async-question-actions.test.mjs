@@ -33,7 +33,8 @@ async function fakeCodex(t, methods) {
       const { id, method, params } = frame
       frames.push(frame)
       const result = method === 'initialize' ? { codexHome: directory } : await methods[method]?.(params)
-      client.send(JSON.stringify(result ? { id, result } : { id, error: { code: -32601, message: method } }))
+      const error = result?.error ?? (!result && { code: -32601, message: method })
+      client.send(JSON.stringify(error ? { id, error } : { id, result }))
     })
   })
   http.listen(socketPath)
@@ -53,9 +54,10 @@ async function fakeCodex(t, methods) {
   return { post, frames }
 }
 
-test('异步提问保留 CLI 已回答项，再把新答案写入原生待发队列', { timeout: 5_000 }, async t => {
+test('异步提问保留 CLI 已回答项，向运行轮次插话，冷会话则恢复并发送', { timeout: 5_000 }, async t => {
   let status = { type: 'active', activeFlags: [] }
   let head = turnId
+  let headStatus = 'inProgress'
   const accepted = []
   const queued = [{ id: 'cli-queued', input: input([reply(1, '晚上')]) }]
   const saved = [{ turnId, item: { type: 'userMessage', id: 'cli-answer', content: input(reply(0, '测试')) } }]
@@ -63,8 +65,13 @@ test('异步提问保留 CLI 已回答项，再把新答案写入原生待发队
     'thread/read': () => ({ thread: { id: threadId, status } }),
     'thread/items/read': ({ turnId: id, itemIds }) => ({ data: id === turnId && itemIds[0] === itemId ? [{ turnId, item }] : [] }),
     'thread/items/list': ({ cursor }) => cursor === 'second' ? { data: saved } : { data: [], nextCursor: 'second' },
-    'thread/turns/list': () => ({ data: [{ id: head }] }),
+    'thread/turns/list': () => ({ data: [{ id: head, status: headStatus }] }),
     'thread/queue/list': () => ({ data: queued }),
+    'turn/steer': params => {
+      accepted.push(params)
+      saved.push({ turnId, item: { type: 'userMessage', id: 'web-answer', content: params.input } })
+      return { turnId }
+    },
     'thread/queue/add': params => {
       accepted.push(params)
       const queuedSubmission = { id: 'native-queued', ...params }
@@ -81,7 +88,8 @@ test('异步提问保留 CLI 已回答项，再把新答案写入原生待发队
   assert.equal(result.status, 200, JSON.stringify(await result.clone().json()))
   assert.deepEqual(await result.json(), { submitted: true })
   assert.deepEqual(questionReplies(accepted[0].input), [reply(2, '先备份\n保留日志')])
-  assert.equal(frames.some(frame => frame.method === 'thread/resume' || frame.method.startsWith('turn/')), false)
+  assert.equal(accepted[0].expectedTurnId, turnId)
+  assert.equal(frames.some(frame => frame.method === 'thread/resume' || frame.method === 'thread/queue/add'), false)
   assert.deepEqual(frames.find(frame => frame.method === 'thread/items/list').params.cursor, { type: 'item', itemId })
   assert.deepEqual(await (await post(batch)).json(), { submitted: false })
   assert.equal(accepted.length, 1)
@@ -94,9 +102,42 @@ test('异步提问保留 CLI 已回答项，再把新答案写入原生待发队
   assert.equal((await post(batch)).status, 409)
   status = { type: 'notLoaded' }
   head = turnId
+  headStatus = 'completed'
   assert.deepEqual(await (await post([{ index: 2, answer: '先备份\n保留日志' }])).json(), { submitted: true })
   assert.deepEqual(frames.find(frame => frame.method === 'thread/resume').params, { threadId, excludeTurns: true })
   assert.equal(accepted[1].clientUserMessageId, accepted[0].clientUserMessageId)
+})
+
+test('原生拒绝插话后仅在提问轮次仍是最后一轮时排队', async t => {
+  for (const { message, nextId, expectedStatus, queued } of [
+    { message: 'no active turn to steer', nextId: turnId, expectedStatus: 200, queued: true },
+    { message: 'cannot steer a review turn', nextId: turnId, expectedStatus: 200, queued: true },
+    { message: 'expected active turn id `turn` but found `new`', nextId: 'new', expectedStatus: 409, queued: false },
+    { message: 'native request failed', nextId: turnId, expectedStatus: 400, queued: false },
+  ]) {
+    await t.test(message, async t => {
+      let head = { id: turnId, status: 'inProgress' }
+      const { post, frames } = await fakeCodex(t, {
+        'thread/read': () => ({ thread: { id: threadId, status: { type: 'active' }, historyMode: 'paginated' } }),
+        'thread/queue/list': () => ({ data: [] }),
+        'thread/items/read': () => ({ data: [{ turnId, item }] }),
+        'thread/items/list': () => ({ data: [] }),
+        'thread/turns/list': () => ({ data: [head] }),
+        'turn/steer': () => {
+          head = { id: nextId, status: 'completed' }
+          return { error: { code: -32600, message } }
+        },
+        'thread/queue/add': () => ({ queuedSubmission: { id: 'queued' } }),
+      })
+      const response = await post([{ index: 0, answer: '测试' }])
+      assert.equal(response.status, expectedStatus)
+      const steer = frames.find(frame => frame.method === 'turn/steer')
+      assert.equal(steer?.params.expectedTurnId, turnId)
+      const add = frames.find(frame => frame.method === 'thread/queue/add')
+      assert.equal(Boolean(add), queued)
+      if (add) assert.equal(add.params.clientUserMessageId, steer.params.clientUserMessageId)
+    })
+  }
 })
 
 test('旧式原生历史按末轮完整记录验证，并发网页答复只送到队列一次', { timeout: 5_000 }, async t => {

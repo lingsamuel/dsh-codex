@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
-import { readConversationQueue } from './conversation-actions.mjs'
+import { readConversationQueue, steerTurn } from './conversation-actions.mjs'
 import { readLatestTurn } from './live-history.mjs'
 import { addressableThread, createThreadSubmissionQueue, resumeThread, waitForThreadActivity } from './thread-runtime.mjs'
 import { answeredAsyncQuestions, asyncQuestionItemId, encodeQuestionReplies } from '../shared/question-replies.js'
@@ -36,16 +36,16 @@ async function submit(request, threadId, turnId, itemId, answers, signal) {
   const thread = await addressableThread(request, threadId)
   // 优先读队列，再读历史，覆盖原生正在领取待发消息的情况。
   const queued = await readConversationQueue(request, threadId)
-  const legacy = thread.historyMode === 'legacy'
+  let latest
   let item
   let saved
-  if (legacy) {
+  if (thread.historyMode === 'legacy') {
     // 旧式历史不提供单条读取和条目游标。最近一轮已包含定位和防重所需的记录。
-    const turn = await readLatestTurn(request, threadId, 'full')
-    if (turn?.id !== turnId) return staleQuestion()
-    const position = turn.items.findIndex(entry => entry.id === itemId)
-    item = turn.items[position]
-    saved = userInputs(turn.items.slice(position + 1))
+    latest = await readLatestTurn(request, threadId, 'full')
+    if (latest?.id !== turnId) return staleQuestion()
+    const position = latest.items.findIndex(entry => entry.id === itemId)
+    item = latest.items[position]
+    saved = userInputs(latest.items.slice(position + 1))
   } else {
     const { data } = await request('thread/items/read', { threadId, turnId, itemIds: [itemId] })
     item = data.find(entry => entry.turnId === turnId && entry.item.id === itemId)?.item
@@ -59,7 +59,8 @@ async function submit(request, threadId, turnId, itemId, answers, signal) {
   })).filter(reply => !answered.has(reply.questionItemId))
   if (!replies.length || answered.has(itemId)) return json({ submitted: false })
 
-  if (!legacy && (await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
+  latest ??= await readLatestTurn(request, threadId, 'notLoaded')
+  if (latest?.id !== turnId) return staleQuestion()
   if (thread.status?.type === 'notLoaded') {
     try {
       await resumeThread(request, thread)
@@ -67,13 +68,24 @@ async function submit(request, threadId, turnId, itemId, answers, signal) {
       if (error instanceof CodexRpcError) return json({ error: `加载会话失败，答复尚未入队。${error.message}` }, 409)
       return json({ error: '未收到加载会话的确认，答复尚未入队。' }, 503)
     }
-    if ((await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
+    latest = await readLatestTurn(request, threadId, 'notLoaded')
+    if (latest?.id !== turnId) return staleQuestion()
   }
 
   const identity = JSON.stringify([threadId, ...replies.map(reply => reply.questionItemId)])
   const clientUserMessageId = `dsh-codex-question-${createHash('sha256').update(identity).digest('hex')}`
-  await request('thread/queue/add', { threadId, clientUserMessageId,
-    input: [{ type: 'text', text: encodeQuestionReplies(replies), text_elements: [] }] })
+  const input = [{ type: 'text', text: encodeQuestionReplies(replies), text_elements: [] }]
+  if (latest.status === 'inProgress') {
+    try {
+      await steerTurn(request, { threadId, clientUserMessageId, input, expectedTurnId: turnId })
+      return json({ submitted: true })
+    } catch (error) {
+      // 原生明确拒绝才允许排队。重新确认最近轮次，避免把旧题的答复提交给新的轮次。
+      if (error.data?.reason !== 'steer-unavailable') throw error
+      if ((await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
+    }
+  }
+  await request('thread/queue/add', { threadId, clientUserMessageId, input })
   if (thread.status?.type === 'notLoaded') await waitForThreadActivity(request, threadId, signal)
   return json({ submitted: true })
 }
