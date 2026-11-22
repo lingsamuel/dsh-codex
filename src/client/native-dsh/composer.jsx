@@ -1,4 +1,5 @@
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { useLayoutEffect, useState, useSyncExternalStore } from 'react'
 import { isComposerImageType } from '../../shared/composer-images.js'
 import { installQueueImages } from './queue-images.jsx'
@@ -8,12 +9,16 @@ const dock = 'conversation.composer.dock'
 const locale = 'codex.composer'
 const copy = {
   zh: { readonly: '此会话无法直接发送消息', unarchiveAndSend: '取消归档并发送', unarchiveAndContinue: '取消归档并继续队列',
+    goalPlaceholder: '输入要交给 Codex 的目标', goalSend: '创建目标', goalUnarchiveAndSend: '取消归档并创建目标',
+    changingPlan: '正在等待 Codex 确认计划模式…',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
     select: '选择一个 Codex 会话浏览历史', commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
     viewQueue: '查看队列', unarchiveAndView: '取消归档并查看', queueEmpty: '没有待发消息。',
     viewQueueDescription: '查看队列需要先取消归档。待发消息继续由你手动启动。', cancel: '取消', close: '关闭',
     imagesOnly: '请选择 PNG、JPEG、WebP 或 GIF 图片。', imageInputUnavailable: '当前无法添加图片。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
+    goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
+    changingPlan: 'Waiting for Codex to confirm Plan mode…',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
     select: 'Select a Codex session to browse its history', commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
     viewQueue: 'View queue', unarchiveAndView: 'Unarchive and view', queueEmpty: 'No queued messages.',
@@ -21,6 +26,7 @@ const copy = {
     imagesOnly: 'Choose a PNG, JPEG, WebP, or GIF image.', imageInputUnavailable: 'Images cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
+const noGoalDraft = createSnapshotStore(undefined)
 
 function CatalogStatus({ catalog, t }) {
   const { busy, error, selected } = useSyncExternalStore(catalog.subscribe, catalog.getSnapshot)
@@ -29,10 +35,11 @@ function CatalogStatus({ catalog, t }) {
   return <p role="status">{t(busy ? 'loading' : 'select')}</p>
 }
 
-function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, ...props }) {
+function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, composerT, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   const knownTurn = props.useSession(state => state.running && Boolean(state.live.activeTurnId))
   const archived = props.useSession(state => state.archived)
+  const goal = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
   useLayoutEffect(() => {
     if (!blocked || disabled || !toggleCommandMenu) return
     const card = keyboard.editor.getRootElement()?.closest('[data-composer-card]')
@@ -61,11 +68,13 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, ...prop
     }
   }, [blocked, commandsLabel, disabled, keyboard, toggleCommandMenu])
   const withSkillHint = text => `${text}, ${skillHint}`
-  const placeholder = !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
+  const placeholder = goal && !blocked && !disabled ? composerT('goalPlaceholder')
+    : !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
     ? withSkillHint(props.placeholder) : props.placeholder
   return <Native {...props} placeholder={placeholder} stop={!blocked && knownTurn ? props.stop : undefined}
     t={(key, ...args) => {
       if (key === 'input.commands' && toggleCommandMenu) return commandsLabel
+      if (goal && (key === 'input.send' || key.startsWith('input.send.'))) return composerT(archived ? 'goalUnarchiveAndSend' : 'goalSend')
       if (key === 'input.send' && archived) return unarchiveLabel
       if (key === 'placeholder.default') return withSkillHint(t(key, ...args))
       return t(key, ...args)
@@ -153,9 +162,10 @@ export function installComposer(ctx, catalog) {
           binding.ctx.effect(() => {
             const { sessionId, session } = binding
             const sync = () => {
-              const { subagent, canAcceptDirectInput, openState } = session.getSnapshot()
+              const { subagent, canAcceptDirectInput, openState, planChanging } = session.getSnapshot()
+              // 模式写入确认前锁定原生发送入口，避免同一份草稿被送到错误的模式。
               const reason = subagent || canAcceptDirectInput === false ? 'readonly'
-                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : undefined
+                : openState === 'loading' ? 'loading' : openState !== 'open' ? 'unavailable' : planChanging ? 'changingPlan' : undefined
               blocks.set(sessionId, reason ? { reason: t(reason) } : undefined)
             }
             sync()
@@ -206,7 +216,7 @@ export function installComposer(ctx, catalog) {
       const injectComposer = (sessionId, ...args) => {
         const props = inject(sessionId, ...args)
         if (sessionId === undefined) return { ...props, accessory: <CatalogStatus catalog={catalog} t={t} /> }
-        return { ...props, addFiles(files, directories) {
+        return { ...props, goalDraft: sessions.binding(sessionId)?.session.goalDraft, addFiles(files, directories) {
           if (!sessions.binding(sessionId)) return t('imageInputUnavailable')
           if (files.some(file => directories?.has(file) || !isComposerImageType(file.type))) return t('imagesOnly')
           // 原生草稿负责缩略图、移除和编码，提交时才把图片随消息交给 Codex。
@@ -218,7 +228,7 @@ export function installComposer(ctx, catalog) {
       }
       function Composer(props) {
         return <ComposerBar {...props} Native={Component} commandsLabel={t('commands')} unarchiveLabel={t('unarchiveAndSend')}
-          skillHint={t('skillHint')} />
+          skillHint={t('skillHint')} composerT={t} />
       }
       entry.inject = injectComposer
       entry.component = Composer

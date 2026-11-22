@@ -1,8 +1,6 @@
 import { Input, PathLabel, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useId, useState } from 'react'
 import { CommandButton, CommandModal, commandUnavailable, fieldLayout, textAreaStyle, useCommandAction, useCommandInfo } from './command-action.jsx'
-import { GoalCommand } from './goal-command.jsx'
-import { PlanCommand } from './plan-command.jsx'
 import { ExportCommand } from './session-export.jsx'
 
 const reviewValues = { uncommittedChanges: null, baseBranch: 'branch', commit: 'sha', custom: 'instructions' }
@@ -96,8 +94,6 @@ export function CommandDetails(props) {
     case 'export': return <ExportCommand {...props} />
     case 'compact': return <CompactCommand {...props} />
     case 'review': return <ReviewCommand {...props} />
-    case 'plan': return <PlanCommand {...props} />
-    case 'goal': return <GoalCommand {...props} />
     default: return <ReadOnlyCommand {...props} />
   }
 }

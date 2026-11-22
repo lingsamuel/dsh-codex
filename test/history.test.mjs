@@ -313,6 +313,149 @@ test('网页清除目标时拒绝移除后来创建的目标', async t => {
   assert.equal(messages.some(({ method }) => method === 'thread/goal/clear'), false)
 })
 
+test('网页目标发送只替换用户确认过的目标', async t => {
+  let goal = { objective: '核对依赖', createdAt: 200, tokenBudget: 40, tokensUsed: 39, status: 'paused' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'idle' } } } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+    'thread/goal/set': ({ objective, status, tokenBudget }) => {
+      goal = { ...goal, objective, status, ...(tokenBudget !== undefined && { tokenBudget }) }
+      return { result: { goal } }
+    },
+  })
+  const objective = '核对新依赖'
+  const expectedGoal = { objective: goal.objective, createdAt: goal.createdAt }
+  assert.equal((await postCommand(get, 'goal-create', { objective })).status, 409)
+  assert.equal((await postCommand(get, 'goal-create', { objective, expectedGoal: { ...expectedGoal, createdAt: 100 } })).status, 409)
+  assert.equal((await postCommand(get, 'goal-create', { objective, expectedGoal: { objective: goal.objective } })).status, 400)
+  assert.equal(goal.createdAt, 200)
+  const response = await postCommand(get, 'goal-create', { objective, expectedGoal })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { goal: { objective, status: 'active', tokenBudget: null, tokensUsed: 39, createdAt: 200 } })
+  assert.deepEqual(messages.filter(({ method }) => ['thread/goal/set', 'thread/goal/clear'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['thread/goal/set', { threadId: 'main', origin: 'user', objective, status: 'active', tokenBudget: null }],
+  ])
+})
+
+test('网页编辑目标由 Codex 保留当前阶段和用量', async t => {
+  let goal = { objective: '核对依赖', createdAt: 200, status: 'paused', tokenBudget: 40, tokensUsed: 39 }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'notLoaded' } } } }),
+    'thread/list': () => ({ result: { data: [] } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+    'thread/goal/set': ({ objective }) => { goal = { ...goal, objective }; return { result: { goal } } },
+  })
+  const expectedGoal = { objective: goal.objective, createdAt: goal.createdAt }
+  const objective = '核对生产依赖'
+  assert.equal((await postCommand(get, 'goal-edit', { objective })).status, 400)
+  assert.equal((await postCommand(get, 'goal-edit', { objective, expectedGoal: { ...expectedGoal, createdAt: 100 } })).status, 409)
+  const response = await postCommand(get, 'goal-edit', { objective, expectedGoal })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { goal: { objective, createdAt: 200, status: 'paused', tokenBudget: 40, tokensUsed: 39 } })
+  assert.deepEqual(messages.filter(({ method }) => ['thread/resume', 'thread/goal/set', 'thread/goal/clear'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['thread/goal/set', { threadId: 'main', objective, origin: 'user' }],
+  ])
+})
+
+test('网页暂停和恢复目标时核对提交时的目标身份', async t => {
+  let status = 'active'
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'idle' } } } }),
+    'thread/goal/get': () => ({ result: { goal: { objective: '核对依赖', createdAt: 200, status } } }),
+  })
+  const expectedGoal = { objective: '核对依赖', createdAt: 100 }
+  assert.equal((await postCommand(get, 'goal-pause', { expectedGoal })).status, 409)
+  status = 'paused'
+  assert.equal((await postCommand(get, 'goal-resume', { expectedGoal })).status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/goal/set'), false)
+})
+
+test('网页受阻目标由 Codex 决定能否恢复', async t => {
+  const expectedGoal = { objective: '核对依赖', createdAt: 200 }
+  let goal
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'main', status: { type: 'idle' } } } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+    'thread/goal/set': ({ status }) => {
+      if (goal.tokenBudget === null || goal.tokensUsed < goal.tokenBudget) goal = { ...goal, status }
+      return { result: { goal } }
+    },
+  })
+  for (const status of ['blocked', 'usageLimited', 'budgetLimited']) {
+    const tokenBudget = status === 'budgetLimited' ? 40 : null
+    goal = { ...expectedGoal, status, tokenBudget, tokensUsed: 40 }
+    const response = await postCommand(get, 'goal-resume', { expectedGoal })
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { goal: { ...expectedGoal, tokenBudget, tokensUsed: 40,
+      status: status === 'budgetLimited' ? 'budgetLimited' : 'active' } })
+  }
+  goal = { ...expectedGoal, status: 'complete' }
+  assert.equal((await postCommand(get, 'goal-resume', { expectedGoal })).status, 409)
+  assert.deepEqual(messages.filter(({ method }) => method === 'thread/goal/set').map(({ params }) => params),
+    Array.from({ length: 3 }, () => ({ threadId: 'main', origin: 'user', status: 'active' })))
+})
+
+test('网页冷恢复目标后再次核对身份', async t => {
+  const thread = { id: 'main', status: { type: 'notLoaded' } }
+  let goal = { objective: '核对依赖', createdAt: 200, status: 'paused' }
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: [] } }),
+    'thread/queue/list': () => ({ result: { data: [] } }),
+    'thread/goal/get': () => ({ result: { goal } }),
+    'thread/resume': () => {
+      thread.status.type = 'idle'
+      goal = { ...goal, createdAt: 300 }
+      return { result: { thread } }
+    },
+  })
+  const response = await postCommand(get, 'goal-resume', { expectedGoal: { objective: goal.objective, createdAt: goal.createdAt } })
+  assert.equal(response.status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/goal/set'), false)
+})
+
+test('网页目标在冷恢复和模型权限生效后才启动原生目标', async t => {
+  const thread = { id: 'main', cwd: '/workspace', status: { type: 'notLoaded' }, modelProvider: 'openai', model: 'old' }
+  let queued = [{ id: 'previous' }]
+  let archived = true
+  const { get, messages } = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread } }),
+    'thread/list': () => ({ result: { data: archived ? [thread] : [] } }),
+    'thread/unarchive': () => { archived = false; return { result: { thread } } },
+    'thread/goal/get': () => ({ result: { goal: null } }),
+    'thread/queue/list': () => ({ result: { data: queued } }),
+    'permissionProfile/list': () => ({ result: { data: [{ id: ':read-only', allowed: true }] } }),
+    'thread/resume': params => {
+      thread.model = params.model ?? thread.model
+      thread.reasoningEffort = params.config?.model_reasoning_effort
+      thread.status.type = 'idle'
+      return { result: { thread, activePermissionProfile: { id: params.permissions } } }
+    },
+    'thread/goal/set': ({ objective, status }) => ({ result: { goal: { objective, status } } }),
+  })
+  const fields = { objective: '核对兼容性', unarchive: true,
+    modelDraft: { provider: 'openai', model: 'selected', reasoningEffort: 'high' } }
+  assert.equal((await postCommand(get, 'goal-create', { ...fields, permissionDraft: 'unavailable-profile' })).status, 400)
+  assert.equal(archived, true)
+  const submit = () => postCommand(get, 'goal-create', { ...fields, permissionDraft: ':read-only' })
+  assert.equal((await submit()).status, 409)
+  assert.equal(messages.some(({ method }) => method === 'thread/resume' || method === 'thread/goal/set'), false)
+  queued = []
+  const response = await submit()
+  assert.equal(response.status, 200)
+  const { goal, permission } = await response.json()
+  assert.deepEqual(goal, { objective: fields.objective, status: 'active' })
+  assert.equal(permission?.profileId, ':read-only')
+  assert.deepEqual(messages.filter(({ method }) => ['thread/resume', 'thread/goal/set'].includes(method))
+    .map(({ method, params }) => [method, params]), [
+    ['thread/resume', { threadId: 'main', excludeTurns: true, permissions: ':read-only', model: 'selected', config: { model_reasoning_effort: 'high' } }],
+    ['thread/goal/set', { threadId: 'main', origin: 'user', objective: fields.objective, status: 'active' }],
+  ])
+  assert.equal(messages.some(({ method }) => method === 'turn/start' || method === 'thread/queue/add'), false)
+})
+
 test('网页目标在显式取消归档后读取原生目标', async t => {
   const thread = { id: 'main', archived: true, status: { type: 'notLoaded' } }
   const goal = { objective: '已保存目标', status: 'paused' }

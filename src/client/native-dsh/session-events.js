@@ -69,6 +69,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const codexQuestions = createSnapshotStore([])
   const codexApprovals = createSnapshotStore([])
   const codexMcpRequests = createSnapshotStore([])
+  const goalProjection = createSnapshotStore(undefined)
   const permissions = createSnapshotStore({ permission: thread.webPermission })
   let recordedTurnPermission
   let lastSavedPermission
@@ -77,7 +78,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let planRevisionAtConnect = 0
   const userQuestions = createSnapshotStore(projectNativeQuestions([]))
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
-  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure],
+  const projections = new Map([['turnOutline', outline], ['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
     ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
   const outlineTargets = new Map()
@@ -177,6 +178,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   function publishGoal(goal, expectedRevision = state.getSnapshot().goalRevision) {
     if (expectedRevision !== state.getSnapshot().goalRevision) return
     state.update(current => { current.goal = goal; current.goalRevision++ })
+    // 只投影 GoalBar 所需的原生目标。Codex 的状态、时长和预算仍由原始快照提供。
+    const blocked = goal?.status === 'blocked' || goal?.status === 'usageLimited' || goal?.status === 'budgetLimited'
+    goalProjection.set(goal ? { goal: { id: `${goal.createdAt}:${goal.objective}`, revision: expectedRevision + 1,
+      objective: goal.objective, phase: blocked ? 'blocked' : goal.status } } : null)
   }
 
   async function collectAttachments(turns) {
@@ -670,6 +675,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       publishModel,
       publishPermission,
       publishPlanMode,
+      setPlanChanging: value => state.update(current => { current.planChanging = value }),
       publishGoal,
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       queuedImageUrl: id => queueImages.get(id)?.url,

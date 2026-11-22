@@ -120,7 +120,9 @@ DSH 的忙碌时 Enter 设置决定发送模式。普通发送和排队使用 `t
 
 原生 DSH 命令菜单提供 `/status`、`/goal`、`/ps`、`/rename`、`/compact`、`/review`、`/plan` 和 `/export`。状态读取 `thread/read`，后台终端读取 `thread/backgroundTerminals/list`，改名复用原生会话弹窗。
 
-命令提交复用按线程串行的同源流程。`/compact` 和 `/review` 在原生空闲线程上开启轮次，历史投影复用 DSH 压缩行和 Markdown。冷恢复前读取原生待发队列，发现待发项则交由用户处理。`/plan` 读取 Codex 协作模式目录，显式切换时应用 `thread/settings/update`。当前模式来自原生设置通知和已落盘的检查点。`/goal` 用 `thread/goal/get` 读取，用带用户来源的原生请求创建、暂停、恢复或清除，面板跟随目标通知。写操作回执按线程修订号校验，避免覆盖期间送达的更新。
+命令提交复用按线程串行的同源流程。`/compact` 和 `/review` 在原生空闲线程上开启轮次，历史投影复用 DSH 压缩行和 Markdown。冷恢复前读取原生待发队列，发现待发项则交由用户处理。`/plan` 直接切换协作模式，沿用 `collaborationMode/list` 和 `thread/settings/update`。输入栏标签跟随原生设置通知和已落盘的检查点。
+
+`/goal` 是当前会话的输入草稿模式。发送时使用原生 Goal 操作并交由 DSH 确认或恢复草稿。替换已有目标先让用户确认实际目标身份，Host 再核对后写入。DSH 原生 `ui-goal` 渲染 GoalBar，目标投影和操作适配到 Codex 的 `thread/goal/get`、`thread/goal/set` 和 `thread/goal/clear`，由原生目标通知更新。写操作回执按线程修订号校验，避免覆盖期间送达的更新。
 
 DSH 的任务清单投影自原生 rollout 中已确认的 `update_plan` 调用。上下文占用来自同一原生记录的最近上下文 token 总量与模型窗口容量，在原生输入栏和 `/status` 中显示。一个读取连接内复用已扫描的字节位置，后续只读追加部分，保留 Codex 回退的语义。实时连接关闭时取消该连接的扫描，读取文件状态后再次检查取消信号，再开始读取内容。
 

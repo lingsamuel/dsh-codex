@@ -2,6 +2,61 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { createSessionInput } from '../src/client/native-dsh/session-input.js'
 
+test('输入栏创建目标需确认替换，取消保留 Goal 模式，成功只提交原生目标', async t => {
+  const existing = { objective: '旧目标', status: 'paused', createdAt: 100 }
+  const next = { objective: '新目标', status: 'active', createdAt: 100 }
+  const state = { pendingSubmissions: [], goal: existing, goalRevision: 0 }
+  let draft = { budget: '250' }
+  const requests = []
+  let confirmationReady
+  const previousDocument = globalThis.document
+  globalThis.document = { baseURI: 'http://localhost/' }
+  t.after(() => { globalThis.document = previousDocument })
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (!options?.body) return Response.json({ goal: existing })
+    requests.push([url.pathname, JSON.parse(options.body)])
+    return Response.json({ goal: next })
+  })
+  const noopSubscribe = () => () => {}
+  const history = {
+    session: { getSnapshot: () => state, publishGoal(goal) { state.goal = goal } },
+    events: { getSnapshot: () => ({ entries: [] }), subscribe: noopSubscribe },
+    queueStore: { getSnapshot: () => [], subscribe: noopSubscribe },
+    updateState(edit) {
+      edit(state)
+      if (state.goalReplacement) confirmationReady?.resolve(state.goalReplacement)
+    },
+  }
+  const goalDraft = { getSnapshot: () => draft, clear(value) { if (draft === value) draft = undefined } }
+  const model = { getSnapshot: () => undefined, clear() {} }
+  const input = createSessionInput({ effect: effect => t.after(effect()) }, 'native', history, model, undefined, undefined, undefined, goalDraft)
+  const statuses = []
+  function send() {
+    confirmationReady = Promise.withResolvers()
+    const { requestId } = input.beginSubmission({ mode: 'queue', text: '新目标', attachments: [], onAccept: () => statuses.push('接纳') })
+    return input.prompt([{ type: 'text', text: '新目标' }], 'queue', undefined, requestId)
+  }
+
+  const cancelled = send()
+  await new Promise(setImmediate)
+  assert.deepEqual(state.goalReplacement, { objective: '旧目标', createdAt: 100 })
+  assert.deepEqual(requests, [])
+  input.decideGoalReplacement(false)
+  assert.equal((await cancelled).ok, false)
+  assert.deepEqual(draft, { budget: '250' })
+
+  const confirmed = send()
+  await confirmationReady.promise
+  input.decideGoalReplacement(true)
+  assert.equal((await confirmed).ok, true)
+  assert.equal(draft, undefined)
+  assert.deepEqual(statuses, ['接纳'])
+  assert.deepEqual(state.goal, next)
+  assert.deepEqual(state.pendingSubmissions, [])
+  assert.deepEqual(requests, [['/api/codex/command-action', { threadId: 'native', action: 'goal-create', objective: '新目标',
+    tokenBudget: 250, expectedGoal: { objective: '旧目标', createdAt: 100 } }]])
+})
+
 test('原生队列曾确认图片送达时，后续 HTTP 失败不会恢复草稿', async t => {
   const reply = Promise.withResolvers()
   t.mock.method(globalThis, 'fetch', () => reply.promise)

@@ -1,10 +1,11 @@
 import { clearTimeout, setTimeout } from 'node:timers'
 import { CodexRpcError, openCodexReader, withCodexReader } from './app-server.mjs'
+import { submissionRuntime, validateSubmissionSettings } from './conversation-actions.mjs'
 import { readLatestTurn } from './live-history.mjs'
 import { addressableThread, isArchived, readConversationQueue, resumeThread, unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 import { isPlanMode, planModeOf } from '../shared/plan-mode.js'
 
-const goalActions = new Set(['goal-create', 'goal-pause', 'goal-resume', 'goal-clear'])
+const goalActions = new Set(['goal-create', 'goal-edit', 'goal-pause', 'goal-resume', 'goal-clear'])
 
 function json(data, status = 200) {
   return Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } })
@@ -34,18 +35,24 @@ export async function readPlanModes(request) {
   return [...new Set(data.map(({ mode }) => mode).filter(isPlanMode))]
 }
 
-async function readCommandThread(request, threadId, unarchive) {
+async function readCommandThread(request, threadId, unarchive, validateSettings) {
   const thread = await addressableThread(request, threadId, unarchive)
+  if (validateSettings) await validateSettings(thread)
   if (unarchive) return unarchiveForSubmission(request, thread)
   // 冷线程的 thread/read 可以省略归档位，目录才是原生归档状态的依据。
   if (thread.status?.type === 'notLoaded' && await isArchived(request, threadId)) conflict('请先取消归档再执行此命令。')
   return thread
 }
 
-async function resumeForCommand(request, thread, onResume) {
-  if (thread.status?.type !== 'notLoaded') return thread
+async function checkColdQueue(request, thread) {
   // 冷恢复可能直接领取已有待发项，明确把队列的处理留给发起该操作的用户。
-  if ((await readConversationQueue(request, thread.id)).length) conflict('请先处理当前会话的待发队列。')
+  if (thread.status?.type === 'notLoaded' && (await readConversationQueue(request, thread.id)).length) {
+    conflict('请先处理当前会话的待发队列。')
+  }
+}
+
+async function resumeForCommand(request, thread, onResume) {
+  await checkColdQueue(request, thread)
   return resumeThread(request, thread, onResume)
 }
 
@@ -63,32 +70,59 @@ async function startCommandTurn(request, thread, action, target, signal) {
 }
 
 function goalUpdate({ action, objective, tokenBudget, expectedGoal }) {
-  if (action === 'goal-clear') {
-    return { objective: requiredText(expectedGoal?.objective, '请先确认要清除的目标。'), createdAt: expectedGoal.createdAt }
+  if (expectedGoal !== undefined || action === 'goal-edit' || action === 'goal-clear') {
+    requiredText(expectedGoal?.objective, '请先确认要操作的目标。')
+    // 清除兼容先前只提交目标正文的网页。
+    if ((action !== 'goal-clear' || expectedGoal.createdAt !== undefined) && !Number.isSafeInteger(expectedGoal.createdAt)) {
+      throw new CodexRpcError({ code: -32602, message: '缺少有效的目标创建时间。' })
+    }
   }
+  if (action === 'goal-clear') return
+  if (action === 'goal-edit') return { objective: requiredText(objective, '请输入目标内容。') }
   if (action !== 'goal-create') return { status: action === 'goal-pause' ? 'paused' : 'active' }
   if (tokenBudget !== undefined && (!Number.isSafeInteger(tokenBudget) || tokenBudget < 1)) {
     throw new CodexRpcError({ code: -32602, message: 'Token 预算必须是正整数。' })
   }
-  return { status: 'active', objective: requiredText(objective, '请输入目标内容。'), ...(tokenBudget !== undefined && { tokenBudget }) }
+  return { status: 'active', objective: requiredText(objective, '请输入目标内容。'),
+    ...((tokenBudget !== undefined || expectedGoal) && { tokenBudget: tokenBudget ?? null }) }
 }
 
-async function updateGoal(request, thread, action, update) {
-  const threadId = thread.id
-  const { goal } = await request('thread/goal/get', { threadId })
-  if ((action === 'goal-create' && goal) || (action === 'goal-pause' && goal?.status !== 'active')
-    || (action === 'goal-resume' && goal?.status !== 'paused')) conflict('目标状态已变化，请重新查看。')
-  if (action === 'goal-clear') {
-    if (!goal) return { goal: null }
-    // 确认只适用于当时面板上的目标。其他客户端可能已移除并重新创建目标。
-    if (goal.objective !== update.objective || (update.createdAt !== undefined && goal.createdAt !== update.createdAt)) {
+async function updateGoal(request, threadId, fields, update, signal, permissions) {
+  const { action, expectedGoal, unarchive, modelDraft, permissionDraft } = fields
+  const hasDraft = action === 'goal-create' && (modelDraft !== undefined || permissionDraft !== undefined)
+  const thread = await readCommandThread(request, threadId, unarchive === true,
+    hasDraft && (current => validateSubmissionSettings(request, current, fields, permissions)))
+  async function readCurrentGoal() {
+    const { goal } = await request('thread/goal/get', { threadId })
+    if (action === 'goal-clear' && !goal) return goal
+    // 确认只适用于当时看到的目标。其他客户端可能在此期间移除或替换它。
+    if (expectedGoal && (goal?.objective !== expectedGoal.objective
+      || (expectedGoal.createdAt !== undefined && goal.createdAt !== expectedGoal.createdAt))) {
       conflict('目标已变化，请核对新的目标后重新确认。')
     }
-    await request('thread/goal/clear', { threadId, origin: 'user' })
+    if ((action === 'goal-create' && goal && !expectedGoal) || (action === 'goal-pause' && goal?.status !== 'active')
+      || (action === 'goal-resume' && !['paused', 'blocked', 'usageLimited', 'budgetLimited'].includes(goal?.status))) {
+      conflict('目标状态已变化，请重新查看。')
+    }
+    return goal
+  }
+
+  const goal = await readCurrentGoal()
+  if (action === 'goal-clear') {
+    if (goal) await request('thread/goal/clear', { threadId, origin: 'user' })
     return { goal: null }
   }
-  if (update.status === 'active') await resumeForCommand(request, thread)
-  return request('thread/goal/set', { threadId, origin: 'user', ...update })
+
+  let permission
+  if (hasDraft || (update.status === 'active' && thread.status?.type === 'notLoaded')) {
+    await checkColdQueue(request, thread)
+    const ready = await submissionRuntime(request, thread, hasDraft ? fields : {}, signal, permissions)
+    permission = ready.permission
+    await readCurrentGoal()
+  }
+  // 一次原生写入更新目标与预算，并以 Codex 返回的阶段和用量为准。
+  const result = await request('thread/goal/set', { threadId, origin: 'user', ...update })
+  return { goal: result.goal, ...(permission && { permission }) }
 }
 
 async function selectPlanMode(socketPath, signal, threadId, mode, unarchive, observeDraftSettings) {
@@ -137,7 +171,7 @@ async function selectPlanMode(socketPath, signal, threadId, mode, unarchive, obs
 }
 
 /** 各命令通过同一个会话提交顺序转成明确的原生操作。 */
-export function createCommandActionRoute(socketPath, ownerSignal, submit, observeDraftSettings) {
+export function createCommandActionRoute(socketPath, ownerSignal, submit, permissions) {
   return {
     path: '/api/codex/command-action', methods: ['POST'], requestBody: 'buffered',
     async fetch(request) {
@@ -151,7 +185,7 @@ export function createCommandActionRoute(socketPath, ownerSignal, submit, observ
         const threadId = requiredText(fields?.threadId, '缺少 Codex 线程 ID。')
         if (action === 'plan') {
           if (!isPlanMode(mode)) return json({ error: '无效的协作模式。' }, 400)
-          return json(await submit(threadId, () => selectPlanMode(socketPath, signal, threadId, mode, unarchive === true, observeDraftSettings)))
+          return json(await submit(threadId, () => selectPlanMode(socketPath, signal, threadId, mode, unarchive === true, permissions.observeDraftSettings)))
         }
         if (action === 'goal-unarchive' && unarchive === true) {
           return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
@@ -163,8 +197,9 @@ export function createCommandActionRoute(socketPath, ownerSignal, submit, observ
         if (!isGoal && action !== 'compact' && action !== 'review') return json({ error: '无效的命令。' }, 400)
         const input = isGoal ? goalUpdate(fields) : action === 'review' ? reviewTarget(fields.target) : undefined
         return json(await submit(threadId, () => withCodexReader(socketPath, signal, async rpc => {
+          if (isGoal) return updateGoal(rpc, threadId, fields, input, signal, permissions)
           const thread = await readCommandThread(rpc, threadId, unarchive === true)
-          return isGoal ? updateGoal(rpc, thread, action, input) : startCommandTurn(rpc, thread, action, input, signal)
+          return startCommandTurn(rpc, thread, action, input, signal)
         })))
       } catch (error) {
         if (error instanceof CodexRpcError) {

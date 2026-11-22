@@ -35,11 +35,12 @@ function changeRetainCount(counts, key, delta) {
   else delete counts[key]
 }
 
-function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, worktreeDrafts, retention, openWorktree) {
+function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, retention, openWorktree) {
   const history = createCodexHistory(ctx, thread, catalog, retention)
   const modelDraft = sessionDraft(modelDrafts, thread.id)
   const permissionDraft = sessionDraft(permissionDrafts, thread.id)
   const worktreeDraft = sessionDraft(worktreeDrafts, thread.id)
+  const goalDraft = sessionDraft(goalDrafts, thread.id)
   return {
     ctx,
     sessionId: thread.id,
@@ -47,7 +48,8 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree),
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft),
+      goalDraft,
       worktreeDraft,
       openWorktree,
       modelDraft,
@@ -76,6 +78,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   const modelDrafts = createSnapshotStore(new Map())
   const permissionDrafts = createSnapshotStore(new Map())
   const worktreeDrafts = createSnapshotStore(new Map())
+  const goalDrafts = createSnapshotStore(new Map())
   let navigation
   const scopeId = Symbol('Codex session')
 
@@ -153,7 +156,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
           }, 0)
         }
         record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,
-          modelDrafts, permissionDrafts, worktreeDrafts, observer, openWorktree), fiber }
+          modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, observer, openWorktree), fiber }
         bindings.set(id, record)
         void catalog.loadChildren(id)
       }

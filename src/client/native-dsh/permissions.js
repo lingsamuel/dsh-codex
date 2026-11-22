@@ -3,6 +3,7 @@ import { Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import { createElement } from 'react'
 import { readPage, writePermissionAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
+import { adaptSlot } from './slot-adapter.js'
 import { permissionOptionValue } from '../../shared/permissions.js'
 
 const locale = 'codex.permissions'
@@ -93,32 +94,6 @@ function permissionsDiffer(turn, next) {
 function canSelect(state) {
   return state.openState === 'open' && !state.subagent && state.canAcceptDirectInput !== false
     && ['idle', 'active', 'notLoaded'].includes(state.live?.status?.type)
-}
-
-function adaptSlot(ctx, slot, find, adapt) {
-  return ctx.effect(() => {
-    let entry
-    let restore
-    function sync() {
-      const next = ctx.slots.entries(slot).find(find)
-      if (entry === next) return
-      restore?.()
-      entry = next
-      restore = undefined
-      if (!entry?.component || !entry.inject) return
-      const { inject, component } = entry
-      const replacement = adapt(inject, component)
-      entry.inject = replacement.inject
-      entry.component = replacement.component
-      restore = () => {
-        if (next.inject === replacement.inject) next.inject = inject
-        if (next.component === replacement.component) next.component = component
-      }
-    }
-    const stop = ctx.on('slots/changed', name => { if (slot === name) sync() })
-    sync()
-    return () => { stop(); restore?.() }
-  })
 }
 
 function PermissionError({ usePermissionError, dismiss }) {
