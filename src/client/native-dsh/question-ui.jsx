@@ -2,7 +2,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, IconQuestionOutlineRegular, Toast } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useMemo, useState, useSyncExternalStore } from 'react'
 import { writeAsyncQuestionAnswer, writeQuestionAnswer } from '../api.js'
-import { asyncQuestionAnswers, nativeQuestionAnswers } from './native-questions.js'
+import { asyncQuestionSubmission, nativeQuestionSubmission } from './native-questions.js'
 
 const composer = 'conversation.composer'
 const utilities = 'conversation.session.header.utilities'
@@ -12,10 +12,10 @@ const locale = 'codex.question'
 const labels = {
   zh: { open: '打开待回答的问题', close: '收起问题面板', loadingAndSubmitting: '正在加载会话并提交…',
     unarchiveAndSubmit: '取消归档并提交', skipAndSubmit: '跳过本题并取消归档提交',
-    queued: '答复已交给 Codex。', alreadyAnswered: 'Codex 已有这条答复。' },
+    queued: '答复已交给 Codex。', alreadyAnswered: 'Codex 已有这条答复。', secretAnswer: '保密答复', skipped: '已跳过' },
   en: { open: 'Open pending question', close: 'Close question panel', loadingAndSubmitting: 'Loading session and submitting…',
     unarchiveAndSubmit: 'Unarchive and submit', skipAndSubmit: 'Skip this question, unarchive and submit',
-    queued: 'Answer submitted to Codex.', alreadyAnswered: 'Codex already has this answer.' },
+    queued: 'Answer submitted to Codex.', alreadyAnswered: 'Codex already has this answer.', secretAnswer: 'Secret answer', skipped: 'Skipped' },
 }
 const subscribeMissing = () => () => {}
 
@@ -78,14 +78,30 @@ export function installCodexQuestions(ctx) {
         const session = scope.sessions.binding(threadId)?.session
         const request = questionRequest(session, callId)
         if (!request) return { ok: true, value: false }
-        if (request.kind === 'async') {
-          const answers = asyncQuestionAnswers(request.questions, submitted)
-          if (!answers.length) return { ok: true, value: false }
-          const { submitted: accepted } = await writeAsyncQuestionAnswer({ threadId, turnId: request.turnId,
-            itemId: request.itemId, answers, ...(session.getSnapshot().archived && { unarchive: true }) })
-          receipt.set({ id: ++receiptId, label: accepted ? 'queued' : 'alreadyAnswered' })
-        } else {
-          await writeQuestionAnswer({ threadId, requestId: request.requestId, answers: nativeQuestionAnswers(request.questions, submitted) })
+        const { turnId, itemId, questions } = request
+        const asynchronous = request.kind === 'async'
+        const { answers, replies } = asynchronous ? asyncQuestionSubmission(questions, submitted)
+          : nativeQuestionSubmission(questions, submitted, translate('secretAnswer'))
+        if (!replies.length) return { ok: true, value: false }
+        const echo = session.beginQuestionReply(turnId, replies.map(({ question, answer }) =>
+          `${question}\n${answer || translate('skipped')}`).join('\n\n'), !asynchronous)
+        try {
+          if (asynchronous) {
+            const result = await writeAsyncQuestionAnswer({ threadId, turnId, itemId, answers, clientUserMessageId: echo.requestId,
+              ...(session.getSnapshot().archived && { unarchive: true }) })
+            if (!result.submitted) echo.abandon()
+            else if (result.queuedForLater) echo.queuedForLater()
+            receipt.set({ id: ++receiptId, label: result.submitted ? 'queued' : 'alreadyAnswered' })
+          } else {
+            await writeQuestionAnswer({ threadId, requestId: request.requestId, answers })
+            await session.publishQuestionReply(turnId, itemId, echo.requestId, replies)
+          }
+        } catch (error) {
+          if (!echo.observed()) {
+            echo.abandon()
+            throw error
+          }
+          echo.queuedForLater()
         }
         return { ok: true, value: true }
       }

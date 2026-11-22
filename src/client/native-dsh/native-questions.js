@@ -37,24 +37,29 @@ export function projectAsyncQuestions(turn, queued) {
 }
 
 /** 异步答复沿用 Codex 的单段文本。它不是实时请求里的多选和 user_note 载荷。 */
-export function asyncQuestionAnswers(questions, submitted) {
+export function asyncQuestionSubmission(questions, submitted) {
   const inputs = new Map(submitted.answers.map(answer => [answer.id, answer]))
-  return questions.flatMap(({ id, index }) => {
+  const replies = questions.flatMap(({ id, index, question }) => {
     const input = inputs.get(id)
     const answer = input?.custom?.trim() || input?.selected?.[0]?.trim()
-    return answer ? [{ index, answer }] : []
+    return answer ? [{ index, question, answer }] : []
   })
+  return { answers: replies.map(({ index, answer }) => ({ index, answer })), replies }
 }
 
-/** 将 DSH 的选项和自由输入转成 Codex CLI 使用的原生答案载荷。 */
-export function nativeQuestionAnswers(questions, submitted) {
+/** 同时生成原生应答载荷和聊天回显。保密题的选项和自由输入只留在原生载荷中。 */
+export function nativeQuestionSubmission(questions, submitted, secretLabel) {
   const byId = new Map(submitted.answers.map(answer => [answer.id, answer]))
-  return Object.fromEntries(questions.map(question => {
+  const replies = []
+  const answers = Object.fromEntries(questions.map(question => {
     const { selected = [], custom } = byId.get(question.id) ?? {}
     const notes = custom?.trim()
+    const text = [...selected, notes].filter(Boolean).join('\n')
+    replies.push({ questionItemId: question.id, question: question.question, answer: question.isSecret && text ? secretLabel : text })
     // Codex 把自由描述作为 user_note，带选项的 Other 还会提交对应的选择标签。
-    const answers = notes ? [...selected, ...(question.isOther && question.options?.length && !selected.length ? [otherLabel] : []),
+    const values = notes ? [...selected, ...(question.isOther && question.options?.length && !selected.length ? [otherLabel] : []),
       `user_note: ${notes}`] : selected
-    return [question.id, { answers }]
+    return [question.id, { answers: values }]
   }))
+  return { answers, replies }
 }

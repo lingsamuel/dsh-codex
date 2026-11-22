@@ -63,24 +63,54 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   }
 
   function historySettlement(requestId, entries) {
-    const echo = entries.find(({ event }) => event.type === 'user/message' && event.data.source.rpcId === requestId)
-    if (echo) return { reason: 'observed', attachments: echo.event.data.content.flatMap(part => part.type === 'image' ? [part.attachment] : []) }
+    const echo = entries.find(({ event }) => event.type === 'user/message' ? event.data.source.rpcId === requestId
+      : event.type === 'tool/result' && event.data.meta?.codexQuestionReply && event.data.meta.clientUserMessageId === requestId)
+    if (echo) return echo.event.type === 'user/message'
+      ? { reason: 'observed', attachments: echo.event.data.content.flatMap(part => part.type === 'image' ? [part.attachment] : []) }
+      : observedSubmission
+  }
+
+  function displayedEcho({ echo, awaitingQueueClear }) {
+    return awaitingQueueClear ? { ...echo, placement: 'queued', awaitingQueueClear } : echo
   }
 
   function observeSubmission(requestId, submission, entries) {
     submission.settlement ??= historySettlement(requestId, entries)
     const index = queueStore.getSnapshot().findIndex(item => item.clientUserMessageId === requestId)
     if (!submission.settlement && index < 0) return false
-    // 空闲发送短暂占用队首。原生消息接手前保留气泡，原生队列清空前也继续屏蔽其旧队列行。
-    const keepInChat = submission.echo?.placement === 'transcript' && index >= 0
+    // 普通发送和插话回落都可能短暂占用队首。原生队列清空前继续屏蔽旧队列行。
+    const keepInChat = submission.echo && submission.echo.placement !== 'queued' && index >= 0
       && (submission.settlement || (index === 0 && !submission.queuedForLater))
-    if (keepInChat) acceptObserved(submission)
-    else retire(requestId, submission.settlement ?? observedSubmission)
+    if (keepInChat) {
+      acceptObserved(submission)
+      if (submission.settlement && !submission.awaitingQueueClear) {
+        // 原生历史接手后仅保留队列去重身份，聊天区只显示正式消息。
+        submission.awaitingQueueClear = true
+        updateState(state => {
+          state.pendingSubmissions = state.pendingSubmissions.map(item => item.requestId === requestId ? displayedEcho(submission) : item)
+        })
+      }
+    } else retire(requestId, submission.settlement ?? observedSubmission)
     return true
   }
 
   function observeSubmissions(entries) {
     for (const [requestId, submission] of submissions) observeSubmission(requestId, submission, entries)
+  }
+
+  function trackSubmission(requestId, submission) {
+    submissions.set(requestId, submission)
+    updateState(state => {
+      if (submission.echo) state.pendingSubmissions.push(submission.echo)
+      state.promptAttempted = true
+    })
+    return { requestId, abandon: () => retire(requestId, failedSubmission) }
+  }
+
+  function confirmQueuedForLater(requestId, submission) {
+    if (!submission || submissions.get(requestId) !== submission) return
+    submission.queuedForLater = true
+    observeSubmission(requestId, submission, [])
   }
 
   function openSubmittedThread(result, requestId) {
@@ -218,13 +248,24 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       observeSubmission(requestId, submission, events.getSnapshot().entries)
       if (!submissions.has(requestId)) return
       updateState(state => {
-        state.pendingSubmissions.push(echo)
+        state.pendingSubmissions.push(displayedEcho(submission))
         state.promptAttempted = true
       })
     },
     decideGoalReplacement: accepted => goalConfirmation?.resolve(accepted),
     dismissGoalError(error) {
       if (session.getSnapshot().goalError === error) updateState(state => { state.goalError = null })
+    },
+    /** 问答面板与输入栏共用气泡交接。答题不会消耗输入栏的模型或权限草稿。 */
+    beginQuestionReply(turnId, text, realtime) {
+      const requestId = crypto.randomUUID()
+      const inTurn = realtime || Boolean(turnId && activeTurnId() === turnId)
+      const placement = inTurn ? 'steering' : queueStore.getSnapshot().length ? 'queued' : 'transcript'
+      const submission = { echo: { requestId, placement, time: Date.now(), text, attachments: [] } }
+      return { ...trackSubmission(requestId, submission),
+        queuedForLater: () => confirmQueuedForLater(requestId, submission),
+        observed: () => submission.observed === true,
+      }
     },
     beginSubmission({ mode, text, attachments, onAccept, onRetire }) {
       const { running, archived, blank } = session.getSnapshot()
@@ -239,13 +280,8 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
       const echo = isCommandOnly ? undefined : { requestId, placement, time: Date.now(), text: plan ?? text, attachments }
       // DSH 发送前会等编辑器完成回显。插话仍需指向用户按键时看到的原生轮次。
-      submissions.set(requestId, { echo, onAccept, onRetire, expectedTurnId, worktree, goal,
+      return trackSubmission(requestId, { echo, onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
-      updateState(state => {
-        if (echo) state.pendingSubmissions.push(echo)
-        state.promptAttempted = true
-      })
-      return { requestId, abandon: () => retire(requestId, failedSubmission) }
     },
     async prompt(content, mode, signal, requestId = crypto.randomUUID()) {
       const submission = submissions.get(requestId)
@@ -279,7 +315,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
         })
         const { planRevision } = session.getSnapshot()
         const result = await native('prompt', { input, mode: expectedTurnId ? 'steer' : 'queue', clientUserMessageId: requestId,
-          ...(submission?.echo?.placement === 'transcript' && { reportQueuedForLater: true }),
+          ...(submission?.echo && submission.echo.placement !== 'queued' && { reportQueuedForLater: true }),
           expectedTurnId, modelDraft: selection, permissionDraft: profileId,
           ...(plan !== undefined && { planMode: 'plan' }),
           ...(worktree && { worktree: { kind, id, path, baseRef } }),
@@ -293,10 +329,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           openSubmittedThread(result, requestId)
         } else {
           acceptSubmittedSettings(selection, profileId, before, result)
-          if (result.queuedForLater && submission && submissions.get(requestId) === submission) {
-            submission.queuedForLater = true
-            observeSubmission(requestId, submission, [])
-          }
+          if (result.queuedForLater) confirmQueuedForLater(requestId, submission)
         }
         return accepted
       } catch (error) {

@@ -112,7 +112,7 @@ async function deleteQueued(request, params) {
 }
 
 /** 原生暂停队列时，空闲发送仍可启动本次唯一的消息。旧待发项由用户显式继续。 */
-async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId, reportQueuedForLater) {
+export async function startOnlyQueuedMessage(request, threadId, queuedSubmissionId, reportQueuedForLater) {
   const readHead = () => request('thread/queue/list', { threadId, limit: 2 })
   try {
     // 入队期间，CLI 或网页可能刚好结束上一轮。用接纳消息后的状态决定是否启动。

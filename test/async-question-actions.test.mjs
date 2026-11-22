@@ -109,33 +109,48 @@ test('异步提问保留 CLI 已回答项，向运行轮次插话，冷会话则
 })
 
 test('原生拒绝插话后仅在提问轮次仍是最后一轮时排队', async t => {
-  for (const { message, nextId, expectedStatus, queued } of [
+  for (const { message, nextId, expectedStatus, queued, active } of [
     { message: 'no active turn to steer', nextId: turnId, expectedStatus: 200, queued: true },
-    { message: 'cannot steer a review turn', nextId: turnId, expectedStatus: 200, queued: true },
+    { message: 'cannot steer a review turn', nextId: turnId, expectedStatus: 200, queued: true, active: true },
     { message: 'expected active turn id `turn` but found `new`', nextId: 'new', expectedStatus: 409, queued: false },
     { message: 'native request failed', nextId: turnId, expectedStatus: 400, queued: false },
   ]) {
     await t.test(message, async t => {
       let head = { id: turnId, status: 'inProgress' }
+      let queuedSubmission
       const { post, frames } = await fakeCodex(t, {
-        'thread/read': () => ({ thread: { id: threadId, status: { type: 'active' }, historyMode: 'paginated' } }),
-        'thread/queue/list': () => ({ data: [] }),
+        'thread/read': () => ({ thread: { id: threadId,
+          status: { type: head.status === 'inProgress' ? 'active' : 'idle' }, historyMode: 'paginated' } }),
+        'thread/queue/list': () => ({ data: queuedSubmission ? [queuedSubmission] : [] }),
         'thread/items/read': () => ({ data: [{ turnId, item }] }),
         'thread/items/list': () => ({ data: [] }),
         'thread/turns/list': () => ({ data: [head] }),
         'turn/steer': () => {
-          head = { id: nextId, status: 'completed' }
+          head = { id: nextId, status: active ? 'inProgress' : 'completed' }
           return { error: { code: -32600, message } }
         },
-        'thread/queue/add': () => ({ queuedSubmission: { id: 'queued' } }),
+        'thread/queue/add': params => {
+          queuedSubmission = { id: 'queued', ...params }
+          return { queuedSubmission }
+        },
+        'thread/queue/start': () => {
+          queuedSubmission = undefined
+          return { turn: { id: 'next-turn' } }
+        },
       })
-      const response = await post([{ index: 0, answer: '测试' }])
+      const response = await post([{ index: 0, answer: '测试' }], { clientUserMessageId: 'browser-echo' })
       assert.equal(response.status, expectedStatus)
       const steer = frames.find(frame => frame.method === 'turn/steer')
       assert.equal(steer?.params.expectedTurnId, turnId)
+      assert.equal(steer?.params.clientUserMessageId, 'browser-echo')
       const add = frames.find(frame => frame.method === 'thread/queue/add')
       assert.equal(Boolean(add), queued)
-      if (add) assert.equal(add.params.clientUserMessageId, steer.params.clientUserMessageId)
+      if (add) {
+        assert.equal(add.params.clientUserMessageId, steer.params.clientUserMessageId)
+        assert.deepEqual(await response.json(), { submitted: true, ...(active && { queuedForLater: true }) })
+      }
+      const start = frames.find(frame => frame.method === 'thread/queue/start')
+      assert.equal(start?.params.queuedSubmissionId, queued && !active ? 'queued' : undefined)
     })
   }
 })

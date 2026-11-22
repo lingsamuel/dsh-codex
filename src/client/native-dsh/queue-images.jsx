@@ -1,5 +1,5 @@
 import { Button, InlineEditor, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { userInputText } from '../../shared/user-input.js'
 import { QueueSteerDock } from './queue-steer.jsx'
 import { FileDownloads } from './file-downloads.jsx'
@@ -96,10 +96,14 @@ export function installQueueImages(ctx) {
         } }
       }
       function Queue(props) {
+        const pending = props.useSession(state => state.pendingSubmissions)
+        // 原生队列用 transcript 身份去重。插话回落和已被历史接手的身份也继续过滤旧队列行。
+        const chatEchoes = useMemo(() => pending.map(item => item.placement === 'steering' || item.awaitingQueueClear
+          ? { ...item, placement: 'transcript' } : item), [pending])
         // DSH 的队列组件通过会话地址判断只读状态。此映射只传给队列组件。
         function useQueueSession(select) {
-          return props.useSession(state => select(state.archived || !allowsDirectInput(state)
-            ? { ...state, subagent: readOnlyQueue } : state))
+          return props.useSession(state => select({ ...state, pendingSubmissions: chatEchoes,
+            ...((state.archived || !allowsDirectInput(state)) && { subagent: readOnlyQueue }) }))
         }
         const dockProps = { ...props, useSession: useQueueSession }
         return <><Component {...dockProps} /><QueueSteerDock Dock={Component} dockProps={dockProps} t={t} />

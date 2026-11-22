@@ -39,15 +39,21 @@ function fileChange(item, cwd) {
   return { name: item.type, args: { paths: changes.map(change => change.path) }, output, meta, isError }
 }
 
-/** 原生问答事件本身已经记载问题和回答，使用 DSH 已安装的只读问答工具卡。 */
-export function projectQuestionReply(replies) {
+/** 将 Codex 的问题和答复转成 DSH 问答气泡的数据。 */
+export function questionReplyContent(replies) {
   const questions = replies.map(({ questionItemId, question }, index) => ({ id: String(index), question, questionItemId }))
   const answers = replies.map(({ answer }, index) => ({ id: questions[index].id, selected: [], custom: answer }))
+  return { questions, answers }
+}
+
+/** 已保存的异步问答沿用 DSH 原生历史工具卡。 */
+export function projectQuestionReply(replies, clientUserMessageId) {
+  const { questions, answers } = questionReplyContent(replies)
   return {
     name: 'ask_user_question',
     args: { questions },
     output: JSON.stringify({ answers }),
-    meta: { codexQuestionReply: true },
+    meta: { codexQuestionReply: true, ...(clientUserMessageId && { clientUserMessageId }) },
     isError: false,
   }
 }

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
-import { steerTurn } from './conversation-actions.mjs'
+import { startOnlyQueuedMessage, steerTurn } from './conversation-actions.mjs'
 import { readLatestTurn } from './live-history.mjs'
 import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread, unarchiveForSubmission,
   waitForThreadActivity } from './thread-runtime.mjs'
@@ -63,7 +63,7 @@ async function readQuestionReplies(request, thread, turnId, itemId, answers, que
   return { latest, replies }
 }
 
-async function submit(request, threadId, turnId, itemId, answers, unarchive, signal, steers) {
+async function submit(request, threadId, turnId, itemId, answers, unarchive, signal, steers, requestId) {
   // 正在插话的答复可能已离开原生队列，原生历史还没有相同问题的答复记录。
   const awaitingDelivery = steers?.list(threadId).map(({ item }) => item) ?? []
   const original = await addressableThread(request, threadId, unarchive)
@@ -92,7 +92,8 @@ async function submit(request, threadId, turnId, itemId, answers, unarchive, sig
   }
 
   const identity = JSON.stringify([threadId, ...replies.map(reply => reply.questionItemId)])
-  const clientUserMessageId = `dsh-codex-question-${createHash('sha256').update(identity).digest('hex')}`
+  // 浏览器提前发布气泡，通过本次提交 ID 和原生历史交接。原有调用方仍使用稳定的问题身份。
+  const clientUserMessageId = requestId ?? `dsh-codex-question-${createHash('sha256').update(identity).digest('hex')}`
   const input = [{ type: 'text', text: encodeQuestionReplies(replies), text_elements: [] }]
   if (latest.status === 'inProgress') {
     try {
@@ -101,12 +102,15 @@ async function submit(request, threadId, turnId, itemId, answers, unarchive, sig
     } catch (error) {
       // 原生明确拒绝才允许排队。重新确认最近轮次，避免把旧题的答复提交给新的轮次。
       if (error.data?.reason !== 'steer-unavailable') throw error
-      if ((await readLatestTurn(request, threadId, 'notLoaded'))?.id !== turnId) return staleQuestion()
+      latest = await readLatestTurn(request, threadId, 'notLoaded')
+      if (latest?.id !== turnId) return staleQuestion()
     }
   }
-  await request('thread/queue/add', { threadId, clientUserMessageId, input })
+  const { queuedSubmission } = await request('thread/queue/add', { threadId, clientUserMessageId, input })
+  const { queuedForLater } = queuedSubmission?.id
+    ? await startOnlyQueuedMessage(request, threadId, queuedSubmission.id, Boolean(requestId)) : {}
   if (thread.status?.type === 'notLoaded') await waitForThreadActivity(request, threadId, signal)
-  return json({ submitted: true })
+  return json({ submitted: true, ...(queuedForLater && { queuedForLater }) })
 }
 
 /** 从已保存的原生问题构建答复。网页并发只限制同一条提问的提交。 */
@@ -119,15 +123,18 @@ export function createAsyncQuestionActionRoute(socketPath, ownerSignal, submitTh
     async fetch(request) {
       const type = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
       if (type !== 'application/json') return json({ error: '只接受 JSON 请求。' }, 415)
-      const { threadId, turnId, itemId, answers, unarchive } = (await request.json().catch(() => null)) ?? {}
-      if (!validFields(threadId, turnId, itemId, answers)) return json({ error: '异步问题或答案格式无效。' }, 400)
+      const { threadId, turnId, itemId, answers, unarchive, clientUserMessageId } = (await request.json().catch(() => null)) ?? {}
+      if (!validFields(threadId, turnId, itemId, answers)
+        || (clientUserMessageId !== undefined && (typeof clientUserMessageId !== 'string' || !clientUserMessageId.trim()))) {
+        return json({ error: '异步问题或答案格式无效。' }, 400)
+      }
       const key = JSON.stringify([threadId, itemId])
       if (submitting.has(key)) return json({ error: '这条提问已有答复正在提交。' }, 409)
       submitting.add(key)
       try {
         const signal = ownerSignal ? AbortSignal.any([request.signal, ownerSignal]) : request.signal
         return await submitThread(threadId, () => withCodexReader(socketPath, signal, rpc =>
-          submit(rpc, threadId, turnId, itemId, answers, unarchive === true, signal, steers)))
+          submit(rpc, threadId, turnId, itemId, answers, unarchive === true, signal, steers, clientUserMessageId)))
       } catch (error) {
         if (error instanceof CodexRpcError) {
           const reason = error.data?.reason

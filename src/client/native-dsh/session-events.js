@@ -96,6 +96,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const rowsById = new Map()
   const liveTurns = new Map()
   const pendingRolloutTurns = new Set()
+  const pendingQuestionReplies = new Map()
   let windowEntries = []
   let appendedEntries = []
   let rebuildWindow = false
@@ -249,7 +250,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     const rollbackAttachments = cacheAttachments(images)
     let pageEntries
     try {
-      const merged = turns.map(turn => transcript.reconcile(turn).turn)
+      const merged = turns.map(turn => transcript.reconcile(turn, withQuestionReplies(turn.id, turn.items)).turn)
       pageEntries = projectCodexTurns(merged, projectionOptions(pageBounds(rows[0]?.entries[0])))
     } catch (error) {
       // 页未发布时撤回本次新合并的轮次，重连仍能从原生记录重建。
@@ -260,6 +261,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       rollbackAttachments()
       throw error
     }
+    for (const { id } of turns) pendingQuestionReplies.delete(id)
     const older = []
     for (const entry of pageEntries) {
       if (entry.event.type === 'turn/start') {
@@ -274,8 +276,13 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     return pageEntries
   }
 
+  function withQuestionReplies(turnId, items = []) {
+    const replies = pendingQuestionReplies.get(turnId)
+    return replies ? [...items, ...replies] : items
+  }
+
   async function updateTurn(turn, updates = turn.items ?? []) {
-    const merged = transcript.reconcile(turn, updates)
+    const merged = transcript.reconcile(turn, withQuestionReplies(turn.id, updates))
     if (!merged) return
     const { turn: next, firstChanged, changes, rollback } = merged
     let rollbackAttachments
@@ -294,6 +301,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       rollback()
       throw error
     }
+    pendingQuestionReplies.delete(next.id)
     if (asyncQuestionInputs?.turnId === next.id && changes.some(({ item, previous }) => questionItem(item) || questionItem(previous))) {
       asyncQuestionInputs = undefined
     }
@@ -906,6 +914,19 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       publishPlanMode,
       setPlanChanging: value => state.update(current => { current.planChanging = value }),
       publishGoal,
+      /** 实时问答的 JSON-RPC 回执没有对应公开消息。在当前历史窗口内保留已确认的遮罩答复。 */
+      publishQuestionReply(turnId, itemId, clientId, replies) {
+        return enqueue(async () => {
+          const saved = pendingQuestionReplies.get(turnId) ?? []
+          saved.push({ id: `codex:question-reply:${turnId}:${itemId}`, type: 'codexQuestionReply',
+            itemId, clientId, replies, completedAtMs: Date.now() })
+          pendingQuestionReplies.set(turnId, saved)
+          // 实时请求可以早于原生轮次写入。现有气泡会等该轮载入后再交接。
+          if (!transcript.getTurn(turnId)) return
+          await updateTurn({ id: turnId })
+          publish()
+        })
+      },
       projections: { faceOf: key => projections.get(key) ?? emptyProjection },
       queuedImageUrl: id => queueImages.get(id)?.url,
       async readAttachment({ attachmentId }) {

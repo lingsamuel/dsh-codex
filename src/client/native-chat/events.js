@@ -1,5 +1,5 @@
 import { inlineAttachmentId } from './attachments.js'
-import { projectQuestionReply, projectTool } from './tools.js'
+import { projectQuestionReply, projectTool, questionReplyContent } from './tools.js'
 import { projectFileLinks } from './file-links.js'
 import { projectVisualizeReferences } from './visualize.js'
 import { subagentActivityEvent, subagentActivityKinds } from './subagent-activity.js'
@@ -272,6 +272,13 @@ function turnEvents(turn, number, {
     }
     lastTime = end
 
+    if (item.type === 'codexQuestionReply') {
+      emit('user/message', end, { id: item.id, role: 'user', content: [textBlock(JSON.stringify(questionReplyContent(item.replies)))],
+        source: { kind: 'user-question-reply', callId: item.itemId, outcome: 'answered', rpcId: item.clientId },
+      }, 'append')
+      activity = true
+      return
+    }
     if (isUser) {
       if (!replies) {
         const fileLocation = fileThreadId && { threadId: fileThreadId, turnId: turn.id, itemId: item.id }
@@ -313,7 +320,7 @@ function turnEvents(turn, number, {
       return
     }
 
-    const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies) : projectTool(item, cwd)
+    const { name, args, output, meta, isError } = replies ? projectQuestionReply(replies, item.clientId) : projectTool(item, cwd)
     emit('tool/call', start, { ...coordinates(), callId: item.id, name, arguments: JSON.stringify(args) })
     if (item.status === 'inProgress') return
     emit('tool/result', end, {

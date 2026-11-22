@@ -26,9 +26,9 @@ const hook = registerHooks({
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
     if (specifier === './live-watch.js' || specifier === '../live-watch.js') return { shortCircuit: true, url: liveWatchModule }
     const source = {
-      '@deepseek-ai/dsh-client-ui-primitives': 'export const Button = null, InlineEditor = null, Modal = null, Toast = null',
+      '@deepseek-ai/dsh-client-ui-primitives': 'export const Button = null, IconQuestionOutlineRegular = null, InlineEditor = null, Modal = null, Toast = null',
       react: `export const createElement = (type, props, ...children) => ({ type, props, children });
-        export const useState = value => [value, () => {}], useLayoutEffect = null, useMemo = null, useSyncExternalStore = null`,
+        export const useState = value => [value, () => {}], useLayoutEffect = null, useMemo = read => read(), useSyncExternalStore = null`,
       'react/jsx-runtime': 'export const Fragment = Symbol(), jsx = (type, props) => ({ type, props }), jsxs = jsx',
     }[specifier]
     if (source) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` }
@@ -48,6 +48,7 @@ const { provideCodexControllers } = await import('../src/client/native-dsh/contr
 const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
 const { installComposer } = await import('../src/client/native-dsh/composer.jsx')
+const { installCodexQuestions } = await import('../src/client/native-dsh/question-ui.jsx')
 const { SubagentReadOnlyComposer } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/SubagentReadOnlyComposer.tsx')
 const { zh: subagentCopy } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/locales.ts')
 hook.deregister()
@@ -694,6 +695,35 @@ test('首条消息切换到工作树会话时接续本地气泡，直到原生�
   assert.equal(retired.mock.callCount(), 1)
 })
 
+test('忙碌会话立即显示排队和插话，插话短暂入队后仍保留聊天气泡', async t => {
+  const source = mockTransport(t)
+  const ctx = { effect: install => t.after(install()) }
+  const history = createCodexHistory(ctx, { id: 'busy' })
+  const input = createSessionInput(ctx, 'busy', history, { getSnapshot: () => undefined, clear() {} })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const content = [{ type: 'text', text: '补充内容' }]
+  const snapshot = () => history.session.getSnapshot().pendingSubmissions
+  const status = { type: 'active', activeFlags: [] }
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask])] }, mode: 'live', status })
+  const queued = input.beginSubmission({ mode: 'queue', text: content[0].text, attachments: [] })
+  assert.equal(snapshot()[0]?.placement, 'queued')
+  queued.abandon()
+
+  const reply = Promise.withResolvers()
+  globalThis.fetch = () => reply.promise
+  const { requestId } = input.beginSubmission({ mode: 'steer', text: content[0].text, attachments: [] })
+  assert.equal(snapshot()[0]?.placement, 'steering')
+  const sending = input.prompt(content, 'steer', undefined, requestId)
+  await emit({ type: 'queue', submissions: [{ id: 'fallback', clientUserMessageId: requestId, input: content }] })
+  await emit({ type: 'queue', submissions: [] })
+  reply.resolve(Response.json({}))
+  assert.equal((await sending).ok, true)
+  assert.equal(snapshot()[0]?.requestId, requestId)
+  await emit({ type: 'change', turn: { id: 'next', status: 'inProgress' },
+    items: [{ type: 'userMessage', id: 'steered', clientId: requestId, content }] })
+  assert.deepEqual(snapshot(), [])
+})
+
 test('待发插话副本保留在队列区域，不参与再次插话或编辑器草稿提交', async t => {
   const source = mockTransport(t)
   const history = createCodexHistory({ effect() {} }, { id: 'thread' })
@@ -935,6 +965,85 @@ test('异步问答随当前轮次的原生条目弹出，即使没有等待状�
   assert.deepEqual(displayed()[0].questions.map(question => question.index), [1])
   await emit({ type: 'change', turn: { id: 'next', status: 'inProgress' }, items: [] })
   assert.deepEqual(displayed(), [])
+})
+
+test('问答面板提交后立即显示答案，原生异步历史接手，实时答复保留遮罩', async t => {
+  const source = mockTransport(t)
+  const ctx = { effect: install => t.after(install()) }
+  const history = createCodexHistory(ctx, { id: 'questions' })
+  const input = createSessionInput(ctx, 'questions', history, { getSnapshot: () => undefined, clear() {} })
+  const session = { ...history.session, ...input }
+  const remote = { answer() {} }
+  const slots = { inject() {}, entries: () => [] }
+  installCodexQuestions({ ...ctx, slots, locale: { register() {}, bind: () => key => key },
+    inject(services, install) {
+      if (services.includes('remote.userQuestions')) install({ ...ctx, slots, on: () => () => {},
+        get: () => remote, sessions: { binding: () => ({ session }) } })
+    } })
+  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const asyncItem = { id: 'async', type: 'agentMessage', questions: [{ title: '部署到哪里？', options: ['测试环境'] }] }
+  const status = { type: 'active', activeFlags: ['waitingOnUserInput'] }
+  await emit({ type: 'snapshot', page: { data: [turn('current', 'inProgress', [ask, asyncItem])] }, mode: 'live', status })
+  const echoes = () => session.getSnapshot().pendingSubmissions
+  let request
+  let url
+  let response = Promise.withResolvers()
+  globalThis.fetch = (target, options) => {
+    url = target.pathname
+    request = JSON.parse(options.body)
+    return response.promise
+  }
+
+  const asyncId = '["request_user_input_async","async",0]'
+  const sending = remote.answer('questions', asyncItem.id, { answers: [{ id: asyncId, selected: ['测试环境'] }] })
+  assert.equal(url, '/api/codex/async-question-answer')
+  assert.equal(echoes()[0]?.text, '部署到哪里？\n测试环境')
+  assert.equal(echoes()[0]?.placement, 'steering')
+  assert.equal(request.clientUserMessageId, echoes()[0]?.requestId)
+  const reply = { questionItemId: asyncId, question: '部署到哪里？', answer: '测试环境' }
+  const content = [{ type: 'text', text: `<send_user_message_question_reply>${JSON.stringify([reply])}</send_user_message_question_reply>` }]
+  const queued = { id: 'briefly-queued', clientUserMessageId: request.clientUserMessageId, input: content }
+  await emit({ type: 'queue', submissions: [queued] })
+  assert.equal(echoes().length, 1)
+  response.resolve(Response.json({ submitted: true }))
+  assert.equal((await sending).ok, true)
+  assert.equal(echoes().length, 1)
+  await emit({ type: 'change', turn: { id: 'current', status: 'inProgress' },
+    items: [{ type: 'userMessage', id: 'saved-answer', clientId: request.clientUserMessageId, content }] })
+  // 历史先接手时应立即停用聊天回显，同时仍用其 ID 隐藏队列里迟到的旧行。
+  assert.deepEqual(echoes().filter(item => item.placement !== 'queued'), [])
+  await emit({ type: 'queue', submissions: [] })
+  assert.deepEqual(echoes(), [])
+  const answers = () => history.events.getSnapshot().entries.filter(({ event }) => event.type === 'tool/result' && event.data.meta?.codexQuestionReply)
+  assert.equal(answers().length, 1)
+
+  await emit({ type: 'questions', requests: [{ requestId: 1, itemId: 'native', turnId: 'current',
+    questions: [{ id: 'token', question: '输入令牌', isSecret: true }] }] })
+  response = Promise.withResolvers()
+  const submitted = { answers: [{ id: 'token', selected: [], custom: 'private-value' }] }
+  const rejected = remote.answer('questions', 'native', submitted)
+  assert.equal(url, '/api/codex/question-answer')
+  assert.equal(echoes()[0]?.text, '输入令牌\nsecretAnswer')
+  assert.deepEqual(request.answers, { token: { answers: ['user_note: private-value'] } })
+  response.resolve(Response.json({ error: '原生请求失败' }, { status: 503 }))
+  await assert.rejects(rejected, /原生请求失败/)
+  assert.deepEqual(echoes(), [])
+  assert.equal(answers().length, 1)
+
+  response = Promise.withResolvers()
+  // 实时应答有可能先于对应轮次的历史增量到达。
+  await emit({ type: 'questions', requests: [{ requestId: 2, itemId: 'native', turnId: 'not-yet-saved',
+    questions: [{ id: 'token', question: '输入令牌', isSecret: true }] }] })
+  const retry = remote.answer('questions', 'native', submitted)
+  response.resolve(Response.json({ submitted: true }))
+  assert.equal((await retry).ok, true)
+  assert.equal(echoes()[0]?.text, '输入令牌\nsecretAnswer')
+  await emit({ type: 'change', turn: { id: 'not-yet-saved', status: 'inProgress' }, items: [{ ...ask, id: 'new-ask' }] })
+  assert.deepEqual(echoes(), [])
+  const confirmed = history.events.getSnapshot().entries.filter(({ event }) => event.type === 'user/message'
+    && event.data.source.kind === 'user-question-reply')
+  assert.equal(confirmed.length, 1)
+  assert.equal(JSON.parse(confirmed[0].event.data.content[0].text).answers[0].custom, 'secretAnswer')
 })
 
 test('归档会话从只读历史同时显示异步问题正文与原生问答面板', async t => {
