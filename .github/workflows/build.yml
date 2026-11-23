@@ -8,6 +8,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      release-version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -24,3 +26,52 @@ jobs:
           name: dsh-codex
           path: artifacts/*.tgz
           if-no-files-found: error
+      - name: Validate release tag
+        id: release
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package version $version"
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+
+  publish-npm:
+    needs: build
+    if: needs.build.outputs.release-version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.1'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: dsh-codex
+          path: artifacts
+      - run: npm publish "./artifacts/dsh-codex-${RELEASE_VERSION}.tgz" --access public
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
+
+  github-release:
+    needs: build
+    if: needs.build.outputs.release-version != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dsh-codex
+          path: artifacts
+      - run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            "artifacts/dsh-codex-${RELEASE_VERSION}.tgz" "artifacts/dsh-codex-min-${RELEASE_VERSION}.tgz"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.release-version }}

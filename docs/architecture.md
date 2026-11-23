@@ -22,6 +22,10 @@ Codex 页的客户端启动图跳过依赖 DSH 原生会话的反馈、侧栏终
 
 默认模式、共存选项和独占开关在 profile 的插件数据目录原子保存。共存时侧栏切换当前标签页，并更新新入口的默认值。单一入口和独占通过同一套客户端启动图选择统一入口，后台会话服务继续运行。已打开的其他模式标签页收到更新后提示重新加载。
 
+### 发布
+
+Build 工作流在分支和 tag 推送时测试、打包并上传产物。推送与 `package.json` 版本一致的 `v<版本>` tag 时，同一次构建的两个包附到对应的 GitHub Release，普通 Web 版通过 npm Trusted Publishing 发布为 `@lingsamuel/dsh-codex`。npm 端的授权指向 `lingsamuel/dsh-codex` 仓库的 `build.yml`，并允许 `npm publish`。
+
 ## 工作区与会话目录
 
 ### 清单、缓存和更新
