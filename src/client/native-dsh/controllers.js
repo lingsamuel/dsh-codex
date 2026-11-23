@@ -14,7 +14,6 @@ const localSessionKey = 'dsh.codex.local-sessions'
 
 function localThread({ id, cwd, projectId }) {
   return { id, cwd, projectId, name: directoryTitle(cwd), localDraft: true, blank: true,
-    firstRequestId: crypto.randomUUID(),
     historyMode: 'paginated', status: { type: 'idle' } }
 }
 
@@ -61,7 +60,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession, thread.firstRequestId),
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession),
       goalDraft,
       worktreeDraft,
       openWorktree,

@@ -710,8 +710,11 @@ test('空闲会话提交后立即回显，队列确认与历史推送之间气�
   assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0]?.id, queuedForLater.id)
 })
 
-test('首条消息切换到原生会话时接续本地气泡，直到原生历史接手', async t => {
+test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给原生历史', async t => {
   const source = mockTransport(t)
+  const storage = new Map()
+  const sessionStorage = { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) }
+  window.sessionStorage = sessionStorage
   const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
   const store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
   const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
@@ -740,15 +743,35 @@ test('首条消息切换到原生会话时接续本地气泡，直到原生历�
   assert.equal(await services.get('sessions').create({ cwd: native.cwd }), id)
   uiWorkspace.openSession(id)
   t.after(() => view.release())
+  const content = [{ type: 'text', text: '这是新会话的首条消息' }]
+  const submitted = []
+  globalThis.fetch = async (url, request) => {
+    if (url.pathname !== '/api/codex/conversation-action') return Response.json({})
+    submitted.push(JSON.parse(request.body))
+    throw new TypeError('首发 HTTP 回执丢失')
+  }
+  assert.equal((await view.binding.session.prompt(content, 'queue')).ok, false)
+
+  view.release()
+  globalThis.window = Object.assign(new EventTarget(), { sessionStorage })
+  provideCodexControllers(ctx, catalog)
+  assert.equal(await services.get('sessions').create({ cwd: native.cwd }), id)
+  uiWorkspace.openSession(id)
   const draft = view.binding.session
   const reply = Promise.withResolvers()
-  globalThis.fetch = () => reply.promise
-  const content = [{ type: 'text', text: '这是新会话的首条消息' }]
+  globalThis.fetch = (url, request) => {
+    if (url.pathname !== '/api/codex/conversation-action') return Response.json({})
+    submitted.push(JSON.parse(request.body))
+    return reply.promise
+  }
   const accepted = t.mock.fn()
   const retired = t.mock.fn()
   const { requestId } = draft.beginSubmission({ mode: 'queue', text: content[0].text, attachments: [],
     onAccept: accepted, onRetire: retired })
   const sending = draft.prompt(content, 'queue', undefined, requestId)
+  assert.equal(submitted.length, 2)
+  assert.equal(submitted[0].threadId, submitted[1].threadId)
+  assert.equal(submitted[0].clientUserMessageId, submitted[1].clientUserMessageId)
   assert.equal(draft.getSnapshot().pendingSubmissions[0]?.text, content[0].text)
   // 恢复丢失的首发回执时，历史仍保留最早提交的 ID。
   const nativeRequestId = 'original-attempt'

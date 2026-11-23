@@ -20,9 +20,10 @@ function worktreeSelection(worktree) {
 }
 
 /** 使用 DSH 输入栏的提交生命周期，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession,
-  newSessionRequestId = newSession && crypto.randomUUID()) {
+export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession) {
   const { session, events, queueStore, updateState, activeTurnId } = history
+  // 首发回执可能在刷新期间丢失。沿用已保存的草稿 ID，Host 才能找到原来的投递。
+  const newSessionRequestId = newSession ? threadId : undefined
   const submissions = new Map()
   let goalConfirmation
   let reviewRequestId
@@ -124,6 +125,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
   }
 
   function openSubmittedThread(result, requestId) {
+    if (session.getSnapshot().newSessionRecovery) updateState(state => { delete state.newSessionRecovery })
     const submission = submissions.get(requestId)
     if (!submission?.echo) {
       retire(requestId, observedSubmission, !newSession)
@@ -393,6 +395,9 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           return accepted
         }
         retire(requestId, failedSubmission)
+        if (newSession && error.newSessionRecovery) {
+          updateState(state => { state.newSessionRecovery = error.newSessionRecovery })
+        }
         if (goal) {
           // Goal 的错误随输入模式销毁。原生发送 Toast 会在退出模式后继续显示旧错误。
           const result = failure(error)

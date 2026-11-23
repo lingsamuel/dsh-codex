@@ -192,6 +192,23 @@ test('取消或拒绝首发时保留输入设置，重试使用原提交身份',
   assert.deepEqual(fixture.modelDraft.getSnapshot(), model)
 })
 
+test('首发内容冲突时保留可打开的原生会话和当前草稿', async t => {
+  const recovery = { thread: { id: 'original', cwd: '/repository' }, workspacePaths: {} }
+  const lifecycle = []
+  const fixture = newSessionFixture(t, () => Response.json({ error: '请打开原生会话核对',
+    reason: 'new-session-input-changed', newSessionRecovery: recovery }, { status: 409 }), {
+    openWorktree: () => assert.fail('需要用户明确选择是否打开原生会话'),
+  })
+  const input = fixture.bind()
+  const text = '编辑后的消息'
+  const { requestId } = input.beginSubmission({ mode: 'queue', text, attachments: [],
+    onAccept: () => assert.fail('未发送的编辑不应被清除'), onRetire: settlement => lifecycle.push(settlement.reason) })
+  const result = await input.prompt([{ type: 'text', text }], 'queue', undefined, requestId)
+  assert.equal(result.error.code, 'session/new-session-input-changed')
+  assert.deepEqual(fixture.state.newSessionRecovery, recovery)
+  assert.deepEqual(lifecycle, ['failed'])
+})
+
 test('空会话明确提交 /goal 时以首次原生操作创建目标和会话', async t => {
   const thread = { id: 'goal-native', cwd: '/repository' }
   const goal = { objective: '整理结果', status: 'active' }

@@ -16,7 +16,7 @@ const copy = {
     goalPlaceholder: '输入要交给 Codex 的目标', goalSend: '创建目标', goalUnarchiveAndSend: '取消归档并创建目标',
     changingPlan: '正在等待 Codex 确认计划模式…',
     loading: '正在载入会话…', unavailable: '会话历史未就绪',
-    commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列',
+    commands: '指令', skillHint: '$ 选择技能', continueQueue: '继续队列', openTarget: '打开目标会话',
     filesOnly: '请选择文件。工作区目录可以用 @ 引用。', fileInputUnavailable: '当前无法添加文件。' },
   en: { readonly: 'Direct messages are unavailable for this session', unarchiveAndSend: 'Unarchive and send', unarchiveAndContinue: 'Unarchive and continue queue',
     subagentReadonly: 'This subagent is read-only', subagentReadonlyBody: 'Codex does not allow direct messages to this subagent.',
@@ -24,17 +24,18 @@ const copy = {
     goalPlaceholder: 'Describe the goal for Codex', goalSend: 'Create goal', goalUnarchiveAndSend: 'Unarchive and create goal',
     changingPlan: 'Waiting for Codex to confirm Plan mode…',
     loading: 'Loading sessions…', unavailable: 'Conversation history is unavailable',
-    commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue',
+    commands: 'Commands', skillHint: '$ select a skill', continueQueue: 'Continue queue', openTarget: 'Open target session',
     filesOnly: 'Choose files. Use @ to reference a workspace folder.', fileInputUnavailable: 'Files cannot be added right now.' },
 }
 const commandKeys = { ArrowUp: 'up', ArrowDown: 'down', Enter: 'enter', Escape: 'escape', Tab: 'tab' }
 const noGoalDraft = createSnapshotStore(undefined)
 
-function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, composerT, ...props }) {
+function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDraft = noGoalDraft, openWorktree, composerT, ...props }) {
   const { blocked, disabled, keyboard, t, toggleCommandMenu } = props
   // 发送锁定期间，原生输入栏仍按取消权限处理活动轮次的 Stop。
   const canStop = props.useSession(state => state.running && Boolean(state.live.activeTurnId) && !composerUnavailable(state))
   const archived = props.useSession(state => state.archived)
+  const recovery = props.useSession(state => state.newSessionRecovery)
   const plan = props.useProjection('plan', value => value?.active)
   const goal = useSyncExternalStore(goalDraft.subscribe, goalDraft.getSnapshot)
   useLayoutEffect(() => {
@@ -68,7 +69,9 @@ function ComposerBar({ Native, commandsLabel, unarchiveLabel, skillHint, goalDra
   const placeholder = goal && !blocked && !disabled ? composerT('goalPlaceholder')
     : !blocked && !disabled && props.variant === 'hero' && props.placeholder === t('placeholder.hero')
     ? (plan ? t('placeholder.plan') : withSkillHint(props.placeholder)) : props.placeholder
-  return <Native {...props} placeholder={placeholder} stop={canStop ? props.stop : undefined}
+  const accessory = recovery && openWorktree ? <>{props.accessory}<Button size="sm" variant="outline"
+    onClick={() => openWorktree(recovery, false)}>{composerT('openTarget')}</Button></> : props.accessory
+  return <Native {...props} accessory={accessory} placeholder={placeholder} stop={canStop ? props.stop : undefined}
     t={(key, ...args) => {
       if (key === 'input.commands' && toggleCommandMenu) return commandsLabel
       if (goal && (key === 'input.send' || key.startsWith('input.send.'))) return composerT(archived ? 'goalUnarchiveAndSend' : 'goalSend')
@@ -230,7 +233,7 @@ export function installComposer(ctx, catalog) {
         const props = inject(sessionId, ...args)
         if (sessionId === undefined) return props
         const binding = sessions.binding(sessionId)
-        return { ...props, goalDraft: binding?.session.goalDraft, addFiles(files, directories) {
+        return { ...props, goalDraft: binding?.session.goalDraft, openWorktree: binding?.session.openWorktree, addFiles(files, directories) {
           if (!sessions.binding(sessionId)) return t('fileInputUnavailable')
           if (directories?.size) return t('filesOnly')
           // DSH 会暂存普通文件。图片草稿仍由原生组件在提交时编码。
