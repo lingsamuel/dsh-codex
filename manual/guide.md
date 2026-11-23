@@ -37,7 +37,7 @@
 
 ### 选择插件包
 
-**一般用户选 `dsh-chatgpt-web-<版本>.tgz` 即可。** 它直接装进已有的 DSH Web。不带 `-web` 的包适合需要单独启动极简 DSH Web 服务的场景。
+**一般用户选 `dsh-chatgpt-<版本>.tgz` 即可。** 它直接装进已有的 DSH Web。需要单独启动极简 DSH Web 服务时，选 `dsh-chatgpt-min-<版本>.tgz`。
 
 从源码打包时，在仓库根目录依次运行 `npm ci` 和 `npm run package:plugin`，一次在 `artifacts/` 生成两个 `.tgz`。也可以从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` 构建产物。
 
@@ -45,14 +45,16 @@
 
 | 插件包 | DSH 加载的 YAML | 加载后会发生什么 |
 | --- | --- | --- |
-| `dsh-chatgpt-web-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `dsh-chatgpt` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
-| `dsh-chatgpt-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载访问 Codex 所需的侧栏、聊天框和文件浏览器等组件，停用 DSH 原生会话服务。网页省去 DSH 插件管理、定时任务和交互式侧栏终端。 |
+| `dsh-chatgpt-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `dsh-chatgpt` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
+| `dsh-chatgpt-min-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载访问 Codex 所需的侧栏、聊天框和文件浏览器等组件，停用 DSH 原生会话服务。网页省去 DSH 插件管理、定时任务和交互式侧栏终端。 |
+
+早期构建采用旧命名。安装旧包时，按包内 `package/package.json` 的 `dsh.bundle.patch` 字段核对上表中的 YAML。
 
 两包都可以用 `dsh plugin --profile 名称 add 包路径` 安装。Profile 是 DSH 的一套具名配置，包含插件清单和设置。安装目标由 `--profile` 指定，在网页里安装时则是当前运行的 DSH 实例所用的 Profile。
 
 ### 在已有 DSH Web 中加入 Codex
 
-在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-<版本>.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。
+在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-<版本>.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。
 
 - 默认允许共存。侧栏「启用 Codex 模式」立即切换当前标签页，并更新随后打开且省略 `mode` 的页面默认值。其他标签页保留各自入口。
 - 关闭「允许标签页使用不同模式」后，当前实例按已保存的默认值统一进入一个模式，侧栏开关可切换整个实例。
@@ -67,10 +69,10 @@
 
 需要 DSH 0.2.3-alpha.2、pnpm 和 Node.js 24.22.3 或更新的 24.x，或 Node.js 26.13.1 及以上版本。运行时依赖已登录的 Codex 和本机共享 App Server，插件使用 App Server 0.171.0 验证。若共享服务尚未启动，可运行 `codex app-server daemon start`。
 
-选择不带 `-web` 的包，把示例中的包路径换成实际的绝对路径。下面用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。
+选择带 `-min` 的包，把示例中的包路径换成实际的绝对路径。下面用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。
 
 ```sh
-dsh plugin --profile codex add '/absolute/path/to/dsh-chatgpt-<版本>.tgz'
+dsh plugin --profile codex add '/absolute/path/to/dsh-chatgpt-min-<版本>.tgz'
 dsh --profile codex --no-open
 ```
 

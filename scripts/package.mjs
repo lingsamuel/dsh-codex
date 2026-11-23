@@ -6,43 +6,57 @@ import pkg from '../package.json' with { type: 'json' }
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const artifacts = join(root, 'artifacts')
-const cache = join(root, '.runtime', 'npm-cache')
+const runtime = join(root, '.runtime')
+const cache = join(runtime, 'npm-cache')
 const archive = `${pkg.name}-${pkg.version}.tgz`
-const webArchive = `${pkg.name}-web-${pkg.version}.tgz`
+const minArchive = `${pkg.name}-min-${pkg.version}.tgz`
 
 await mkdir(artifacts, { recursive: true })
-execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--quiet', '--pack-destination', artifacts,
-  '--cache', cache], { cwd: root, stdio: 'inherit' })
+await mkdir(runtime, { recursive: true })
 
-// 两种入口共用同一套代码和插件 ID。官方 Web 安装包只装配扩展自身，
-// 独立安装包继续负责完整的 Codex profile。
-const staging = await mkdtemp(join(root, '.runtime', 'web-package-'))
+// npm pack 按同一个插件名生成归档。两份包在临时目录构建完成后再写入产物目录。
+const staging = await mkdtemp(join(runtime, 'plugin-package-'))
 try {
+  execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--quiet',
+    '--pack-destination', staging, '--cache', cache], { cwd: root, stdio: 'inherit' })
+  await rename(join(staging, archive), join(staging, minArchive))
+
+  const web = join(staging, 'web')
   for (const file of [...pkg.files, 'README.md']) {
-    const target = join(staging, file)
+    const target = join(web, file)
     await mkdir(dirname(target), { recursive: true })
     await cp(join(root, file), target, { recursive: true })
   }
-  const web = { ...pkg, dsh: { ...pkg.dsh, bundle: { patch: './profile/web-mode.yml' } } }
-  await writeFile(join(staging, 'package.json'), JSON.stringify(web, null, 2) + '\n')
+  const webManifest = { ...pkg, dsh: { ...pkg.dsh, bundle: { patch: './profile/web-mode.yml' } } }
+  await writeFile(join(web, 'package.json'), JSON.stringify(webManifest, null, 2) + '\n')
   execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--quiet', '--ignore-scripts',
-    '--pack-destination', staging, '--cache', cache], { cwd: staging, stdio: 'inherit' })
-  await rename(join(staging, archive), join(artifacts, webArchive))
+    '--pack-destination', staging, '--cache', cache], { cwd: web, stdio: 'inherit' })
+  await rename(join(staging, minArchive), join(artifacts, minArchive))
+  await rename(join(staging, archive), join(artifacts, archive))
 } finally {
   await rm(staging, { recursive: true, force: true })
 }
 
+await rm(join(artifacts, `${pkg.name}-web-${pkg.version}.tgz`), { force: true })
+
 // 只清理本插件的旧版本，保留刚打出的包和最近三个历史版本。
-const older = await Promise.all((await readdir(artifacts, { withFileTypes: true }))
-  .filter(file => file.isFile() && file.name !== archive && file.name !== webArchive && /^dsh-chatgpt-(?:web-)?\d+\.\d+\.\d+(?:[-+][\da-z.+-]+)?\.tgz$/i.test(file.name))
-  .map(async file => {
-    const path = join(artifacts, file.name)
-    return { path, web: file.name.startsWith('dsh-chatgpt-web-'), modified: (await stat(path)).mtimeMs }
-  }))
+const older = []
+for (const file of await readdir(artifacts, { withFileTypes: true })) {
+  if (!file.isFile()) continue
+  const match = /^dsh-chatgpt-(?:(?:min|web)-)?(\d+\.\d+\.\d+(?:[-+][\da-z.+-]+)?)\.tgz$/i.exec(file.name)
+  if (!match || match[1] === pkg.version) continue
+  const path = join(artifacts, file.name)
+  try {
+    older.push({ path, version: match[1], modified: (await stat(path)).mtimeMs })
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+}
 older.sort((left, right) => right.modified - left.modified)
-for (const web of [false, true]) {
-  for (const { path } of older.filter(file => file.web === web).slice(3)) await rm(path)
+const versions = [...new Set(older.map(file => file.version))].slice(0, 3)
+for (const { path, version } of older) {
+  if (!versions.includes(version)) await rm(path, { force: true })
 }
 
 console.log(join(artifacts, archive))
-console.log(join(artifacts, webArchive))
+console.log(join(artifacts, minArchive))
