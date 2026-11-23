@@ -13,8 +13,15 @@ const duration = 560
 const styles = `
 [data-codex-mode-brand] { display: inline-flex; align-items: center; height: 24px; }
 [data-codex-mode-brand], [data-codex-mode-mark] { vertical-align: middle; }
-[data-codex-mode-mark] { display: inline-grid; }
+[data-codex-mode-mark] { display: inline-grid; place-items: center; }
 [data-codex-mode-mark] svg { display: block; }
+[data-codex-mode-mark] > :is([data-codex-mode-outgoing], [data-codex-mode-incoming]) {
+  grid-area: 1 / 1;
+  inline-size: 100%;
+  block-size: 100%;
+  display: grid;
+  place-items: center;
+}
 [data-codex-mode-stack] { display: inline-grid; position: relative; flex: none; }
 [data-codex-mode-stack] > * { grid-area: 1 / 1; }
 [data-codex-mode-crop] { display: block; overflow: hidden; position: relative; flex: none; }
@@ -72,11 +79,13 @@ function ArtworkCrop({ mode, badge }) {
 function ModeMark({ size, state }) {
   const { mode, motion } = useSyncExternalStore(state.subscribe, state.getSnapshot)
   const Mark = (artwork[mode] ?? artwork.dsh).Mark
-  if (!motion) return <span data-codex-mode-mark><Mark size={size} /></span>
-  const Target = artwork[motion.to].Mark
-  return <span data-codex-mode-mark aria-hidden="true">
-    <span style={{ gridArea: '1 / 1' }} data-codex-mode-outgoing><Mark size={size} /></span>
-    <span style={{ gridArea: '1 / 1' }} data-codex-mode-incoming><Target size={size} /></span>
+  const Target = motion && artwork[motion.to].Mark
+  // 鲸鱼图稿比方形图标矮，静止、动画和交接都使用同一个方形图标格。
+  return <span data-codex-mode-mark aria-hidden={motion ? 'true' : undefined} style={{ width: size, height: size }}>
+    {Target ? <>
+      <span data-codex-mode-outgoing><Mark size={size} /></span>
+      <span data-codex-mode-incoming><Target size={size} /></span>
+    </> : <Mark size={size} />}
   </span>
 }
 
