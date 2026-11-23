@@ -5,12 +5,20 @@ export const nativeSessionClient = '@deepseek-ai/dsh-api-session-controller'
 
 const conflictingClientPackages = new Set([
   nativeSessionClient,
+  '@deepseek-ai/dsh-api-job-controller',
+  '@deepseek-ai/dsh-api-terminal-controller',
   '@deepseek-ai/dsh-api-workspace-controller',
   '@deepseek-ai/dsh-client-file-upload',
   '@deepseek-ai/dsh-client-hmr',
   '@deepseek-ai/dsh-client-ui-brand-official',
   '@deepseek-ai/dsh-client-ui-agent-preset',
+  '@deepseek-ai/dsh-client-ui-jobs',
+  '@deepseek-ai/dsh-client-ui-message-feedback',
   '@deepseek-ai/dsh-client-ui-plan',
+  '@deepseek-ai/dsh-client-ui-schedule',
+  '@deepseek-ai/dsh-client-ui-sidebar-terminal',
+  '@deepseek-ai/dsh-client-ui-skill',
+  '@deepseek-ai/dsh-session-log-export',
 ])
 
 export function selectCodexBoot(graph) {

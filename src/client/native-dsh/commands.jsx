@@ -9,6 +9,7 @@ import { createPlanAction, PlanChip } from './plan-command.jsx'
 import { GoalChip, GoalReplacement, installGoalBar } from './goal-command.jsx'
 import { commandUnavailable } from './command-action.jsx'
 import { installComposerModeLabel } from './composer-mode-label.jsx'
+import { installSessionExport } from './session-export.jsx'
 
 const overlay = 'conversation.input.overlay'
 const modeSlot = 'conversation.input.plan'
@@ -24,6 +25,7 @@ const copy = {
     export: '导出会话', 'export.description': '将已保存的会话导出为 Markdown',
     'export.copy': '复制 Markdown', 'export.download': '下载 Markdown', 'export.copied': '已复制 Markdown。',
     'export.copyFailed': '无法写入剪贴板，可以下载 Markdown。',
+    'export.downloadFailed': '无法下载会话 Markdown，请重试。',
     rename: '重命名', 'rename.description': '重命名当前会话',
     close: '关闭', loading: '正在读取…', model: '模型', effort: '推理强度', session: '会话 ID', cwd: '工作目录',
     context: '上下文占用', used: '已使用 token', budget: 'token 预算',
@@ -56,6 +58,7 @@ const copy = {
     export: 'Export session', 'export.description': 'Export the saved conversation as Markdown',
     'export.copy': 'Copy Markdown', 'export.download': 'Download Markdown', 'export.copied': 'Markdown copied.',
     'export.copyFailed': 'Could not write to the clipboard. Download the Markdown instead.',
+    'export.downloadFailed': 'Could not download the session Markdown. Try again.',
     rename: 'Rename', 'rename.description': 'Rename the current session',
     close: 'Close', loading: 'Loading…', model: 'Model', effort: 'Reasoning effort', session: 'Session ID', cwd: 'Working directory',
     context: 'Context usage', used: 'Tokens used', budget: 'Token budget',
@@ -108,6 +111,7 @@ export function installCommands(ctx) {
   const t = ctx.locale.bind(locale)
   installGoalBar(ctx, t)
   installComposerModeLabel(ctx)
+  installSessionExport(ctx, t)
 
   ctx.inject(['commandUi', 'sessions', 'conversation', 'contextMenus', 'remoteAccess'], scope => {
     const { commandUi, sessions } = scope
@@ -195,16 +199,6 @@ export function installCommands(ctx) {
         ui: { kind: 'action', run },
       }))
     }
-    scope.inject(['contextMenus'], menu => {
-      menu.effect(() => menu.contextMenus.register({
-        id: 'codex.export', target: 'sessionHeader', order: 100,
-        observe: () => [menu.locale],
-        resolve: ({ sessionId }) => controlsFor(sessionId) ? [{
-          id: 'export', label: t('export'),
-          run: () => { controlsFor(sessionId)?.commandRequest.set({ command: 'export' }) },
-        }] : [],
-      }))
-    })
     scope.slots.inject(overlay, () => scope.slots.register({
       name: overlay, id: 'codex-command-details', order: 30, locale,
       inject: sessionId => ({ controls: controlsFor(sessionId) }),

@@ -1,6 +1,6 @@
 {
   "name": "dsh-chatgpt",
-  "version": "0.1.0",
+  "version": "0.1.10",
   "icon": "./assets/plugin-icon.svg",
   "description": "在 DeepSeek Harness 中展示和操作本机 Codex 会话",
   "repository": {
@@ -57,6 +57,7 @@
     "@deepseek-ai/dsh-api-session-controller": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-client-file-upload": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-file-reference-local": "0.2.3-alpha.2",
+    "@deepseek-ai/dsh-session-log-export": "0.2.3-alpha.2",
     "@deepseek-ai/dsh-util-workspace-path": "0.2.3-alpha.2",
     "diff": "^9.0.0",
     "esbuild": "^0.27.0",

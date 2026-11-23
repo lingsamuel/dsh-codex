@@ -15,10 +15,14 @@ export function readPage(collection, parameters, signal) {
   return fetchResult(url, { signal })
 }
 
-export async function readSessionMarkdown(threadId, signal) {
+export function requestSessionMarkdown(threadId, signal) {
   const url = new URL('api/codex/session-export', document.baseURI)
   url.searchParams.set('threadId', threadId)
-  const response = await fetch(url, { signal })
+  return fetch(url, { signal })
+}
+
+export async function readSessionMarkdown(threadId, signal) {
+  const response = await requestSessionMarkdown(threadId, signal)
   if (response.status === 401) throw new Error('网页访问已过期，请从 DSH 的启动链接重新打开。')
   const markdown = await response.text()
   if (!response.ok) throw new Error(markdown || '无法导出 Codex 会话。')

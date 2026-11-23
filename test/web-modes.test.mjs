@@ -105,16 +105,32 @@ test('旧共存标签页的侧栏开关不能覆盖已经统一的实例入口',
   assert.equal((await response.json()).mode, 'dsh')
 })
 
-test('Codex 启动图保持本页的控制器和独立插件', async () => {
+test('Codex 启动图跳过原生会话功能并保留共用组件和独立插件', async () => {
   const { selectCodexBoot } = await import('../src/shared/dual-web-entry.js')
-  const session = '@deepseek-ai/dsh-api-session-controller'
-  const hmr = '@deepseek-ai/dsh-client-hmr'
+  const native = [
+    '@deepseek-ai/dsh-api-session-controller',
+    '@deepseek-ai/dsh-client-hmr',
+    '@deepseek-ai/dsh-api-job-controller',
+    '@deepseek-ai/dsh-api-terminal-controller',
+    '@deepseek-ai/dsh-client-ui-jobs',
+    '@deepseek-ai/dsh-client-ui-message-feedback',
+    '@deepseek-ai/dsh-client-ui-schedule',
+    '@deepseek-ai/dsh-client-ui-sidebar-terminal',
+    '@deepseek-ai/dsh-client-ui-skill',
+    '@deepseek-ai/dsh-session-log-export',
+  ]
+  const shared = '@deepseek-ai/dsh-client-ui-context-menu'
+  const codex = { id: 'dsh-chatgpt', inject: [shared, ...native] }
   const graph = {
-    entries: [{ id: session }, { id: hmr }, { id: 'dsh-chatgpt', inject: [session, hmr] }, { id: 'custom-plugin' }],
-    batches: [{ phase: 'bootstrap', entries: [session, hmr] }, { phase: 'lazy', entries: ['dsh-chatgpt', 'custom-plugin'] }],
+    entries: [...native.map(id => ({ id })), { id: shared }, codex, { id: 'custom-plugin' }],
+    batches: [
+      { phase: 'bootstrap', entries: native },
+      { phase: 'application', entries: [shared, codex.id, 'custom-plugin'] },
+    ],
   }
   assert.deepEqual(selectCodexBoot(graph), {
-    entries: [{ id: 'dsh-chatgpt', inject: [] }, { id: 'custom-plugin' }],
-    batches: [{ phase: 'lazy', entries: ['dsh-chatgpt', 'custom-plugin'] }],
+    entries: [{ id: shared }, { ...codex, inject: [shared] }, { id: 'custom-plugin' }],
+    batches: [{ phase: 'application', entries: [shared, codex.id, 'custom-plugin'] }],
   })
+  assert.deepEqual(graph.entries.find(entry => entry.id === codex.id).inject, [shared, ...native])
 })
