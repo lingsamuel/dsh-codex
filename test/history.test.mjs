@@ -3290,7 +3290,7 @@ test('SSE 重连沿用先前的条目游标，回放初始快照之外的较早�
   assert.match(await read(), /^id: after-activity\nevent: history-checkpoint/)
 })
 
-test('原生未读只推送变化，其他会话的已读更新无需刷新对话或清单', { timeout: 5000 }, async t => {
+test('目录订阅共享未读查询与快照，最后一个订阅关闭后释放监听', { timeout: 5000 }, async t => {
   const fixture = await fakeCodex(t, {
     'thread/read': () => ({ result: { thread: { id: 'selected' }, readState: { firstUnread: null, revision: 'one' } } }),
     'config/read': () => ({ result: { config: {} } }),
@@ -3300,18 +3300,64 @@ test('原生未读只推送变化，其他会话的已读更新无需刷新对�
   t.after(() => db.close())
   db.exec(`PRAGMA journal_mode = WAL;
     CREATE TABLE thread_read_receipts (thread_id TEXT PRIMARY KEY, first_unread_turn TEXT);
-    INSERT INTO thread_read_receipts VALUES ('other', 'previous-turn');`)
-  const response = await fixture.get('/api/codex/watch?scope=catalog')
-  const reader = response.body.getReader()
-  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).slice(6))
-  assert.deepEqual(await read(), { type: 'catalog-ready' })
-  assert.deepEqual(await read(), { type: 'unread', replace: true, added: ['other'], removed: [] })
+    INSERT INTO thread_read_receipts VALUES ('other', 'previous-turn');
+    CREATE TABLE unrelated (value INTEGER);`)
+  let reads = 0
+  const prepare = DatabaseSync.prototype.prepare
+  t.mock.method(DatabaseSync.prototype, 'prepare', function (sql) {
+    if (sql.includes('SELECT thread_id FROM thread_read_receipts')) reads++
+    return prepare.call(this, sql)
+  })
+  async function read(reader) {
+    const { value, done } = await reader.read()
+    if (!done) return JSON.parse(new TextDecoder().decode(value).slice(6))
+  }
+  async function subscribe(ids) {
+    const reader = (await fixture.get('/api/codex/watch?scope=catalog')).body.getReader()
+    t.after(() => reader.cancel())
+    assert.deepEqual(await read(reader), { type: 'catalog-ready' })
+    assert.deepEqual(await read(reader), { type: 'unread', replace: true, added: ids, removed: [] })
+    return reader
+  }
+  const readers = []
+  for (let index = 0; index < 3; index++) readers.push(await subscribe(['other']))
+  const initialReads = reads
+  const unrelated = db.prepare('INSERT INTO unrelated VALUES (?)')
+  let updates = 0
+  const deltas = readers.map(async reader => {
+    const frame = await read(reader)
+    updates++
+    return frame
+  })
+  // 即使每次都超过合并窗口，三个订阅也只需一次共享查询。
+  for (let index = 0; index < 4; index++) {
+    unrelated.run(index)
+    await delay(230)
+  }
+  assert.equal(reads - initialReads, 4, '无关写入引起的未读查询次数')
+  assert.equal(initialReads, 1)
+  assert.equal(updates, 0)
   db.exec(`UPDATE thread_read_receipts SET first_unread_turn = NULL WHERE thread_id = 'other';
     INSERT INTO thread_read_receipts VALUES ('new', '');`)
-  assert.deepEqual(await read(), { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
+  for (const delta of await Promise.all(deltas)) {
+    assert.deepEqual(delta, { type: 'unread', replace: false, added: ['new'], removed: ['other'] })
+  }
+  assert.equal(reads, initialReads + 5)
   assert.deepEqual(fixture.messages.map(message => message.method).sort(),
-    ['initialize', 'initialized', 'config/read'].sort())
-  await reader.cancel()
+    readers.flatMap(() => ['initialize', 'initialized', 'config/read']).sort())
+  await readers[0].cancel()
+  const remaining = readers.slice(1)
+  db.exec("DELETE FROM thread_read_receipts WHERE thread_id = 'new'")
+  for (const delta of await Promise.all(remaining.map(read))) {
+    assert.deepEqual(delta, { type: 'unread', replace: false, added: [], removed: ['new'] })
+  }
+  assert.equal(reads, initialReads + 6)
+  await Promise.all(remaining.map(reader => reader.cancel()))
+  db.exec("INSERT INTO thread_read_receipts VALUES ('offline', 'turn')")
+  await delay(230)
+  assert.equal(reads, initialReads + 6)
+  await subscribe(['offline'])
+  assert.equal(reads, initialReads + 7)
 })
 
 test('取消归档通知后重连历史流以读取移动后的原生记录', { timeout: 2000 }, async t => {

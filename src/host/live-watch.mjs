@@ -3,7 +3,7 @@ import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { createHistoryTail, readItemTailCursor, readThreadTurns } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
-import { watchNativeUnread } from './unread-watch.mjs'
+import { createNativeUnreadMonitor } from './unread-watch.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
@@ -54,6 +54,7 @@ function* historyChangeFrames({ turn, items, onlyIfLoaded }, lastPage) {
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
 export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers) {
+  const watchNativeUnread = createNativeUnreadMonitor()
   return {
     path: '/api/codex/watch',
     methods: ['GET'],
