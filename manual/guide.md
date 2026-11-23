@@ -34,12 +34,24 @@
 
 ## 安装与更新
 
+### 安装到已有的 DSH Web
+
+在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-0.1.5.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。CLI 安装使用同一个 Web profile 和 DSH_HOME。
+
+- 默认允许共存。侧栏「启用 Codex 模式」立即切换当前标签页，并更新随后打开且省略 `mode` 的页面默认值。其他标签页保留各自入口。
+- 关闭「允许标签页使用不同模式」后，当前实例按已保存的默认值统一进入一个模式，侧栏开关可切换整个实例。
+- 打开「Codex 独占」后，实例统一进入 Codex 并隐藏侧栏开关。退出独占时恢复之前的共存设置和默认值。
+- 展开侧栏时也可点击品牌区的黑色徽标切换。徽标翻转后载入目标模式，系统开启减少动态效果时直接切换。
+- 在 Codex 标签页中，DSH 插件装配更新在刷新后生效。
+
+### 安装到独立 Codex profile
+
 需要 DSH 0.2.3-alpha.2、pnpm 和 Node.js 24.22.3 或更新的 24.x，或 Node.js 26.13.1 及以上版本。运行时依赖已登录的 Codex 和本机共享 App Server，插件使用 App Server 0.171.0 验证。若共享服务尚未启动，可运行 `codex app-server daemon start`。
 
 从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` artifact。也可在仓库根目录运行 `npm ci` 和 `npm run package:plugin`，使用 `artifacts/` 中的 `.tgz`。
 
 ```sh
-dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.0.tgz
+dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.5.tgz
 dsh --profile codex --no-open
 ```
 

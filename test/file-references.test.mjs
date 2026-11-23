@@ -138,3 +138,26 @@ test('已有目录里的标题候选无需发出搜索请求，缺少标题才�
   assert.deepEqual((await sessionReferences.candidates('current', '远处标题')).value, [])
   assert.deepEqual(calls, [['/api/codex/thread-references', { threadId: 'current', query: '远处标题' }]])
 })
+
+test('Codex 文件视图标记会话来源并在退出后恢复原生远程调用', async () => {
+  const { installCodexFileScope } = await import('../src/client/native-dsh/dual-workspace-files.js')
+  const calls = []
+  const provider = { stat(id, path, signal) {
+    assert.equal(this, provider)
+    calls.push([id, path, signal])
+    return { exists: true }
+  } }
+  const original = provider.stat
+  let dispose
+  installCodexFileScope({ inject(keys, apply) {
+    assert.ok(keys.includes('remote.workspaceFiles'))
+    apply({ remote: { workspaceFiles: provider }, effect: effect => { dispose = effect() } })
+  } })
+  const signal = new AbortController().signal
+  assert.deepEqual(await provider.stat('thread', 'notes.md', signal), { exists: true })
+  assert.deepEqual(calls, [['codex:thread', 'notes.md', signal]])
+  dispose()
+  assert.equal(provider.stat, original)
+  provider.stat('native-session', 'notes.md', signal)
+  assert.deepEqual(calls.at(-1), ['native-session', 'notes.md', signal])
+})

@@ -1,6 +1,6 @@
 # DSH ChatGPT 架构
 
-DSH ChatGPT 通过独立的 DSH `codex` Profile 展示并操作本机 Codex 会话。浏览器通过 DSH 的同源接口访问 Host，Host 连接已运行的共享 Codex App Server。
+DSH ChatGPT 通过官方 DSH Web 或独立的 `codex` Profile 展示并操作本机 Codex 会话。浏览器通过 DSH 的同源接口访问 Host，Host 连接已运行的共享 Codex App Server。
 
 | 组件 | 职责 |
 | --- | --- |
@@ -10,7 +10,11 @@ DSH ChatGPT 通过独立的 DSH `codex` Profile 展示并操作本机 Codex 会�
 
 ## 部署与访问
 
-发行包通过 `dsh.bundle` 将插件配置注册到 `codex` Profile。Profile 沿用 DSH Base 的共享服务，把会话持久化和沙箱策略交给 Codex，用户设置仍写入该 Profile 的补丁层。浏览器使用 DSH 的访问令牌和 Cookie 访问同源 API，默认服务地址为 `127.0.0.1:3190`。
+独立发行包通过 `dsh.bundle` 装配 `codex` Profile，沿用 DSH Base 的共享服务，把会话持久化和执行策略交给 Codex。用户设置写入该 Profile 的补丁层。浏览器使用 DSH 的访问令牌和 Cookie 访问同源 API，独立实例默认监听 `127.0.0.1:3190`。
+
+官方 Web 安装包在已有 profile 中挂载 Codex API 和入口控制。共存时由客户端启动图为每个页面选择会话与工作区控制器，并把解析后的模式固定在页面 URL。Web 的状态和认证服务由两种入口共享。Codex 的上传路由和工作区文件作用域分别标明来源，原生 DSH 会话继续走原来的文件服务。
+
+默认模式、共存选项和独占开关在 profile 的插件数据目录原子保存。共存时修改默认值只影响新入口。实例级切换复用官方插件管理器释放冲突的原生控制器，等装配就绪后提交偏好。过渡页先卸载旧会话界面，失败时回滚已应用的装配。
 
 ## 工作区与会话目录
 
