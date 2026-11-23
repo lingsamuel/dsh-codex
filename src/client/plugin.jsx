@@ -22,6 +22,7 @@ import { installVisualizePreview } from './native-dsh/visualize-preview.jsx'
 import { installSubagentActivity } from './native-dsh/subagent-activity.jsx'
 import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
+import { installWorkspaceLinks } from './native-dsh/workspace-links.jsx'
 import { installThreadReferences } from './native-dsh/thread-references.jsx'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
@@ -63,6 +64,7 @@ export async function apply(ctx) {
   installStartupPage(ctx, startupReady)
   installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx, catalog.store)
+  installWorkspaceLinks(ctx)
   installThreadReferences(ctx, catalog, controller.signal)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)
