@@ -28,6 +28,7 @@ const styles = `
 [data-codex-mode-crop] svg { display: block; max-width: none; }
 [data-codex-mode-badge] { display: inline-block; flex: none; padding-block: 5px; }
 [data-codex-mode-badge][data-clickable] { cursor: pointer; }
+[data-codex-mode-badge]:has(> [data-flipping]) { animation: codex-mode-fade-edge ${duration}ms linear both; }
 [data-codex-mode-card] { display: grid; transform-style: preserve-3d; transform-origin: center; }
 [data-codex-mode-card] > * { grid-area: 1 / 1; backface-visibility: hidden; }
 [data-codex-mode-front] { transform: rotateY(0deg); }
@@ -43,6 +44,11 @@ const styles = `
 @keyframes codex-mode-flip {
   from { transform: perspective(180px) rotateY(0deg); }
   to { transform: perspective(180px) rotateY(var(--codex-mode-turn)); }
+}
+/* 翻转以 ease-in-out 运行，约在 35% 和 65% 转至侧面。外层淡出可保留卡片内部的 3D 翻面。 */
+@keyframes codex-mode-fade-edge {
+  0%, 30%, 39%, 61%, 70%, 100% { opacity: 1; }
+  33.5%, 36%, 64%, 66.5% { opacity: 0; }
 }
 @keyframes codex-mode-hide-face { 0% { opacity: 1; } 50%, 100% { opacity: 0; } }
 @keyframes codex-mode-show-face { 0% { opacity: 0; } 50%, 100% { opacity: 1; } }
@@ -69,7 +75,8 @@ function resize(from, to, active) {
 
 function ArtworkCrop({ mode, badge }) {
   const { wordWidth, badgeWidth, Wordmark } = artwork[mode]
-  return <span data-codex-mode-crop style={{ width: badge ? badgeWidth : wordWidth, height: badge ? 14 : 24 }}>
+  // 字标右侧留出裁剪余量，防止小数像素取整时露出同一 SVG 的徽标黑底。
+  return <span data-codex-mode-crop style={{ width: badge ? badgeWidth : wordWidth - 2, height: badge ? 14 : 24 }}>
     <span style={badge ? { position: 'absolute', left: -wordWidth, top: -5.5 } : undefined}>
       <Wordmark />
     </span>
