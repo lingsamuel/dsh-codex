@@ -1,11 +1,9 @@
 import { useSyncExternalStore } from 'react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
-import { nativeSessionClient } from '../shared/dual-web-entry.js'
-import { canKeepWebPage, webModeNotice, webModePath } from '../shared/web-mode.js'
+import { canKeepWebPage, webModeFor, webModePath } from '../shared/web-mode.js'
 import { beginModeLoading, saveModeHandoff } from '../shared/web-mode-handoff.js'
 import { installModeBrand, playModeBrand } from './native-dsh/mode-brand.jsx'
-import { replaceMethod } from './native-dsh/replace-method.js'
 import { sessionLoadingCopy } from './native-dsh/startup.jsx'
 
 const workspaceSlot = 'sidebar.workspaces'
@@ -53,24 +51,6 @@ function leaveBlock(ctx, hasModelDraft) {
     if (input?.attachmentIds.length || binding.session.modelDraft?.getSnapshot()) unsaved = true
   }
   return unsaved ? 'draft' : undefined
-}
-
-function readNotice() {
-  try {
-    const error = sessionStorage.getItem(webModeNotice)
-    sessionStorage.removeItem(webModeNotice)
-    return error
-  } catch {
-    return null
-  }
-}
-
-function submitSwitch(action, field, value) {
-  const form = Object.assign(document.createElement('form'), { action, method: 'post', hidden: true })
-  const input = Object.assign(document.createElement('input'), { name: field, value: String(value), type: 'hidden' })
-  form.append(input)
-  document.body.append(form)
-  form.submit()
 }
 
 function SidebarMode({ wide, state, change, t }) {
@@ -154,15 +134,10 @@ function installSidebarMode(ctx, state, change, t) {
   })
 }
 
-/** 模式切换先确认 Host 状态，再播放品牌动画。配置开关沿用同源过渡页。 */
+/** 设置保存成功后，按确认的入口决定是否播放导航动画。 */
 export function installWebMode(ctx, initial, hasModelDraft) {
   const action = new URL(webModePath.slice(1), document.baseURI)
-  if (initial.mode === 'recovery' && initial.available) {
-    action.searchParams.set('recovery', '')
-    window.location.replace(action)
-    return
-  }
-  const state = createSnapshotStore({ ...initial, error: readNotice() || initial.error })
+  const state = createSnapshotStore(initial)
   const controller = new AbortController()
   const channel = typeof window.BroadcastChannel === 'function'
     ? new window.BroadcastChannel(`dsh-chatgpt:web-mode:${webModePath}`) : undefined
@@ -191,8 +166,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
   }
 
   function publish(next) {
-    const stale = next.available && (initial.mode === 'recovery' || next.mode === 'recovery'
-      || ((!next.coexist || next.exclusive) && next.mode !== initial.mode))
+    const stale = next.available && next.mode !== initial.mode
     state.set({ ...next, stale })
   }
 
@@ -219,33 +193,21 @@ export function installWebMode(ctx, initial, hasModelDraft) {
     const patch = { [field]: value }
     const preferenceOnly = canKeepWebPage(current, patch)
     const switchTab = field === 'defaultMode'
-    if ((!preferenceOnly || switchTab) && !canLeave()) return
+    const leaving = (switchTab ? value : webModeFor({ ...current, ...patch }, current.mode)) !== current.mode
+    if (leaving && !canLeave()) return
     ++revision
     state.set({ ...current, pending: true, error: undefined })
-    if (!preferenceOnly && !switchTab) {
-      submitSwitch(refreshUrl.href, field, value)
-      return
-    }
-    if (switchTab) holdInputs()
+    if (leaving) holdInputs()
     let navigating = false
     try {
       const response = await fetch(refreshUrl, { method: 'POST', signal: controller.signal,
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...patch, ...(preferenceOnly && { keepPage: true }) }) })
       const result = await response.json()
-      if (result.mode === 'recovery') {
-        try { if (result.error) sessionStorage.setItem(webModeNotice, result.error) } catch {}
-        channel?.postMessage(null)
-        const recovery = new URL(action)
-        recovery.searchParams.set('recovery', '')
-        window.location.replace(recovery)
-        navigating = true
-        return
-      }
       if (response.status === 409 && result.mode) { publish(result); return }
       if (!response.ok) throw new Error(result.error || t('unavailable'))
       channel?.postMessage(null)
-      if (switchTab) {
-        const target = result.coexist && !result.exclusive ? value : result.mode
+      const target = switchTab && result.coexist && !result.exclusive ? value : result.mode
+      if (leaving && target !== current.mode) {
         if (!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
           document.documentElement?.setAttribute('data-codex-mode-leaving', '')
           await playModeBrand(state, current, target)
@@ -298,19 +260,6 @@ export function installWebMode(ctx, initial, hasModelDraft) {
       document.documentElement?.removeAttribute('data-codex-mode-leaving')
     }
   })
-  // 原生页照常同步插件。整站切换移除原生控制器时，先保留旧页的
-  // adapter，待模式确认后再通过过渡提示重建整个页面。
-  if (initial.mode === 'dsh') ctx.inject(['modules'], scope => scope.effect(() => {
-    const entries = scope.modules.entries
-    const sync = entries.sync
-    return replaceMethod(entries, 'sync', graph => {
-      if (!graph.entries.some(entry => entry.id === nativeSessionClient)) {
-        void refresh()
-        return Promise.resolve()
-      }
-      return sync.call(entries, graph)
-    })
-  }))
   installSidebarMode(ctx, state, change, t)
   installModeBrand(ctx, state, change, t)
   ctx.slots.inject('shell.overlay', () => ctx.slots.register({

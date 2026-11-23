@@ -24,9 +24,9 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     ])
     return createSessionMediaReferences(fileSystem)
   }
-  const state = sharedWeb && await openWebModes(ctx, profile, loadSessionMedia)
+  const state = sharedWeb && await openWebModes(profile)
   if (state) {
-    ctx.effect(() => ctx.connection.fetch.register(createWebModeRoute(ctx, state)))
+    ctx.effect(() => ctx.connection.fetch.register(createWebModeRoute(state)))
     installDualWebEntry(ctx, state)
   }
   const codexAvailable = () => !state || state.preferences.coexist || webModeFor(state.preferences) === 'codex'

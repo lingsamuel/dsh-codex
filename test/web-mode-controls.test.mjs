@@ -100,9 +100,9 @@ test('共存时开关显示当前模式，保存默认入口后直接切换当�
   assert.equal(workspace.component, component)
 })
 
-test('插件详情使用原生开关修改共存和独占，独占时只隐藏侧栏开关', async t => {
+test('独占时隐藏所有模式入口，退出独占保留共存的 Codex 页面', async t => {
   const { installWebMode } = await loadControls()
-  const { ctx, forms, workspace, registration, copy, undo } = fixture(t)
+  const { ctx, forms, navigations, workspace, registration, copy, undo } = fixture(t)
   const writes = []
   t.mock.method(globalThis, 'fetch', async (_url, init) => {
     writes.push(JSON.parse(init.body))
@@ -116,9 +116,53 @@ test('插件详情使用原生开关修改共存和独占，独占时只隐藏�
   const settings = view.filter(node => node?.type === 'switch')
   assert.deepEqual(settings.map(setting => setting.props.checked), [true, true])
   assert.equal(settings[0].props.disabled, true)
+  assert.equal(view.some(node => node?.type === 'button'), false)
+  const brand = registration.get('sidebar.brand.name')
+  const badge = elements(brand.render(brand.options.inject())).find(node => node?.props?.['data-codex-mode-badge'] === '')
+  await badge.props.onClick({ stopPropagation() {} })
+  assert.deepEqual(writes, [])
   await settings[1].props.onChange(false)
   assert.deepEqual(writes, [{ exclusive: false, keepPage: true }])
+  assert.deepEqual(navigations, [])
   assert.deepEqual(forms, [])
+  undo()
+})
+
+test('在 DSH 页面打开独占时直接保存偏好，成功后进入 Codex', async t => {
+  const { installWebMode } = await loadControls()
+  const { ctx, forms, navigations, registration, copy, undo } = fixture(t)
+  const writes = []
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    writes.push(JSON.parse(init.body))
+    return Response.json({ ...coexist, exclusive: true, mode: 'codex' })
+  })
+  installWebMode(ctx, coexist)
+  const { options, render } = registration.get('plugins.bundle.config')
+  const settings = elements(render({ ...options.inject(), t: key => copy()[key] })).filter(node => node?.type === 'switch')
+  await settings[1].props.onChange(true)
+  assert.deepEqual(writes, [{ exclusive: true }])
+  assert.deepEqual(navigations, ['https://dsh.test/profile/?mode=codex'])
+  assert.deepEqual(forms, [])
+  undo()
+})
+
+test('其他 DSH 页面发现独占后隐藏开关并提示重新加载', async t => {
+  const { installWebMode } = await loadControls()
+  const { ctx, workspace, registration, copy, undo } = fixture(t)
+  let refresh
+  t.mock.method(window, 'addEventListener', (event, listener) => {
+    if (event === 'focus') refresh = listener
+  })
+  t.mock.method(globalThis, 'fetch', async url => {
+    assert.equal(new URL(url).searchParams.get('mode'), 'dsh')
+    return Response.json({ ...coexist, exclusive: true, mode: 'codex' })
+  })
+  installWebMode(ctx, coexist)
+  await refresh()
+  assert.equal(elements(workspace.component({ wide: true })).some(node => node?.type === 'switch'), false)
+  const { options, render } = registration.get('shell.overlay')
+  const modal = elements(render({ ...options.inject(), t: key => copy()[key] })).find(node => node?.type === 'modal')
+  assert.equal(modal.props.description, '实例模式已改变，请重新加载当前页面。')
   undo()
 })
 
@@ -165,7 +209,7 @@ test('Host 拒绝整实例切换时保留当前页面和原模式', async t => {
   t.mock.method(globalThis, 'fetch', async (_url, init) => {
     assert.equal(document.body.inert, true)
     writes.push(JSON.parse(init.body))
-    return Response.json({ ...current, error: 'DSH 会话仍在运行。' }, { status: 409 })
+    return Response.json({ ...current, error: '正在切换 Web 模式。' }, { status: 409 })
   })
   installWebMode(ctx, current)
   const panel = () => elements(workspace.component({ wide: true }))
@@ -175,6 +219,6 @@ test('Host 拒绝整实例切换时保留当前页面和原模式', async t => {
   assert.deepEqual(forms, [])
   assert.equal(Boolean(document.body.inert), false)
   assert.equal(panel().find(node => node?.type === 'switch').props.checked, false)
-  assert.equal(panel().find(node => node?.props?.role === 'status').props.children[0], 'DSH 会话仍在运行。')
+  assert.equal(panel().find(node => node?.props?.role === 'status').props.children[0], '正在切换 Web 模式。')
   undo()
 })
