@@ -20,13 +20,12 @@ function worktreeSelection(worktree) {
 }
 
 /** 使用 DSH 输入栏的提交生命周期，原生历史或队列确认送达后移除本地回显。 */
-export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession) {
+export function createSessionInput(ctx, threadId, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession, reviewSubmissionId) {
   const { session, events, queueStore, updateState, activeTurnId } = history
   // 首发回执可能在刷新期间丢失。沿用已保存的草稿 ID，Host 才能找到原来的投递。
   const newSessionRequestId = newSession ? threadId : undefined
   const submissions = new Map()
   let goalConfirmation
-  let reviewRequestId
 
   function clearDrafts(model, permission) {
     modelDraft.clear(model)
@@ -175,6 +174,12 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     return result
   }
 
+  function rememberNewSessionRecovery(error) {
+    if (newSession && error.newSessionRecovery) {
+      updateState(state => { state.newSessionRecovery = error.newSessionRecovery })
+    }
+  }
+
   /** 确认绑定提交时读到的原生目标。取消交给 DSH 恢复同一份输入草稿。 */
   async function confirmGoalReplacement(goal, signal) {
     signal?.throwIfAborted()
@@ -288,10 +293,16 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const profileId = permissionDraft?.getSnapshot()
       const before = permissionSnapshot(profileId)
       const worktree = worktreeDraft?.getSnapshot()
-      const clientUserMessageId = reviewRequestId ??= crypto.randomUUID()
+      const clientUserMessageId = reviewSubmissionId()
       const result = await writeCommandAction({ ...parameters, threadId, newSession, clientUserMessageId,
-        modelDraft: model, permissionDraft: profileId, worktree: worktreeSelection(worktree), planMode: initialPlanMode() }, signal)
-      if (reviewRequestId === clientUserMessageId) reviewRequestId = undefined
+        modelDraft: model, permissionDraft: profileId, worktree: worktreeSelection(worktree), planMode: initialPlanMode() }, signal).catch(error => {
+        rememberNewSessionRecovery(error)
+        throw error
+      })
+      reviewSubmissionId(clientUserMessageId)
+      if (session.getSnapshot().newSessionRecovery?.thread.id === result.thread.id) {
+        updateState(state => { delete state.newSessionRecovery })
+      }
       acceptSubmittedSettings(model, profileId, before, result, worktree)
       // 审查表单单独提交，原生输入栏里的未发送内容继续留在原会话。
       openWorktree(result, true, undefined, parameters.action === 'review')
@@ -395,9 +406,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
           return accepted
         }
         retire(requestId, failedSubmission)
-        if (newSession && error.newSessionRecovery) {
-          updateState(state => { state.newSessionRecovery = error.newSessionRecovery })
-        }
+        rememberNewSessionRecovery(error)
         if (goal) {
           // Goal 的错误随输入模式销毁。原生发送 Toast 会在退出模式后继续显示旧错误。
           const result = failure(error)

@@ -12,8 +12,9 @@ const flatSessionOrderKey = '__flat_session_order__'
 const workspaceSlot = 'sidebar.workspaces'
 const localSessionKey = 'dsh.codex.local-sessions'
 
-function localThread({ id, cwd, projectId }) {
+function localThread({ id, cwd, projectId, reviewRequestId }) {
   return { id, cwd, projectId, name: directoryTitle(cwd), localDraft: true, blank: true,
+    ...(typeof reviewRequestId === 'string' && reviewRequestId && { reviewRequestId }),
     historyMode: 'paginated', status: { type: 'idle' } }
 }
 
@@ -46,7 +47,7 @@ function changeRetainCount(counts, key, delta) {
   else delete counts[key]
 }
 
-function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, retention, openWorktree) {
+function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, retention, openWorktree, reviewSubmissionId) {
   const history = createCodexHistory(ctx, thread, catalog, retention)
   const modelDraft = sessionDraft(modelDrafts, thread.id)
   const permissionDraft = sessionDraft(permissionDrafts, thread.id)
@@ -60,7 +61,7 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
     ready: history.ready,
     session: {
       ...history.session,
-      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession),
+      ...createSessionInput(ctx, thread.id, history, modelDraft, permissionDraft, worktreeDraft, openWorktree, goalDraft, newSession, reviewSubmissionId),
       goalDraft,
       worktreeDraft,
       openWorktree,
@@ -85,11 +86,21 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   const localSession = id => localSessions.getSnapshot().find(thread => thread.id === id)
   const setLocalSessions = sessions => {
     localSessions.set(sessions)
-    // 仅保留占位身份，让 DSH 自己的输入缓存能在重载后用同一个会话 ID 恢复。
+    // 保存占位和审查提交身份。正文与附件继续由 DSH 恢复。
     try {
-      const identities = sessions.map(({ id, cwd, projectId }) => ({ id, cwd, projectId }))
+      const identities = sessions.map(({ id, cwd, projectId, reviewRequestId }) => ({ id, cwd, projectId, reviewRequestId }))
       globalThis.window?.sessionStorage?.setItem(localSessionKey, JSON.stringify(identities))
     } catch { /* 当前页仍然可以打开占位会话。 */ }
+  }
+  function reviewSubmissionId(id, acceptedId) {
+    const draft = localSession(id)
+    const requestId = draft?.reviewRequestId ?? `${id}:review`
+    // 审查保留占位草稿。只有当前审查得到回执，才允许同一草稿开启下一次审查。
+    if (draft && requestId === acceptedId) {
+      const nextId = crypto.randomUUID()
+      setLocalSessions(localSessions.getSnapshot().map(thread => thread === draft ? { ...draft, reviewRequestId: nextId } : thread))
+    }
+    return requestId
   }
   const forgetLocalSession = id => setLocalSessions(localSessions.getSnapshot().filter(thread => thread.id !== id))
   const projected = observe({
@@ -211,7 +222,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
           }, 0)
         }
         record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,
-          modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, observer, openWorktree), fiber }
+          modelDrafts, permissionDrafts, worktreeDrafts, goalDrafts, observer, openWorktree, acceptedId => reviewSubmissionId(id, acceptedId)), fiber }
         bindings.set(id, record)
         if (!thread.localDraft) void catalog.loadChildren(id)
       }

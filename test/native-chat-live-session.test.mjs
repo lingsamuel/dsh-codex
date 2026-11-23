@@ -710,39 +710,54 @@ test('空闲会话提交后立即回显，队列确认与历史推送之间气�
   assert.equal(history.session.projections.faceOf('inbox').getSnapshot()['next-turn'][0]?.id, queuedForLater.id)
 })
 
-test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给原生历史', async t => {
+function mockDraftPage(t) {
   const source = mockTransport(t)
   const storage = new Map()
   const sessionStorage = { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) }
-  window.sessionStorage = sessionStorage
-  const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
-  const store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
-  const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
-    acceptThread(thread) { store.update(state => { state.threads = [thread] }) } }
-  const services = new Map()
-  const ctx = { slots: { subscribe() {} }, provide: (key, value) => services.set(key, value), effect: install => t.after(install()),
-    inject(services, install) { install({ ...ctx, uiWorkspace }) },
-    plugin() {
-      const stops = []
-      return { ctx: { extend: () => ({ effect: install => stops.push(install()) }) },
-        dispose: () => stops.splice(0).reverse().forEach(stop => stop?.()) }
-    } }
   const main = { source: 'mainView', facets: { conversation: true } }
   let view
+  let sessions
   const uiWorkspace = { openSession(id) {
-    const next = services.get('sessions').retain(id, main)
+    const next = sessions.retain(id, main)
     view?.release()
     view = next
   } }
-  provideCodexControllers(ctx, catalog)
+
+  function reload() {
+    view?.release()
+    view = undefined
+    globalThis.window = Object.assign(new EventTarget(), { sessionStorage })
+    const store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+    const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
+      acceptThread(thread) { store.update(state => { state.threads = [thread] }) } }
+    const services = new Map()
+    const ctx = { slots: { subscribe() {} }, provide: (key, value) => services.set(key, value), effect: install => t.after(install()),
+      inject(services, install) { install({ ...ctx, uiWorkspace }) },
+      plugin() {
+        const stops = []
+        return { ctx: { extend: () => ({ effect: install => stops.push(install()) }) },
+          dispose: () => stops.splice(0).reverse().forEach(stop => stop?.()) }
+      } }
+    provideCodexControllers(ctx, catalog)
+    sessions = services.get('sessions')
+    return sessions
+  }
+
+  t.after(() => view?.release())
+  return { source, reload, openSession: uiWorkspace.openSession, view: () => view }
+}
+
+test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给原生历史', async t => {
+  const page = mockDraftPage(t)
+  const sessions = page.reload()
+  const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
   const createFetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('新建空会话无需 Host 请求') })
-  const id = await services.get('sessions').create({ cwd: native.cwd })
+  const id = await sessions.create({ cwd: native.cwd })
   assert.match(id, /^web-new-/)
   assert.equal(createFetch.mock.callCount(), 0)
-  assert.notEqual(await services.get('sessions').create({ cwd: '/different-workspace' }), id)
-  assert.equal(await services.get('sessions').create({ cwd: native.cwd }), id)
-  uiWorkspace.openSession(id)
-  t.after(() => view.release())
+  assert.notEqual(await sessions.create({ cwd: '/different-workspace' }), id)
+  assert.equal(await sessions.create({ cwd: native.cwd }), id)
+  page.openSession(id)
   const content = [{ type: 'text', text: '这是新会话的首条消息' }]
   const submitted = []
   globalThis.fetch = async (url, request) => {
@@ -750,14 +765,11 @@ test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给�
     submitted.push(JSON.parse(request.body))
     throw new TypeError('首发 HTTP 回执丢失')
   }
-  assert.equal((await view.binding.session.prompt(content, 'queue')).ok, false)
+  assert.equal((await page.view().binding.session.prompt(content, 'queue')).ok, false)
 
-  view.release()
-  globalThis.window = Object.assign(new EventTarget(), { sessionStorage })
-  provideCodexControllers(ctx, catalog)
-  assert.equal(await services.get('sessions').create({ cwd: native.cwd }), id)
-  uiWorkspace.openSession(id)
-  const draft = view.binding.session
+  assert.equal(await page.reload().create({ cwd: native.cwd }), id)
+  page.openSession(id)
+  const draft = page.view().binding.session
   const reply = Promise.withResolvers()
   globalThis.fetch = (url, request) => {
     if (url.pathname !== '/api/codex/conversation-action') return Response.json({})
@@ -778,18 +790,51 @@ test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给�
   reply.resolve(Response.json({ thread: native, clientUserMessageId: nativeRequestId }))
   assert.equal((await sending).ok, true)
   t.mock.timers.tick(0)
+  const view = page.view()
   assert.equal(view.sessionId, native.id)
   assert.deepEqual(view.binding.session.getSnapshot().pendingSubmissions.map(item => item.requestId), [nativeRequestId])
   assert.equal(accepted.mock.callCount(), 1)
   assert.equal(retired.mock.callCount(), 0)
 
-  const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
+  const emit = frame => page.source().onmessage({ data: JSON.stringify(frame) })
   await emit({ type: 'snapshot', page: { data: [] }, mode: 'live', status: { type: 'idle' } })
   assert.equal(view.binding.session.getSnapshot().pendingSubmissions[0]?.text, content[0].text)
   await emit({ type: 'change', turn: { id: 'first', status: 'inProgress' },
     items: [{ type: 'userMessage', id: 'sent', clientId: nativeRequestId, content }] })
   assert.deepEqual(view.binding.session.getSnapshot().pendingSubmissions, [])
   assert.equal(retired.mock.callCount(), 1)
+})
+
+test('空会话审查刷新后重试原提交，收到回执后才开启下一次审查', async t => {
+  const page = mockDraftPage(t)
+  const workspace = { cwd: '/workspace' }
+  const submitted = []
+  const native = { id: 'review-native', ...workspace, status: { type: 'idle' } }
+  globalThis.fetch = async (url, request) => {
+    if (url.pathname !== '/api/codex/command-action') return Response.json({})
+    submitted.push(JSON.parse(request.body))
+    if (submitted.length === 1) throw new TypeError('审查 HTTP 回执丢失')
+    return Response.json({ thread: native })
+  }
+  const id = await page.reload().create(workspace)
+  const command = { action: 'review', target: { type: 'uncommittedChanges' } }
+  const review = () => page.view().binding.session.runCommand(command)
+  page.openSession(id)
+  await assert.rejects(review, /审查 HTTP 回执丢失/)
+
+  assert.equal(await page.reload().create(workspace), id)
+  page.openSession(id)
+  assert.equal((await review()).thread.id, native.id)
+  assert.deepEqual(submitted[0], submitted[1])
+  assert.notEqual(submitted[1].clientUserMessageId, id, '审查与输入栏首发使用独立标识')
+  t.mock.timers.tick(0)
+  assert.equal(page.view().sessionId, native.id)
+
+  assert.equal(await page.reload().create(workspace), id, '审查保留输入栏草稿')
+  page.openSession(id)
+  await review()
+  assert.equal(submitted[2].threadId, id)
+  assert.notEqual(submitted[2].clientUserMessageId, submitted[1].clientUserMessageId)
 })
 
 test('忙碌会话立即显示排队和插话，插话短暂入队后仍保留聊天气泡', async t => {

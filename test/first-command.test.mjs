@@ -189,3 +189,36 @@ test('显式审查结束后，同一网页入口可独立发送首条消息', as
     ['review/start', 'native-thread'], ['thread/queue/add', 'native-thread-2'],
   ])
 })
+
+test('同一 Host 处理更多首发后，已接纳及回执未明的操作仍可安全重试', async t => {
+  const { calls, command, prompt } = await commandFixture(t, {
+    'review/start': (_, socket) => { socket.terminate() },
+    'thread/queue/add': ({ threadId, clientUserMessageId }, _, thread) => {
+      thread.status.type = 'active'
+      return { result: { queuedSubmission: { id: `queued-${threadId}`, clientUserMessageId } } }
+    },
+  })
+  const fields = { input: [{ type: 'text', text: '原来的首发消息' }] }
+  const accepted = await prompt(fields)
+  assert.equal(accepted.status, 200)
+  const receipt = await accepted.json()
+
+  const review = { action: 'review', target: { type: 'uncommittedChanges' }, clientUserMessageId: 'review' }
+  const lost = await command(review)
+  assert.equal(lost.status, 409)
+  const unconfirmed = await lost.json()
+
+  for (let index = 0; index < 128; index++) {
+    const threadId = `web-new-${randomUUID()}`
+    assert.equal((await prompt({ ...fields, threadId, clientUserMessageId: threadId })).status, 200)
+  }
+
+  const start = calls.length
+  const replay = await prompt(fields)
+  assert.equal(replay.status, 200)
+  assert.deepEqual(await replay.json(), receipt)
+  const retry = await command(review)
+  assert.equal(retry.status, 409)
+  assert.deepEqual(await retry.json(), unconfirmed)
+  assert.deepEqual(calls.slice(start), [])
+})

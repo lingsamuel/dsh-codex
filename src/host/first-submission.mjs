@@ -53,7 +53,7 @@ async function submissionConflict(attempt, changed = false) {
   })
 }
 
-/** 网页临时 ID 只在显式提交时启动线程。只在内存留存原生目标、提交标识与简化回执。 */
+/** 网页临时 ID 只在显式提交时启动线程。Host 运行期间在内存保留原生目标、提交标识与简化回执。 */
 export function createFirstSubmission(socketPath, submit, permissions, openProject, readDefaultModel) {
   const attempts = new Map()
 
@@ -113,9 +113,7 @@ export function createFirstSubmission(socketPath, submit, permissions, openProje
       } else if (attempt?.target !== target) {
         attempt = { target, state: 'ready' }
       }
-      attempts.delete(key)
       attempts.set(key, attempt)
-      attempt.inProgress = true
       const finish = async result => {
         attempt.receipt = receiptOf({ ...result, planMode: result.planMode ?? (action === 'prompt' ? planMode : undefined),
           permission: result.permission ?? attempt.permission })
@@ -160,11 +158,8 @@ export function createFirstSubmission(socketPath, submit, permissions, openProje
       } finally {
         if (attempt.thread) permissions?.releaseCreation(attempt.thread.id)
         end?.()
-        attempt.inProgress = false
-        for (const [id, record] of attempts) {
-          if (attempts.size <= 128) break
-          if (!record.inProgress) attempts.delete(id)
-        }
+        // 已有原生目标或写入结果未明时，丢弃记录会让旧请求再次创建线程或执行首发。
+        if (attempt.state === 'ready' && !attempt.thread) attempts.delete(key)
       }
     })
   }

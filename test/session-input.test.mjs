@@ -118,7 +118,7 @@ function newSessionFixture(t, fetchResult, { planMode = 'default', model, profil
   const worktreeDraft = setting(worktree)
   const goalDraft = setting(goal)
   const bind = () => createSessionInput({ effect: effect => t.after(effect()) }, threadId, history, modelDraft, permissionDraft,
-    worktreeDraft, openWorktree, goalDraft, newSession)
+    worktreeDraft, openWorktree, goalDraft, newSession, () => 'review-request')
   return { bind, state, requests, threadId, newSession, modelDraft, permissionDraft, worktreeDraft, goalDraft }
 }
 
@@ -235,17 +235,20 @@ test('空会话确认审查时提交原生命令，失败保留设置，重试�
   const model = { provider: 'openai', model: 'selected' }
   const profileId = ':read-only'
   const worktree = { kind: 'existing', id: crypto.randomUUID(), path: '/worktree' }
+  const recovery = { thread, workspacePaths: {} }
   const opened = []
   let fail = true
-  const fixture = newSessionFixture(t, () => fail ? Response.json({ error: 'review rejected' }, { status: 409 })
+  const fixture = newSessionFixture(t, () => fail ? Response.json({ error: 'review unconfirmed',
+    reason: 'new-session-delivery-unconfirmed', newSessionRecovery: recovery }, { status: 409 })
     : Response.json({ thread }), { planMode: 'plan', model, profileId, worktree,
     openWorktree: (result, confirmed, handoff, keepInput) => opened.push([result.thread, confirmed, keepInput]),
   })
   const { threadId, newSession, requests } = fixture
   const command = { action: 'review', target: { type: 'uncommittedChanges' } }
   const input = fixture.bind()
-  await assert.rejects(input.runCommand(command), /review rejected/)
+  await assert.rejects(input.runCommand(command), /review unconfirmed/)
   assert.deepEqual(opened, [])
+  assert.deepEqual(fixture.state.newSessionRecovery, recovery)
   assert.deepEqual(fixture.modelDraft.getSnapshot(), model)
   fail = false
   await input.runCommand(command)
@@ -255,6 +258,7 @@ test('空会话确认审查时提交原生命令，失败保留设置，重试�
     modelDraft: model, permissionDraft: profileId, worktree, planMode: 'plan' }]
   assert.deepEqual(requests, [sent, sent])
   assert.deepEqual(opened, [[thread, true, true]])
+  assert.equal(fixture.state.newSessionRecovery, undefined)
   assert.equal(fixture.modelDraft.getSnapshot(), undefined)
   assert.equal(fixture.permissionDraft.getSnapshot(), undefined)
   assert.equal(fixture.worktreeDraft.getSnapshot(), undefined)
