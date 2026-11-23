@@ -1,6 +1,6 @@
 import { codexConversationPrefix, nativeConversationPrefix, selectCodexBoot } from '../shared/dual-web-entry.js'
 import { webModeFor, webModePath } from '../shared/web-mode.js'
-import { getModeBrandPieces, modeHandoffKey, modeHandoffStyles, showModeHandoff } from '../shared/web-mode-handoff.js'
+import { createModeLoading, getModeBrandPieces, modeHandoffKey, modeHandoffStyles, showModeHandoff } from '../shared/web-mode-handoff.js'
 import { webModeStatus } from './web-mode.mjs'
 
 function scriptValue(value) {
@@ -16,29 +16,35 @@ export function installDualWebEntry(ctx, state) {
       dsh: webModeFor(state.preferences, 'dsh'),
       codex: webModeFor(state.preferences, 'codex'),
     })
-    table.push({ kind: 'style', text: `
+    // 交接画面要先于 DSH 的 head 同步启动脚本，避免脚本尚未到达时露出空白页。
+    table.unshift({ kind: 'style', text: `
       ${modeHandoffStyles}
       @media (prefers-reduced-motion: no-preference) {
         @view-transition { navigation: auto; }
         ::view-transition-old(root), ::view-transition-new(root) { animation-duration: 220ms; }
       }
+    ` }, { kind: 'script', placement: 'head', text: `
+      (() => {
+        const status = ${status};
+        const modes = ${modes};
+        const requested = new URL(location.href).searchParams.get('mode');
+        if (status.mode !== 'recovery' && Object.hasOwn(modes, requested)) status.mode = modes[requested];
+        globalThis.__DSH_CHATGPT_WEB_MODE__ = status;
+        ;(${showModeHandoff.toString()})(${scriptValue(modeHandoffKey)}, status.mode,
+          ${getModeBrandPieces.toString()}, ${createModeLoading.toString()});
+      })();
     ` })
     table.push({ kind: 'script', placement: 'body', text: `
       (() => {
         window.addEventListener('pageswap', event => {
           if (!document.documentElement.hasAttribute('data-codex-mode-leaving')) event.viewTransition?.skipTransition();
         });
-        const status = ${status};
+        const status = globalThis.__DSH_CHATGPT_WEB_MODE__;
         const url = new URL(location.href);
-        const requested = url.searchParams.get('mode');
         if (status.mode === 'recovery') {
           location.replace(new URL(${JSON.stringify(webModePath.slice(1) + '?recovery')}, document.baseURI));
           return;
         }
-        const modes = ${modes};
-        if (Object.hasOwn(modes, requested)) status.mode = modes[requested];
-        ;(${showModeHandoff.toString()})(${scriptValue(modeHandoffKey)}, status.mode, ${getModeBrandPieces.toString()});
-        globalThis.__DSH_CHATGPT_WEB_MODE__ = status;
         if (url.searchParams.get('mode') !== status.mode) {
           url.searchParams.set('mode', status.mode);
           history.replaceState(history.state, '', url);

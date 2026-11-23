@@ -7,9 +7,13 @@ export const sessionLoadingCopy = {
   en: { loading: 'Loading session…' },
 }
 
+export function readStartupBoot() {
+  return document.querySelector('#root > [data-dsh-boot]')
+}
+
 /** 插件启动结束后，沿用 DSH 样式显示首次会话的载入状态。 */
 export function installStartupPage(ctx, startupReady) {
-  const boot = document.querySelector('#root > [data-dsh-boot]')
+  const boot = readStartupBoot()
   const card = boot?.firstElementChild?.cloneNode(true)
   const spinner = card?.querySelector('[data-dsh-boot-spinner]')
   const hint = spinner?.nextElementSibling

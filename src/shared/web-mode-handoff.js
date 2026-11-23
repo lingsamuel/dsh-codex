@@ -8,18 +8,22 @@ export const modeHandoffStyles = `
     pointer-events: none;
     background: var(--dsw-alias-bg-base, Canvas);
   }
-  [data-codex-mode-sidebar] > * {
-    visibility: hidden;
-  }
-  [data-codex-mode-sidebar] :is([data-codex-mode-mark], [data-codex-mode-brand]) {
-    visibility: visible;
+  [data-codex-mode-sidebar] :not(
+    [data-codex-mode-mark], [data-codex-mode-brand],
+    [data-codex-mode-mark] *, [data-codex-mode-brand] *,
+    :has([data-codex-mode-mark], [data-codex-mode-brand])
+  ) {
+    opacity: 0 !important;
   }
   [data-codex-mode-loading] {
     position: fixed;
     inset: 0 0 0 var(--codex-mode-workspace-left, 0px);
     z-index: 1001;
-    display: grid;
-    place-items: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
     background: var(--dsw-alias-bg-base, Canvas);
     color: var(--dsw-alias-label-secondary, CanvasText);
     font: 14px/1.5 system-ui, sans-serif;
@@ -27,6 +31,18 @@ export const modeHandoffStyles = `
   }
   [data-codex-mode-arrival] [data-codex-mode-loading] {
     background: inherit;
+  }
+  [data-codex-mode-spinner] {
+    inline-size: 20px;
+    block-size: 20px;
+    border-radius: 50%;
+    border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
+    border-inline-end-color: currentColor;
+    animation: codex-mode-wait 850ms linear infinite;
+  }
+  @keyframes codex-mode-wait { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    [data-codex-mode-spinner] { animation: none; }
   }
   html[data-codex-mode-arriving] #root :is([data-dsh-boot]:has([data-dsh-boot-spinner]), [data-codex-session-loading]) {
     position: fixed;
@@ -64,15 +80,26 @@ function workspaceLeft(workspace, sidebar) {
   return Math.max(0, workspace?.getBoundingClientRect().left ?? 0, sidebar?.getBoundingClientRect().right ?? 0)
 }
 
-/** 请求切换时只留品牌，暂停界面下方的其他侧栏内容。 */
-export function beginModeLoading(label) {
-  const { workspace, sidebar } = getModeLayout()
-  if (!workspace) return () => {}
+/** 在原生启动画面尚未挂载时渲染主区的加载状态。 */
+export function createModeLoading(label, nativeSpinner) {
   const loading = document.createElement('div')
   loading.setAttribute('data-codex-mode-loading', '')
   loading.setAttribute('role', 'status')
+  const spinner = nativeSpinner?.cloneNode(true) ?? document.createElement('span')
+  if (!nativeSpinner) spinner.setAttribute('data-codex-mode-spinner', '')
+  spinner.setAttribute('aria-hidden', 'true')
+  const text = document.createElement('span')
+  text.textContent = label
+  loading.append(spinner, text)
+  return loading
+}
+
+/** 请求切换时只留品牌，暂停界面下方的其他侧栏内容。 */
+export function beginModeLoading(label, nativeSpinner) {
+  const { workspace, sidebar } = getModeLayout()
+  if (!workspace) return () => {}
+  const loading = createModeLoading(label, nativeSpinner)
   loading.style.left = workspaceLeft(workspace, sidebar) + 'px'
-  loading.textContent = label
   sidebar?.setAttribute('data-codex-mode-sidebar', '')
   document.body.append(loading)
   return () => {
@@ -128,7 +155,7 @@ export function saveModeHandoff(url, loading) {
 }
 
 /** 在 DSH 启动脚本之前执行。函数独立于模块变量，便于注入初始文档。 */
-export function showModeHandoff(key, mode, readBrand) {
+export function showModeHandoff(key, mode, readBrand, createLoading) {
   let handoff
   try {
     const saved = sessionStorage.getItem(key)
@@ -147,9 +174,13 @@ export function showModeHandoff(key, mode, readBrand) {
   const cover = document.createElement('div')
   cover.setAttribute('data-codex-mode-arrival', '')
   cover.setAttribute('aria-hidden', 'true')
-  if (CSS.supports('color', handoff.background)) cover.style.backgroundColor = handoff.background
   const left = Number.isFinite(handoff.workspaceLeft) ? handoff.workspaceLeft : 0
   const style = document.documentElement.style
+  const originalBackground = style.backgroundColor
+  if (CSS.supports('color', handoff.background)) {
+    cover.style.backgroundColor = handoff.background
+    style.backgroundColor = handoff.background
+  }
   style.setProperty('--codex-mode-workspace-left', left + 'px')
   if (handoff.sidebar) {
     const side = document.createElement('div')
@@ -176,11 +207,9 @@ export function showModeHandoff(key, mode, readBrand) {
     cover.append(crop)
     retained.set(piece.kind, { crop, piece })
   }
-  const loading = document.createElement('div')
-  loading.setAttribute('data-codex-mode-loading', '')
-  loading.textContent = handoff.loading || 'Loading session…'
-  cover.append(loading)
-  document.body.append(cover)
+  cover.append(createLoading(handoff.loading || 'Loading session…'))
+  // 新文档的原生启动包可能挡住 HTML 解析。先把画面接到已存在的根节点。
+  ;(document.body ?? document.documentElement).append(cover)
   document.documentElement.setAttribute('data-codex-mode-arriving', '')
 
   let frame
@@ -188,7 +217,7 @@ export function showModeHandoff(key, mode, readBrand) {
   let lastPosition
   const observer = new MutationObserver(schedule)
   const timeout = setTimeout(() => finish(false), 8000)
-  observer.observe(document.body, { childList: true, subtree: true })
+  observer.observe(document.documentElement, { childList: true, subtree: true })
   schedule()
 
   function schedule() {
@@ -232,6 +261,7 @@ export function showModeHandoff(key, mode, readBrand) {
     const remove = () => {
       document.documentElement.removeAttribute('data-codex-mode-arriving')
       style.removeProperty('--codex-mode-workspace-left')
+      if (style.backgroundColor === cover.style.backgroundColor) style.backgroundColor = originalBackground
       cover.remove()
     }
     if (!fade || matchMedia('(prefers-reduced-motion: reduce)').matches) return remove()

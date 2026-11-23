@@ -6,7 +6,7 @@ import { canKeepWebPage, webModeNotice, webModePath } from '../shared/web-mode.j
 import { beginModeLoading, saveModeHandoff } from '../shared/web-mode-handoff.js'
 import { installModeBrand, playModeBrand } from './native-dsh/mode-brand.jsx'
 import { replaceMethod } from './native-dsh/replace-method.js'
-import { sessionLoadingCopy } from './native-dsh/startup.jsx'
+import { readStartupBoot, sessionLoadingCopy } from './native-dsh/startup.jsx'
 
 const workspaceSlot = 'sidebar.workspaces'
 const pluginSlot = 'plugins.bundle.config'
@@ -167,6 +167,8 @@ export function installWebMode(ctx, initial, hasModelDraft) {
   const refreshUrl = new URL(action)
   refreshUrl.searchParams.set('mode', initial.mode)
   const t = ctx.locale.bind(locale)
+  const startupSpinner = readStartupBoot()?.querySelector('[data-dsh-boot-spinner]')?.cloneNode(true)
+  startupSpinner?.style.removeProperty('--dsh-boot-arc')
   let revision = 0
   let releaseInputs
 
@@ -175,7 +177,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
     const before = body.inert
     const suspension = new AbortController()
     body.inert = true
-    const stopLoading = beginModeLoading(t('loading'))
+    const stopLoading = beginModeLoading(t('loading'), startupSpinner)
     window.addEventListener('keydown', event => event.stopImmediatePropagation(), {
       capture: true, signal: suspension.signal,
     })
