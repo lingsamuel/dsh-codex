@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pkg from '../package.json' with { type: 'json' }
 
@@ -42,7 +42,7 @@ async function prepareProfile(home) {
   const profile = join(home, 'profiles', profileName)
   const modules = join(profile, 'node_modules')
   const plugin = join(modules, pluginName)
-  await mkdir(modules, { recursive: true })
+  await mkdir(dirname(plugin), { recursive: true })
   try {
     await symlink(root, plugin, process.platform === 'win32' ? 'junction' : 'dir')
   } catch (error) {
@@ -57,7 +57,7 @@ async function prepareProfile(home) {
   try {
     const source = join(staging, 'package.json')
     await writeFile(source, JSON.stringify({
-      name: `${pluginName}-profile`,
+      name: `${pluginName.split('/').at(-1)}-profile`,
       private: true,
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', pluginName] } },
     }, null, 2) + '\n')

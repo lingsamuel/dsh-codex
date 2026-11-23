@@ -26,7 +26,7 @@ npm ci
 npm run package:plugin
 ```
 
-两种包的插件名都是 `dsh-codex`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
+两种包的 npm 名称都是 `@lingsamuel/dsh-codex`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
 
 ## 3. 安装并验证配置
 

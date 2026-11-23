@@ -41,11 +41,11 @@
 
 从源码打包时，在仓库根目录依次运行 `npm ci` 和 `npm run package:plugin`，一次在 `artifacts/` 生成两个 `.tgz`。也可以从 GitHub Actions 的 Build 工作流下载并解压 `dsh-codex` 构建产物。
 
-两个包都是 `dsh-codex` 插件。每个包都包含下表的两份 YAML，且每份文件在两个包中的内容完全相同。两包唯一不同的是 `package.json` 的 `dsh.bundle.patch` 字段，DSH 按它选择加载哪份 YAML。
+两个包的 npm 名称都是 `@lingsamuel/dsh-codex`。每个包都包含下表的两份 YAML，且每份文件在两个包中的内容完全相同。两包唯一不同的是 `package.json` 的 `dsh.bundle.patch` 字段，DSH 按它选择加载哪份 YAML。
 
 | 插件包 | DSH 加载的 YAML | 加载后会发生什么 |
 | --- | --- | --- |
-| `dsh-codex-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `dsh-codex` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
+| `dsh-codex-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `@lingsamuel/dsh-codex` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
 | `dsh-codex-min-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载访问 Codex 所需的侧栏、聊天框和文件浏览器等组件，停用 DSH 原生会话服务。网页省去 DSH 插件管理、定时任务和交互式侧栏终端。 |
 
 早期构建采用旧命名。安装旧包时，按包内 `package/package.json` 的 `dsh.bundle.patch` 字段核对上表中的 YAML。

@@ -10,6 +10,7 @@ const project = fileURLToPath(new URL('../', import.meta.url))
 const dshManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const savedSetting = '- id: ui-conversation\n  config:\n    busyEnterBehavior: steer\n'
 const fileActions = { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' }
+const pluginName = '@lingsamuel/dsh-codex'
 
 async function fixture(t) {
   await mkdir(join(project, '.runtime'), { recursive: true })
@@ -74,12 +75,12 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
 
 test('临时 Profile 加载插件默认配置，并在进程退出后清理', { skip: process.platform === 'win32' }, async t => {
   const { runtime, patch, dump } = await fixture(t)
-  assert.match(dump('--dump-default-config'), /name: dsh-codex/)
+  assert.equal(parseEntryYaml(dump('--dump-default-config')).find(entry => entry.id === 'dsh-codex')?.name, pluginName)
   await writeFile(patch, savedSetting)
   assert.match(dump('--dump-config'), /busyEnterBehavior: steer/)
 
   const freshConfig = dump('--fresh-profile', '--dump-config')
-  assert.match(freshConfig, /name: dsh-codex/)
+  assert.equal(parseEntryYaml(freshConfig).find(entry => entry.id === 'dsh-codex')?.name, pluginName)
   assert.doesNotMatch(freshConfig, /busyEnterBehavior: steer/)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === fileActions.id), fileActions)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === 'ui-sidebar-files'), {

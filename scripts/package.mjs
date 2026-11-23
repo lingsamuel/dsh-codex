@@ -8,19 +8,25 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 const artifacts = join(root, 'artifacts')
 const runtime = join(root, '.runtime')
 const cache = join(runtime, 'npm-cache')
-const archive = `${pkg.name}-${pkg.version}.tgz`
-const minArchive = `${pkg.name}-min-${pkg.version}.tgz`
-const versionedArchive = new RegExp(`^${RegExp.escape(pkg.name)}-(?:min-)?(\\d+\\.\\d+\\.\\d+(?:[-+][\\da-z.+-]+)?)\\.tgz$`, 'i')
+const artifactName = pkg.name.split('/').at(-1)
+const archive = `${artifactName}-${pkg.version}.tgz`
+const minArchive = `${artifactName}-min-${pkg.version}.tgz`
+const versionedArchive = new RegExp(`^${RegExp.escape(artifactName)}-(?:min-)?(\\d+\\.\\d+\\.\\d+(?:[-+][\\da-z.+-]+)?)\\.tgz$`, 'i')
 
 await mkdir(artifacts, { recursive: true })
 await mkdir(runtime, { recursive: true })
 
-// npm pack 按同一个插件名生成归档。两份包在临时目录构建完成后再写入产物目录。
+// npm 决定临时归档的名称。正式产物沿用不带 scope 的文件名。
 const staging = await mkdtemp(join(runtime, 'plugin-package-'))
+function pack(cwd, args = []) {
+  const output = execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--json',
+    '--pack-destination', staging, '--cache', cache, ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] })
+  const [{ filename }] = JSON.parse(output)
+  return join(staging, filename)
+}
+
 try {
-  execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--quiet',
-    '--pack-destination', staging, '--cache', cache], { cwd: root, stdio: 'inherit' })
-  await rename(join(staging, archive), join(staging, minArchive))
+  await rename(pack(root), join(staging, minArchive))
 
   const web = join(staging, 'web')
   for (const file of [...pkg.files, 'README.md']) {
@@ -30,10 +36,9 @@ try {
   }
   const webManifest = { ...pkg, dsh: { ...pkg.dsh, bundle: { patch: './profile/web-mode.yml' } } }
   await writeFile(join(web, 'package.json'), JSON.stringify(webManifest, null, 2) + '\n')
-  execFileSync(process.execPath, [process.env.npm_execpath, 'pack', '--quiet', '--ignore-scripts',
-    '--pack-destination', staging, '--cache', cache], { cwd: web, stdio: 'inherit' })
+  const webArchive = pack(web, ['--ignore-scripts'])
   await rename(join(staging, minArchive), join(artifacts, minArchive))
-  await rename(join(staging, archive), join(artifacts, archive))
+  await rename(webArchive, join(artifacts, archive))
 } finally {
   await rm(staging, { recursive: true, force: true })
 }
