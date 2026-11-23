@@ -1,6 +1,6 @@
 # 给 AI 助手的安装指南
 
-把插件安装到独立的 DSH `codex` Profile，并用有效配置确认安装结果。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
+一般用户使用 `dsh-chatgpt-web-<版本>.tgz`，给已有的 DSH Web 加入 Codex。用户需要单独启动极简 DSH Web 服务时，使用不带 `-web` 的包。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
 
 ## 1. 检查目标环境
 
@@ -19,43 +19,55 @@ codex app-server daemon version
 
 ## 2. 取得插件包
 
-优先使用用户提供的 `.tgz`，也可从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` artifact。只有源码时，在仓库根目录打包，使用 `artifacts/` 中本次生成的 `.tgz`。
+在用户提供的 `.tgz` 或 GitHub Actions 的 `dsh-chatgpt` 构建产物中选包。只有源码时，在仓库根目录打包，从 `artifacts/` 取得生成的 `.tgz`。
 
 ```sh
 npm ci
 npm run package:plugin
 ```
 
+两种包的插件名都是 `dsh-chatgpt`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
+
 ## 3. 安装并验证配置
 
-安装和启动使用同一个 DSH 可执行文件和同一个 `DSH_HOME`。
+安装和启动使用同一个 DSH 可执行文件、同一个 `DSH_HOME` 和同一个 `--profile` 名称。更新时沿用原来的安装位置。首次从源码启动方式迁移时，选择一个新的持久安装位置。会话继续从原有 Codex App Server 读取。
 
-- **更新插件**时，沿用现有安装的目录和 `codex` Profile。
-- **首次从源码启动方式迁移**时，使用新的持久目录。插件会从原有 Codex App Server 读取会话。
+### 给已有的 DSH Web 加入 Codex
 
-将示例路径替换为实际包的绝对路径。首次安装会创建 `codex` Profile。
+使用 `dsh-chatgpt-web-<版本>.tgz`。将 `web` 替换为当前 Web 实例实际使用的 Profile 名称，将包路径替换为实际绝对路径。
 
 ```sh
-dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.9.tgz
+dsh plugin --profile web add '/absolute/path/to/dsh-chatgpt-web-<版本>.tgz'
+dsh --profile web --dump-config
+```
+
+核对 `--dump-config` 中的 `dsh-chatgpt` 配置包含 `sharedWeb: true`。用原本的地址打开该实例，并切换到 Codex 模式进行验证。
+
+### 单独启动极简 DSH Web 服务
+
+使用不带 `-web` 的包，示例沿用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。极简网页没有 DSH 插件管理入口，因此通过 CLI 安装 DSH 插件。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
+
+```sh
+dsh plugin --profile codex add '/absolute/path/to/dsh-chatgpt-<版本>.tgz'
 dsh --profile codex --dump-config
 ```
 
-安装验收以 `--dump-config` 输出中出现 `dsh-chatgpt` Bundle 为准。
+核对 `--dump-config` 中的 `dsh-chatgpt` 和 `webserver` 条目。
 
 ## 4. 按需启动并验证会话
 
-用户要求运行时，执行以下命令。已有运行实例时，重启该实例以加载新版本。
+更新已有实例后，按原方式重启该实例以加载新版本。单独启动网页时，使用安装时选的名称。
 
 ```sh
 dsh --profile codex --no-open
 ```
 
-默认地址为 `127.0.0.1:3190`。端口已占用时用 `--port` 指定其他端口。用 DSH 打印的完整链接在本地浏览器打开，确认侧栏能显示 Codex 工作区和会话。链接包含访问令牌，汇报时给出验证结果和地址端口即可。
+单独启动的默认地址为 `127.0.0.1:3190`，可用 `--port` 指定其他端口。用 DSH 打印的完整链接在本地浏览器打开，确认侧栏能显示 Codex 工作区和会话。链接包含访问令牌，汇报时给出验证结果和地址端口即可。
 
 ## 常见问题
 
 | 现象 | 检查项 |
 | --- | --- |
-| 有效配置缺少 `dsh-chatgpt` | 核对安装和验证命令所用的 DSH、`DSH_HOME` 和 `codex` Profile |
-| 安装后页面仍是旧版本 | 核对当前运行的 `codex` 实例是否已重启 |
+| 有效配置缺少 `dsh-chatgpt` | 核对安装和验证时使用的 DSH、`DSH_HOME` 和 `--profile` 值 |
+| 安装后的行为与所选包不符 | 核对归档的 `dsh.bundle.patch` 和当前运行的 Profile，确认该实例已重新加载插件 |
 | 页面可以打开，会话无法读取 | 检查共享 App Server 状态，使用 `DSH_CHATGPT_SOCKET` 时核对其指向的端点 |

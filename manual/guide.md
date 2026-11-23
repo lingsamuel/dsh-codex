@@ -35,9 +35,24 @@
 
 ## 安装与更新
 
-### 安装到已有的 DSH Web
+### 选择插件包
 
-在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-0.1.9.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。CLI 安装使用同一个 Web profile 和 DSH_HOME。
+**一般用户选 `dsh-chatgpt-web-<版本>.tgz` 即可。** 它直接装进已有的 DSH Web。不带 `-web` 的包适合需要单独启动极简 DSH Web 服务的场景。
+
+从源码打包时，在仓库根目录依次运行 `npm ci` 和 `npm run package:plugin`，一次在 `artifacts/` 生成两个 `.tgz`。也可以从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` 构建产物。
+
+两个包都是 `dsh-chatgpt` 插件。每个包都包含下表的两份 YAML，且每份文件在两个包中的内容完全相同。两包唯一不同的是 `package.json` 的 `dsh.bundle.patch` 字段，DSH 按它选择加载哪份 YAML。
+
+| 插件包 | DSH 加载的 YAML | 加载后会发生什么 |
+| --- | --- | --- |
+| `dsh-chatgpt-web-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `dsh-chatgpt` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
+| `dsh-chatgpt-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载访问 Codex 所需的侧栏、聊天框和文件浏览器等组件，停用 DSH 原生会话服务。网页省去 DSH 插件管理、定时任务和交互式侧栏终端。 |
+
+两包都可以用 `dsh plugin --profile 名称 add 包路径` 安装。Profile 是 DSH 的一套具名配置，包含插件清单和设置。安装目标由 `--profile` 指定，在网页里安装时则是当前运行的 DSH 实例所用的 Profile。
+
+### 在已有 DSH Web 中加入 Codex
+
+在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-<版本>.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。
 
 - 默认允许共存。侧栏「启用 Codex 模式」立即切换当前标签页，并更新随后打开且省略 `mode` 的页面默认值。其他标签页保留各自入口。
 - 关闭「允许标签页使用不同模式」后，当前实例按已保存的默认值统一进入一个模式，侧栏开关可切换整个实例。
@@ -46,22 +61,24 @@
 - 在 Codex 标签页中，DSH 插件装配更新在刷新后生效。
 - Codex 标签页自动省略 DSH 的消息反馈、侧栏终端、后台任务、技能菜单和自动化入口。使用 `$` 选择 Codex 技能，使用 `/ps` 或会话面板查看 Codex 后台进程。
 
-### 安装到独立 Codex profile
+### 单独启动极简 DSH Web 服务
+
+极简网页专用于 Codex 会话。这里没有官方 DSH Web 的「插件 → 添加插件」，无法从网页安装 DSH 插件。给这套配置添加 DSH 插件要在终端运行 `dsh plugin --profile codex add 包路径`。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
 
 需要 DSH 0.2.3-alpha.2、pnpm 和 Node.js 24.22.3 或更新的 24.x，或 Node.js 26.13.1 及以上版本。运行时依赖已登录的 Codex 和本机共享 App Server，插件使用 App Server 0.171.0 验证。若共享服务尚未启动，可运行 `codex app-server daemon start`。
 
-从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` artifact。也可在仓库根目录运行 `npm ci` 和 `npm run package:plugin`，使用 `artifacts/` 中的 `.tgz`。
+选择不带 `-web` 的包，把示例中的包路径换成实际的绝对路径。下面用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。
 
 ```sh
-dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.9.tgz
+dsh plugin --profile codex add '/absolute/path/to/dsh-chatgpt-<版本>.tgz'
 dsh --profile codex --no-open
 ```
 
-用浏览器打开 DSH 打印的完整链接。默认监听 `127.0.0.1:3190`，可用 `--port` 改端口。安装和启动使用同一个 `DSH_HOME`。更新时沿用已有的 `codex` Profile，安装新包后重启实例。安装验收和迁移说明见 [给 AI 助手的安装指南](ai-install.md)。
+用浏览器打开 DSH 打印的完整链接。DSH 的 Web 服务器默认监听 `127.0.0.1:3190`，启动时传 `--port` 可指定端口。安装和启动使用同一个 `DSH_HOME` 和同一个 `--profile` 名称。更新时沿用原来的名称，安装新包后重启该实例。安装验收和迁移说明见 [给 AI 助手的安装指南](ai-install.md)。
 
 ## 从源码启动
 
-在仓库根目录执行以下命令。`npm start` 每次都会先构建插件，再使用仓库内的 `codex` Profile 启动 DSH，并保留已有 Profile 和网页设置。新建的 Profile 通过插件组合包读取仓库中的默认配置。
+在仓库根目录执行以下命令。`npm start` 每次都会先构建插件，再用仓库内保存的开发配置启动 DSH，并保留已有网页设置。新建开发配置时使用 `profile/cordis.patch.yml`。
 
 ```sh
 npm ci

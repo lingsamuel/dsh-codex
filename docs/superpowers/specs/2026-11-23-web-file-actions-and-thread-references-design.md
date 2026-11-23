@@ -6,7 +6,7 @@ Codex 网页增加本地图片悬停和 Markdown 内嵌预览，以及右键复�
 
 ## 本地图片预览
 
-Codex Profile 单独挂载 DSH 原生 `SessionMediaReferences`，由现有构建流程编译 DSH 随包提供的实现。Host 从当前 Profile 的 Loader 取得文件系统模块，使原版媒体组件能识别同一个文件服务抛出的错误类型。浏览器继续使用原生悬停卡片与 Markdown 渲染器，覆盖聊天和右侧 Markdown 文档里的本地图片。媒体接口复用同源鉴权、Host 文件服务、文件大小限制、版本化缓存和内容类型响应。路径访问采用原版 DSH 的绝对路径语义，包括 Host 可读的工作区外临时文件。
+单独启动只显示 Codex 会话的网页时，插件挂载 DSH 原生 `SessionMediaReferences`，由现有构建流程编译 DSH 随包提供的实现。Host 从当前 Profile 的 Loader 取得文件系统模块，使原版媒体组件能识别同一个文件服务抛出的错误类型。浏览器继续使用原生悬停卡片与 Markdown 渲染器，覆盖聊天和右侧 Markdown 文档里的本地图片。媒体接口复用同源鉴权、Host 文件服务、文件大小限制、版本化缓存和内容类型响应。路径访问采用原版 DSH 的绝对路径语义，包括 Host 可读的工作区外临时文件。
 
 ## 网页原文件菜单
 

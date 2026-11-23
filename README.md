@@ -2,7 +2,7 @@
 
 > **纯粹的 Codex 展示层。会话数据只来自本机 Codex。**
 
-在 DeepSeek Harness Web 中浏览 Codex 项目和会话、查看历史，或接着处理 CLI 中的任务。可安装到官方 Web 并与 DSH 标签页共存，也可在独立的 `codex` Profile 中运行。
+在 DeepSeek Harness Web 中浏览 Codex 项目和会话、查看历史，或接着处理 CLI 中的任务。
 
 <img src="assets/readme-preview.png" alt="Codex on DSH 的侧栏、示例会话和文件变更" width="880">
 
