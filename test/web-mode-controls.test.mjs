@@ -111,7 +111,7 @@ test('独占时隐藏所有模式入口，退出独占保留共存的 Codex 页�
   installWebMode(ctx, { ...coexist, mode: 'codex', exclusive: true })
   assert.equal(elements(workspace.component({ wide: true })).some(node => node?.type === 'switch'), false)
   const { options, render } = registration.get('plugins.bundle.config')
-  assert.equal(options.key, 'dsh-chatgpt')
+  assert.equal(options.key, 'dsh-codex')
   const view = elements(render({ ...options.inject(), t: key => copy()[key] }))
   const settings = view.filter(node => node?.type === 'switch')
   assert.deepEqual(settings.map(setting => setting.props.checked), [true, true])

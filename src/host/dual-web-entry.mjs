@@ -26,7 +26,7 @@ export function installDualWebEntry(ctx, state) {
           const requested = new URL(location.href).searchParams.get('mode');
           status.mode = (${webModeFor.toString()})(status, requested);
         }
-        globalThis.__DSH_CHATGPT_WEB_MODE__ = status;
+        globalThis.__DSH_CODEX_WEB_MODE__ = status;
         ;(${showModeHandoff.toString()})(${scriptValue(modeHandoffKey)}, status.mode,
           ${getModeBrandPieces.toString()}, ${createModeLoading.toString()});
       })();
@@ -36,7 +36,7 @@ export function installDualWebEntry(ctx, state) {
         window.addEventListener('pageswap', event => {
           if (!document.documentElement.hasAttribute('data-codex-mode-leaving')) event.viewTransition?.skipTransition();
         });
-        const status = globalThis.__DSH_CHATGPT_WEB_MODE__;
+        const status = globalThis.__DSH_CODEX_WEB_MODE__;
         const url = new URL(location.href);
         if (status.exclusive || url.searchParams.get('mode') !== status.mode) {
           url.searchParams.set('mode', status.mode);

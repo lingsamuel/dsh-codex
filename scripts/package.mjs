@@ -10,6 +10,7 @@ const runtime = join(root, '.runtime')
 const cache = join(runtime, 'npm-cache')
 const archive = `${pkg.name}-${pkg.version}.tgz`
 const minArchive = `${pkg.name}-min-${pkg.version}.tgz`
+const versionedArchive = new RegExp(`^${RegExp.escape(pkg.name)}-(?:min-)?(\\d+\\.\\d+\\.\\d+(?:[-+][\\da-z.+-]+)?)\\.tgz$`, 'i')
 
 await mkdir(artifacts, { recursive: true })
 await mkdir(runtime, { recursive: true })
@@ -37,13 +38,11 @@ try {
   await rm(staging, { recursive: true, force: true })
 }
 
-await rm(join(artifacts, `${pkg.name}-web-${pkg.version}.tgz`), { force: true })
-
 // 只清理本插件的旧版本，保留刚打出的包和最近三个历史版本。
 const older = []
 for (const file of await readdir(artifacts, { withFileTypes: true })) {
   if (!file.isFile()) continue
-  const match = /^dsh-chatgpt-(?:(?:min|web)-)?(\d+\.\d+\.\d+(?:[-+][\da-z.+-]+)?)\.tgz$/i.exec(file.name)
+  const match = versionedArchive.exec(file.name)
   if (!match || match[1] === pkg.version) continue
   const path = join(artifacts, file.name)
   try {

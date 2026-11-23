@@ -106,8 +106,8 @@
       name: '@deepseek-ai/dsh-client-ui-attachment'
     - id: ui-tool
       name: '@deepseek-ai/dsh-client-ui-tool'
-    - id: dsh-chatgpt
-      name: dsh-chatgpt
+    - id: dsh-codex
+      name: dsh-codex
     - id: ui-model-selection
       name: '@deepseek-ai/dsh-client-ui-model-selection'
     - id: ui-permission

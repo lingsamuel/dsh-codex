@@ -29,7 +29,7 @@ async function fixture(t) {
   const dump = (...args) => execFileSync(process.execPath, [launcher, ...args], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, DSH_CHATGPT_DSH_BIN: join(dirname(dshManifest), bin.dsh) },
+    env: { ...process.env, DSH_CODEX_DSH_BIN: join(dirname(dshManifest), bin.dsh) },
   })
   return { root, runtime, profile, patch, dump }
 }
@@ -38,7 +38,7 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
   const { root, profile, patch, dump } = await fixture(t)
   const manifest = join(profile, 'package.json')
   const previousManifest = JSON.stringify({
-    name: 'dsh-chatgpt-profile',
+    name: 'dsh-codex-profile',
     description: 'Persistent profile',
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
   })
@@ -74,12 +74,12 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
 
 test('临时 Profile 加载插件默认配置，并在进程退出后清理', { skip: process.platform === 'win32' }, async t => {
   const { runtime, patch, dump } = await fixture(t)
-  assert.match(dump('--dump-default-config'), /name: dsh-chatgpt/)
+  assert.match(dump('--dump-default-config'), /name: dsh-codex/)
   await writeFile(patch, savedSetting)
   assert.match(dump('--dump-config'), /busyEnterBehavior: steer/)
 
   const freshConfig = dump('--fresh-profile', '--dump-config')
-  assert.match(freshConfig, /name: dsh-chatgpt/)
+  assert.match(freshConfig, /name: dsh-codex/)
   assert.doesNotMatch(freshConfig, /busyEnterBehavior: steer/)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === fileActions.id), fileActions)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === 'ui-sidebar-files'), {

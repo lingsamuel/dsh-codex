@@ -21,6 +21,6 @@ jobs:
       - run: npm run package:plugin
       - uses: actions/upload-artifact@v7
         with:
-          name: dsh-chatgpt
+          name: dsh-codex
           path: artifacts/*.tgz
           if-no-files-found: error

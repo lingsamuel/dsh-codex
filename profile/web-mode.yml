@@ -1,5 +1,5 @@
 - insert:
-    - id: dsh-chatgpt
-      name: dsh-chatgpt
+    - id: dsh-codex
+      name: dsh-codex
       config:
         sharedWeb: true

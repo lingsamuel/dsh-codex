@@ -17,7 +17,7 @@ function preferencePatch(input) {
 
 /** 读取当前 Web profile 的入口偏好。两种入口沿用同一套 Host 服务。 */
 export async function openWebModes(profile) {
-  const dir = join(profile.dir, 'dsh-chatgpt')
+  const dir = join(profile.dir, 'dsh-codex')
   const path = join(dir, 'web-mode.json')
   const stored = await readFile(path, 'utf8').then(JSON.parse, error => {
     if (error.code !== 'ENOENT') throw error

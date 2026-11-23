@@ -88,11 +88,11 @@ function ModeSettings({ state, change, t }) {
     {[['coexist', coexist], ['exclusive', exclusive]].map(([field, value]) => <div key={field} style={settingsRow}>
       <div style={{ minWidth: 0, fontSize: 14, lineHeight: '20px', overflowWrap: 'anywhere' }}>
         <div>{t(field)}</div>
-        <p id={`dsh-chatgpt-${field}-help`} style={description}>{t(`${field}Help`)}</p>
+        <p id={`dsh-codex-${field}-help`} style={description}>{t(`${field}Help`)}</p>
       </div>
       <div style={{ flex: 'none' }}>
         <Switch checked={value} disabled={!available || pending || stale || field === 'coexist' && exclusive}
-          label={t(field)} describedBy={`dsh-chatgpt-${field}-help`} onChange={next => change(field, next)} />
+          label={t(field)} describedBy={`dsh-codex-${field}-help`} onChange={next => change(field, next)} />
       </div>
     </div>)}
     {coexist && !exclusive && <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 12 }}>
@@ -140,7 +140,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
   const state = createSnapshotStore(initial)
   const controller = new AbortController()
   const channel = typeof window.BroadcastChannel === 'function'
-    ? new window.BroadcastChannel(`dsh-chatgpt:web-mode:${webModePath}`) : undefined
+    ? new window.BroadcastChannel(`dsh-codex:web-mode:${webModePath}`) : undefined
   const refreshUrl = new URL(action)
   refreshUrl.searchParams.set('mode', initial.mode)
   const t = ctx.locale.bind(locale)
@@ -268,7 +268,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
       if (canLeave()) window.location.reload()
     } }),
   }, ModeChanged))
-  ctx.slots.inject(pluginSlot, () => ctx.slots.register({ name: pluginSlot, key: 'dsh-chatgpt', locale,
+  ctx.slots.inject(pluginSlot, () => ctx.slots.register({ name: pluginSlot, key: 'dsh-codex', locale,
     inject: () => ({ state, change }),
   }, ModeSettings))
 }

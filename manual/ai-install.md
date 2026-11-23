@@ -1,6 +1,6 @@
 # 给 AI 助手的安装指南
 
-一般用户使用 `dsh-chatgpt-<版本>.tgz`，给已有的 DSH Web 加入 Codex。用户需要单独启动极简 DSH Web 服务时，使用 `dsh-chatgpt-min-<版本>.tgz`。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
+一般用户使用 `dsh-codex-<版本>.tgz`，给已有的 DSH Web 加入 Codex。用户需要单独启动极简 DSH Web 服务时，使用 `dsh-codex-min-<版本>.tgz`。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
 
 ## 1. 检查目标环境
 
@@ -19,14 +19,14 @@ codex app-server daemon version
 
 ## 2. 取得插件包
 
-在用户提供的 `.tgz` 或 GitHub Actions 的 `dsh-chatgpt` 构建产物中选包。只有源码时，在仓库根目录打包，从 `artifacts/` 取得生成的 `.tgz`。
+在用户提供的 `.tgz` 或 GitHub Actions 的 `dsh-codex` 构建产物中选包。只有源码时，在仓库根目录打包，从 `artifacts/` 取得生成的 `.tgz`。
 
 ```sh
 npm ci
 npm run package:plugin
 ```
 
-两种包的插件名都是 `dsh-chatgpt`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
+两种包的插件名都是 `dsh-codex`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
 
 ## 3. 安装并验证配置
 
@@ -34,25 +34,25 @@ npm run package:plugin
 
 ### 给已有的 DSH Web 加入 Codex
 
-使用 `dsh-chatgpt-<版本>.tgz`。将 `web` 替换为当前 Web 实例实际使用的 Profile 名称，将包路径替换为实际绝对路径。
+使用 `dsh-codex-<版本>.tgz`。将 `web` 替换为当前 Web 实例实际使用的 Profile 名称，将包路径替换为实际绝对路径。
 
 ```sh
-dsh plugin --profile web add '/absolute/path/to/dsh-chatgpt-<版本>.tgz'
+dsh plugin --profile web add '/absolute/path/to/dsh-codex-<版本>.tgz'
 dsh --profile web --dump-config
 ```
 
-核对 `--dump-config` 中的 `dsh-chatgpt` 配置包含 `sharedWeb: true`。用原本的地址打开该实例，并切换到 Codex 模式进行验证。
+核对 `--dump-config` 中的 `dsh-codex` 配置包含 `sharedWeb: true`。用原本的地址打开该实例，并切换到 Codex 模式进行验证。
 
 ### 单独启动极简 DSH Web 服务
 
 使用带 `-min` 的包，示例沿用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。极简网页没有 DSH 插件管理入口，因此通过 CLI 安装 DSH 插件。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
 
 ```sh
-dsh plugin --profile codex add '/absolute/path/to/dsh-chatgpt-min-<版本>.tgz'
+dsh plugin --profile codex add '/absolute/path/to/dsh-codex-min-<版本>.tgz'
 dsh --profile codex --dump-config
 ```
 
-核对 `--dump-config` 中的 `dsh-chatgpt` 和 `webserver` 条目。
+核对 `--dump-config` 中的 `dsh-codex` 和 `webserver` 条目。
 
 ## 4. 按需启动并验证会话
 
@@ -68,6 +68,6 @@ dsh --profile codex --no-open
 
 | 现象 | 检查项 |
 | --- | --- |
-| 有效配置缺少 `dsh-chatgpt` | 核对安装和验证时使用的 DSH、`DSH_HOME` 和 `--profile` 值 |
+| 有效配置缺少 `dsh-codex` | 核对安装和验证时使用的 DSH、`DSH_HOME` 和 `--profile` 值 |
 | 安装后的行为与所选包不符 | 核对归档的 `dsh.bundle.patch` 和当前运行的 Profile，确认该实例已重新加载插件 |
-| 页面可以打开，会话无法读取 | 检查共享 App Server 状态，使用 `DSH_CHATGPT_SOCKET` 时核对其指向的端点 |
+| 页面可以打开，会话无法读取 | 检查共享 App Server 状态，使用 `DSH_CODEX_SOCKET` 时核对其指向的端点 |

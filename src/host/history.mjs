@@ -65,7 +65,7 @@ async function readThreadTerminals(request, threadId, status) {
 }
 
 /** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
-export function createHistoryRoutes(socketPath = process.env.DSH_CHATGPT_SOCKET, ownerSignal, cacheDirectory, attachmentStore) {
+export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, ownerSignal, cacheDirectory, attachmentStore) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
   const submit = createThreadSubmissionQueue()

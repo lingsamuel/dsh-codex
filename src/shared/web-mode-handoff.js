@@ -1,4 +1,4 @@
-export const modeHandoffKey = 'dsh-chatgpt:web-mode-handoff'
+export const modeHandoffKey = 'dsh-codex:web-mode-handoff'
 
 export const modeHandoffStyles = `
   [data-codex-mode-arrival] {

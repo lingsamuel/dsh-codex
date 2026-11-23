@@ -9,13 +9,13 @@ import { createWebModeRoute, openWebModes } from './web-mode.mjs'
 import { codexFileScopePrefix } from '../shared/dual-web-entry.js'
 import { webModeFor } from '../shared/web-mode.js'
 
-export const name = 'dsh-chatgpt'
+export const name = 'dsh-codex'
 export const inject = ['connection', 'loader', 'attachments']
 
 export async function apply(ctx, { sharedWeb = false } = {}) {
   const owner = new AbortController()
   const profile = ctx.get('profileContext')
-  const cacheDirectory = process.env.DSH_CHATGPT_CACHE_DIR ?? (profile && join(profile.dir, 'dsh-chatgpt'))
+  const cacheDirectory = process.env.DSH_CODEX_CACHE_DIR ?? (profile && join(profile.dir, name))
   ctx.effect(() => () => owner.abort())
   const loadSessionMedia = async () => {
     const [{ createSessionMediaReferences }, fileSystem] = await Promise.all([
@@ -35,7 +35,7 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     fetch: request => codexAvailable() ? route.fetch(request) : new Response(null, { status: 404 }),
   } : route))
   const readWorkspace = async threadId => {
-    const { thread } = await readCodex('thread/read', { threadId }, process.env.DSH_CHATGPT_SOCKET, owner.signal)
+    const { thread } = await readCodex('thread/read', { threadId }, process.env.DSH_CODEX_SOCKET, owner.signal)
     return thread.cwd
   }
   if (!state) {
@@ -53,7 +53,7 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     !state && loadSessionMedia(),
   ])
   if (sessionMedia) ctx.plugin(sessionMedia)
-  const exportSession = createSessionExportRoute(process.env.DSH_CHATGPT_SOCKET, owner.signal,
+  const exportSession = createSessionExportRoute(process.env.DSH_CODEX_SOCKET, owner.signal,
     (thread, turns, cancelled) => formatCodexMarkdown(thread, turns, formatSessionMarkdown, cancelled))
   register(exportSession)
   const { WorkspaceFileSearch, DEFAULT_FILE_SEARCH_MAX_RESULTS, DEFAULT_FILE_SEARCH_MAX_ENTRIES,

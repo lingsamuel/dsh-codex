@@ -15,7 +15,7 @@ export class CodexRpcError extends Error {
 }
 
 export async function findCodexSocket(signal) {
-  const executable = process.env.DSH_CHATGPT_CODEX_BIN || 'codex'
+  const executable = process.env.DSH_CODEX_BIN || 'codex'
   const { stdout } = await run(executable, ['app-server', 'daemon', 'version'], { signal })
   const daemon = JSON.parse(stdout)
   if (daemon.status !== 'running' || !daemon.socketPath) {
@@ -107,7 +107,7 @@ export async function openCodexReader(socketPath, signal, onMessage = () => {}) 
     await once(ws, 'open', { signal: setup })
     // Codex 的 daemon 查询客户端标识不覆盖 CLI 正在使用的全局 originator 和 UA。
     const initialize = await request('initialize', {
-      clientInfo: { name: 'codex_app_server_daemon', title: 'DSH ChatGPT', version: '0.1.0' },
+      clientInfo: { name: 'codex_app_server_daemon', title: 'DSH Codex', version: '0.1.0' },
       capabilities: { experimentalApi: true },
     })
     ws.send(JSON.stringify({ method: 'initialized' }))

@@ -40,7 +40,7 @@ export const inject = ['slots', 'locale']
 export async function apply(ctx) {
   const controller = new AbortController()
   ctx.effect(() => () => controller.abort())
-  let mode = globalThis.__DSH_CHATGPT_WEB_MODE__
+  let mode = globalThis.__DSH_CODEX_WEB_MODE__
   if (!mode) {
     // 官方 Web 可在当前页面热装插件。此时仍使用页面已加载的原生会话控制器。
     const response = await fetch(new URL(webModePath.slice(1) + '?mode=dsh', document.baseURI), {
@@ -51,7 +51,7 @@ export async function apply(ctx) {
   if (controller.signal.aborted) return
   if (mode) {
     installWebMode(ctx, mode)
-    if (globalThis.__DSH_CHATGPT_WEB_MODE__?.mode !== 'codex') return
+    if (globalThis.__DSH_CODEX_WEB_MODE__?.mode !== 'codex') return
     installCodexFileScope(ctx)
   }
   const catalog = createHistoryCatalog(controller.signal)

@@ -4,10 +4,11 @@ import { existsSync } from 'node:fs'
 import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import pkg from '../package.json' with { type: 'json' }
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const runtime = join(root, '.runtime')
-const pluginName = 'dsh-chatgpt'
+const pluginName = pkg.name
 const profileName = 'codex'
 const argv = process.argv.slice(2)
 const delimiter = argv.indexOf('--')
@@ -56,7 +57,7 @@ async function prepareProfile(home) {
   try {
     const source = join(staging, 'package.json')
     await writeFile(source, JSON.stringify({
-      name: 'dsh-chatgpt-profile',
+      name: `${pluginName}-profile`,
       private: true,
       dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', pluginName] } },
     }, null, 2) + '\n')
@@ -72,13 +73,13 @@ await mkdir(runtime, { recursive: true })
 const home = fresh ? await mkdtemp(join(runtime, 'dsh-fresh-')) : join(runtime, 'dsh')
 try {
   const legacyPatch = await prepareProfile(home)
-  const executable = process.env.DSH_CHATGPT_DSH_BIN || 'dsh'
+  const executable = process.env.DSH_CODEX_DSH_BIN || 'dsh'
   const child = spawn(executable, ['--profile', profileName, ...(legacyPatch ? ['--patch', legacyPatch] : []), ...dshArgs], {
     cwd: root,
     env: {
       ...process.env,
       DSH_HOME: home,
-      DSH_CHATGPT_CACHE_DIR: process.env.DSH_CHATGPT_CACHE_DIR ?? join(fresh ? home : runtime, 'cache'),
+      DSH_CODEX_CACHE_DIR: process.env.DSH_CODEX_CACHE_DIR ?? join(fresh ? home : runtime, 'cache'),
     },
     stdio: 'inherit',
     // POSIX 终端会向前台进程组广播 Ctrl+C，由启动脚本向 DSH 转发一次。
