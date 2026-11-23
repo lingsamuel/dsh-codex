@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { pluginCanToggle, pluginRequestSource, pluginUninstallId } from '../../shared/codex-plugin-source.js'
 import { externalWebUrl } from '../../shared/external-url.js'
 import { readPage, writeCodexCapability } from '../api.js'
+import { selectedLoadedThreadId } from './catalog.js'
 
 const locale = 'codex.plugins'
 const labels = {
@@ -228,7 +229,7 @@ function PluginDetail({ selection, detail, apps, installResult, busy, change, re
 
 function PluginSettings({ useCodexHistory, cache, t }) {
   const cwd = useCodexHistory(state => state.selected?.cwd)
-  const threadId = useCodexHistory(({ selected }) => selected && !selected.archived && selected.status?.type !== 'notLoaded' ? selected.id : undefined)
+  const threadId = useCodexHistory(selectedLoadedThreadId)
   const [selection, setSelection] = useState(null)
   const [search, setSearch] = useState('')
   const [actionError, setActionError] = useState('')

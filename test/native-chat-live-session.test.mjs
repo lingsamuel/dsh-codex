@@ -26,9 +26,11 @@ const hook = registerHooks({
     if (specifier === '@deepseek-ai/dsh-client-store') return { shortCircuit: true, url: storeModule }
     if (specifier === './live-watch.js' || specifier === '../live-watch.js') return { shortCircuit: true, url: liveWatchModule }
     const source = {
-      '@deepseek-ai/dsh-client-ui-primitives': 'export const Button = null, IconQuestionOutlineRegular = null, InlineEditor = null, Modal = null, Toast = null',
+      '@deepseek-ai/dsh-client-ui-primitives': `export const Button = null, DisclosureRow = null, IconApiOutlineMedium = null,
+        IconQuestionOutlineRegular = null, IconRefreshOutlineRegular = null, InlineEditor = null, Modal = null, Tag = null, Toast = null`,
       react: `export const createElement = (type, props, ...children) => ({ type, props, children });
-        export const useState = value => [value, () => {}], useLayoutEffect = null, useMemo = read => read(), useSyncExternalStore = null`,
+        export const useState = value => [value, () => {}], useEffect = null, useLayoutEffect = null,
+          useMemo = read => read(), useRef = value => ({ current: value }), useSyncExternalStore = null`,
       'react/jsx-runtime': 'export const Fragment = Symbol(), jsx = (type, props) => ({ type, props }), jsxs = jsx',
     }[specifier]
     if (source) return { shortCircuit: true, url: `data:text/javascript,${encodeURIComponent(source)}` }
@@ -49,6 +51,7 @@ const { createHistoryCatalog } = await import('../src/client/catalog.js')
 const { installPermissions } = await import('../src/client/native-dsh/permissions.js')
 const { installComposer } = await import('../src/client/native-dsh/composer.jsx')
 const { installCodexQuestions } = await import('../src/client/native-dsh/question-ui.jsx')
+const { installCodexMcpSettings } = await import('../src/client/native-dsh/codex-mcp-settings.jsx')
 const { SubagentReadOnlyComposer } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/SubagentReadOnlyComposer.tsx')
 const { zh: subagentCopy } = await import('@deepseek-ai/dsh-client-ui-subagent/src/client/locales.ts')
 hook.deregister()
@@ -717,6 +720,7 @@ function mockDraftPage(t) {
   const main = { source: 'mainView', facets: { conversation: true } }
   let view
   let sessions
+  let store
   const uiWorkspace = { openSession(id) {
     const next = sessions.retain(id, main)
     view?.release()
@@ -727,7 +731,7 @@ function mockDraftPage(t) {
     view?.release()
     view = undefined
     globalThis.window = Object.assign(new EventTarget(), { sessionStorage })
-    const store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
+    store = createSnapshotStore({ threads: [], projects: [], workspacePaths: {}, newThreadIds: [], childThreads: {} })
     const catalog = { store, loadChildren() {}, select(thread) { store.update(state => { state.selected = thread }) },
       acceptThread(thread) { store.update(state => { state.threads = [thread] }) } }
     const services = new Map()
@@ -744,8 +748,33 @@ function mockDraftPage(t) {
   }
 
   t.after(() => view?.release())
-  return { source, reload, openSession: uiWorkspace.openSession, view: () => view }
+  return { source, reload, openSession: uiWorkspace.openSession, view: () => view,
+    useCodexHistory: select => select(store.getSnapshot()) }
 }
+
+test('Codex MCP 在网页草稿中使用全局配置，原生会话可读取自己的连接状态', async t => {
+  const page = mockDraftPage(t)
+  const sessions = page.reload()
+  let settings
+  installCodexMcpSettings({
+    effect() {}, locale: { bind: () => key => key },
+    slots: {
+      inject: (_name, register) => register(),
+      register({ name }, component) { if (name === 'settings.section') settings = component },
+    },
+  })
+  const threadId = () => settings({ useCodexHistory: page.useCodexHistory }).props.threadId
+  assert.equal(threadId(), undefined)
+  const cwd = '/workspace'
+  page.openSession(await sessions.create({ cwd }))
+  assert.equal(threadId(), undefined)
+
+  const native = { id: '01984de2-8f74-7c91-a3b2-5c5e937cf318', cwd, status: { type: 'idle' } }
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ thread: native }))
+  assert.equal((await page.view().binding.session.prompt([{ type: 'text', text: '首条消息' }], 'queue')).ok, true)
+  t.mock.timers.tick(0)
+  assert.equal(threadId(), native.id)
+})
 
 test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给原生历史', async t => {
   const page = mockDraftPage(t)

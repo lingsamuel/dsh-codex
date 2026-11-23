@@ -30,6 +30,12 @@ export function sessionReadScope(sessions, id, selected) {
   return cwd ? { cwd } : undefined
 }
 
+/** 设置面板只用已加载的原生线程读取连接和授权状态。网页占位的 idle 只表示输入栏可编辑。 */
+export function selectedLoadedThreadId({ selected }) {
+  if (!selected || selected.localDraft || selected.archived || selected.status?.type === 'notLoaded') return undefined
+  return selected.id
+}
+
 function unixMillis(seconds) {
   return Number.isFinite(seconds) ? seconds * 1000 : 0
 }

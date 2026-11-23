@@ -3,6 +3,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useRef, useState } from 'react'
 import { readPage, writeCodexCapability } from '../api.js'
+import { selectedLoadedThreadId } from './catalog.js'
 
 const locale = 'codex.mcpSettings'
 const labels = {
@@ -167,7 +168,7 @@ function McpInventory({ threadId, t }) {
 }
 
 function McpSettings({ useCodexHistory, t }) {
-  const threadId = useCodexHistory(({ selected }) => selected && !selected.archived && selected.status?.type !== 'notLoaded' ? selected.id : undefined)
+  const threadId = useCodexHistory(selectedLoadedThreadId)
   return <McpInventory key={threadId ?? ''} {...{ threadId, t }} />
 }
 
