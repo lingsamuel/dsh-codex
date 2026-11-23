@@ -6,7 +6,7 @@ import { canKeepWebPage, webModeNotice, webModePath } from '../shared/web-mode.j
 import { beginModeLoading, saveModeHandoff } from '../shared/web-mode-handoff.js'
 import { installModeBrand, playModeBrand } from './native-dsh/mode-brand.jsx'
 import { replaceMethod } from './native-dsh/replace-method.js'
-import { readStartupBoot, sessionLoadingCopy } from './native-dsh/startup.jsx'
+import { sessionLoadingCopy } from './native-dsh/startup.jsx'
 
 const workspaceSlot = 'sidebar.workspaces'
 const pluginSlot = 'plugins.bundle.config'
@@ -19,7 +19,8 @@ const copy = {
     openDsh: '在新标签页打开 DSH', openCodex: '在新标签页打开 Codex',
     reload: '重新加载', changed: '实例模式已改变，请重新加载当前页面。',
     unavailable: '无法读取 Web 模式设置。', submission: '请等待当前的提交完成。',
-    loading: sessionLoadingCopy.zh.loading,
+    switching: '正在切换模式…', loadingPlugins: '正在载入插件…',
+    loadingSession: sessionLoadingCopy.zh.loading, loadingLayout: '正在准备工作区…',
     draft: '切换会放弃只保存在当前页面的编辑、模型选择或附件。是否继续？',
   },
   en: {
@@ -29,7 +30,8 @@ const copy = {
     openDsh: 'Open DSH in a new tab', openCodex: 'Open Codex in a new tab',
     reload: 'Reload', changed: 'The instance mode changed. Reload this page to continue.',
     unavailable: 'Could not read Web mode settings.', submission: 'Wait for the current submission to finish.',
-    loading: sessionLoadingCopy.en.loading,
+    switching: 'Switching mode…', loadingPlugins: 'Loading plugins…',
+    loadingSession: sessionLoadingCopy.en.loading, loadingLayout: 'Preparing the workspace…',
     draft: 'Switching will discard edits, model choices, or attachments kept only in this page. Continue?',
   },
 }
@@ -167,8 +169,6 @@ export function installWebMode(ctx, initial, hasModelDraft) {
   const refreshUrl = new URL(action)
   refreshUrl.searchParams.set('mode', initial.mode)
   const t = ctx.locale.bind(locale)
-  const startupSpinner = readStartupBoot()?.querySelector('[data-dsh-boot-spinner]')?.cloneNode(true)
-  startupSpinner?.style.removeProperty('--dsh-boot-arc')
   let revision = 0
   let releaseInputs
 
@@ -177,7 +177,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
     const before = body.inert
     const suspension = new AbortController()
     body.inert = true
-    const stopLoading = beginModeLoading(t('loading'), startupSpinner)
+    const stopLoading = beginModeLoading(t('switching'))
     window.addEventListener('keydown', event => event.stopImmediatePropagation(), {
       capture: true, signal: suspension.signal,
     })
@@ -252,7 +252,11 @@ export function installWebMode(ctx, initial, hasModelDraft) {
         }
         if (!controller.signal.aborted) {
           const url = entryUrl(target)
-          saveModeHandoff(url, t('loading'))
+          saveModeHandoff(url, {
+            plugins: t('loadingPlugins'),
+            session: t('loadingSession'),
+            layout: t('loadingLayout'),
+          })
           window.location.assign(url)
           navigating = true
         }

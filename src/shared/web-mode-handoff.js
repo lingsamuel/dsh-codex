@@ -32,9 +32,24 @@ export const modeHandoffStyles = `
   [data-codex-mode-arrival] [data-codex-mode-loading] {
     background: inherit;
   }
-  [data-codex-mode-spinner] {
-    inline-size: 20px;
+  [data-codex-mode-loading-title] {
+    block-size: 24px;
+    font: 600 16px/24px system-ui, sans-serif;
+    letter-spacing: 0.14em;
+    color: var(--codex-mode-loading-title-color, var(--dsw-alias-label-primary, CanvasText));
+  }
+  [data-codex-mode-loading-label] {
     block-size: 20px;
+    line-height: 20px;
+    max-inline-size: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  [data-codex-mode-spinner] {
+    box-sizing: border-box;
+    inline-size: 24px;
+    block-size: 24px;
     border-radius: 50%;
     border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
     border-inline-end-color: currentColor;
@@ -45,15 +60,8 @@ export const modeHandoffStyles = `
     [data-codex-mode-spinner] { animation: none; }
   }
   html[data-codex-mode-arriving] #root :is([data-dsh-boot]:has([data-dsh-boot-spinner]), [data-codex-session-loading]) {
-    position: fixed;
-    z-index: 1001;
-    inset: 0 0 0 var(--codex-mode-workspace-left, 0px);
-    inline-size: auto;
-    block-size: auto;
-  }
-  html[data-codex-mode-arriving]:has(#root :is([data-dsh-boot]:has([data-dsh-boot-spinner]), [data-codex-session-loading]))
-    [data-codex-mode-loading] {
-    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
   }
 `
 
@@ -80,25 +88,34 @@ function workspaceLeft(workspace, sidebar) {
   return Math.max(0, workspace?.getBoundingClientRect().left ?? 0, sidebar?.getBoundingClientRect().right ?? 0)
 }
 
-/** 在原生启动画面尚未挂载时渲染主区的加载状态。 */
-export function createModeLoading(label, nativeSpinner) {
+/** 同一个布局贯穿离开和抵达，跨页时让转圈接着上一页的时间线。 */
+export function createModeLoading(label, startedAt) {
+  const now = Date.now()
+  const start = Number.isFinite(startedAt) ? startedAt : now
   const loading = document.createElement('div')
   loading.setAttribute('data-codex-mode-loading', '')
+  loading.dataset.codexModeLoadingStarted = String(start)
   loading.setAttribute('role', 'status')
-  const spinner = nativeSpinner?.cloneNode(true) ?? document.createElement('span')
-  if (!nativeSpinner) spinner.setAttribute('data-codex-mode-spinner', '')
+  const title = document.createElement('span')
+  title.setAttribute('data-codex-mode-loading-title', '')
+  title.setAttribute('aria-hidden', 'true')
+  title.textContent = 'HARNESS'
+  const spinner = document.createElement('span')
+  spinner.setAttribute('data-codex-mode-spinner', '')
   spinner.setAttribute('aria-hidden', 'true')
+  spinner.style.animationDelay = -Math.max(0, now - start) + 'ms'
   const text = document.createElement('span')
+  text.setAttribute('data-codex-mode-loading-label', '')
   text.textContent = label
-  loading.append(spinner, text)
+  loading.append(title, spinner, text)
   return loading
 }
 
 /** 请求切换时只留品牌，暂停界面下方的其他侧栏内容。 */
-export function beginModeLoading(label, nativeSpinner) {
+export function beginModeLoading(label) {
   const { workspace, sidebar } = getModeLayout()
   if (!workspace) return () => {}
-  const loading = createModeLoading(label, nativeSpinner)
+  const loading = createModeLoading(label)
   loading.style.left = workspaceLeft(workspace, sidebar) + 'px'
   sidebar?.setAttribute('data-codex-mode-sidebar', '')
   document.body.append(loading)
@@ -129,18 +146,25 @@ function capturePiece(kind, node) {
 }
 
 /** 在切换动画最后一帧保留品牌图稿与原生侧栏的颜色和位置。 */
-export function saveModeHandoff(url, loading) {
+export function saveModeHandoff(url, labels) {
   try {
     const target = new URL(url)
     const { frame, sidebar: side, workspace } = getModeLayout()
     const sidebar = side?.getBoundingClientRect()
     const pieces = getModeBrandPieces(document, true).map(([kind, node]) => capturePiece(kind, node)).filter(Boolean)
+    const loading = document.querySelector('[data-codex-mode-loading]')
+    const title = loading?.querySelector('[data-codex-mode-loading-title]')
+    const loadingStyle = loading && getComputedStyle(loading)
     sessionStorage.setItem(modeHandoffKey, JSON.stringify({
       path: target.pathname,
       mode: target.searchParams.get('mode'),
       expires: Date.now() + 15_000,
       workspaceLeft: workspaceLeft(workspace, side),
-      loading,
+      labels,
+      startedAt: loading && Number(loading.dataset.codexModeLoadingStarted),
+      loadingColor: loadingStyle?.color,
+      loadingBackground: loadingStyle?.backgroundColor,
+      loadingTitleColor: title && getComputedStyle(title).color,
       background: frame && getComputedStyle(frame).backgroundColor,
       sidebar: sidebar && {
         x: sidebar.x, y: sidebar.y, width: sidebar.width, height: sidebar.height,
@@ -207,7 +231,20 @@ export function showModeHandoff(key, mode, readBrand, createLoading) {
     cover.append(crop)
     retained.set(piece.kind, { crop, piece })
   }
-  cover.append(createLoading(handoff.loading || 'Loading session…'))
+  const labels = {
+    plugins: 'Loading plugins…',
+    session: 'Loading session…',
+    layout: 'Preparing the workspace…',
+    ...handoff.labels,
+  }
+  const loading = createLoading(labels.plugins, handoff.startedAt)
+  if (CSS.supports('color', handoff.loadingColor)) loading.style.color = handoff.loadingColor
+  if (CSS.supports('color', handoff.loadingBackground)) loading.style.backgroundColor = handoff.loadingBackground
+  if (CSS.supports('color', handoff.loadingTitleColor)) {
+    loading.style.setProperty('--codex-mode-loading-title-color', handoff.loadingTitleColor)
+  }
+  const message = loading.querySelector('[data-codex-mode-loading-label]')
+  cover.append(loading)
   // 新文档的原生启动包可能挡住 HTML 解析。先把画面接到已存在的根节点。
   ;(document.body ?? document.documentElement).append(cover)
   document.documentElement.setAttribute('data-codex-mode-arriving', '')
@@ -215,6 +252,7 @@ export function showModeHandoff(key, mode, readBrand, createLoading) {
   let frame
   let stableSince
   let lastPosition
+  let phase = 'plugins'
   const observer = new MutationObserver(schedule)
   const timeout = setTimeout(() => finish(false), 8000)
   observer.observe(document.documentElement, { childList: true, subtree: true })
@@ -222,6 +260,12 @@ export function showModeHandoff(key, mode, readBrand, createLoading) {
 
   function schedule() {
     frame ??= requestAnimationFrame(check)
+  }
+
+  function showPhase(next) {
+    if (next === phase) return
+    phase = next
+    message.textContent = labels[next]
   }
 
   function check(now) {
@@ -234,10 +278,18 @@ export function showModeHandoff(key, mode, readBrand, createLoading) {
     }
     const rightbar = root?.querySelector('[data-rightbar-col]')
     const mark = root?.querySelector('[data-codex-mode-mark]')
-    if (boot || !rightbar || !mark) {
+    if (root?.querySelector('[data-codex-session-loading]')) {
+      showPhase('session')
       lastPosition = undefined
       return
     }
+    if (boot || !rightbar || !mark) {
+      if (boot) showPhase('plugins')
+      else if (phase === 'session') showPhase('layout')
+      lastPosition = undefined
+      return
+    }
+    showPhase('layout')
     const positions = readBrand(root).flatMap(([kind, element]) => {
       const box = element?.getBoundingClientRect()
       return box?.width && box.height ? [{ kind, x: box.x, y: box.y, width: box.width, height: box.height }] : []

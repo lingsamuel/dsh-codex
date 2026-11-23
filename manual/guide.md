@@ -36,7 +36,7 @@
 
 ### 安装到已有的 DSH Web
 
-在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-0.1.6.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。CLI 安装使用同一个 Web profile 和 DSH_HOME。
+在官方 Web 侧栏打开「插件 → 添加插件」，选择 `dsh-chatgpt-web-0.1.7.tgz` 并启用。刷新后即可从插件设置打开 DSH 和 Codex 两个入口，也可用 `?mode=dsh` 和 `?mode=codex` 直接打开相应标签页。CLI 安装使用同一个 Web profile 和 DSH_HOME。
 
 - 默认允许共存。侧栏「启用 Codex 模式」立即切换当前标签页，并更新随后打开且省略 `mode` 的页面默认值。其他标签页保留各自入口。
 - 关闭「允许标签页使用不同模式」后，当前实例按已保存的默认值统一进入一个模式，侧栏开关可切换整个实例。
@@ -51,7 +51,7 @@
 从 GitHub Actions 的 Build 工作流下载并解压 `dsh-chatgpt` artifact。也可在仓库根目录运行 `npm ci` 和 `npm run package:plugin`，使用 `artifacts/` 中的 `.tgz`。
 
 ```sh
-dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.6.tgz
+dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.7.tgz
 dsh --profile codex --no-open
 ```
 
