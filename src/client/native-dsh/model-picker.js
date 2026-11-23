@@ -2,18 +2,9 @@ import { createElement } from 'react'
 import { readPage, writeThreadAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
 import { installModelDefaultSettings } from './model-default-settings.jsx'
+import { replaceMethod } from './replace-method.js'
 
 const modelSlot = 'conversation.input.model'
-
-function replaceMethod(object, name, method) {
-  const existing = Object.getOwnPropertyDescriptor(object, name)
-  Object.defineProperty(object, name, { configurable: true, enumerable: true, value: method })
-  return () => {
-    if (Object.getOwnPropertyDescriptor(object, name)?.value !== method) return
-    if (existing) Object.defineProperty(object, name, existing)
-    else Reflect.deleteProperty(object, name)
-  }
-}
 
 function canChangeModel({ live, subagent, canAcceptDirectInput }) {
   return !subagent && canAcceptDirectInput !== false

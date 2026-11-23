@@ -99,7 +99,7 @@ test('主机保留普通文件上传和下载入口，撤下旧草稿入口', as
   const routes = (await attachmentProfile(t)).routes()
   const registered = (path, method) => routes.some(route => route.path === path && route.methods.includes(method))
 
-  assert.equal(registered('/api/session/uploadFileBinary', 'POST'), true)
+  assert.equal(registered('/api/codex/file-upload', 'POST'), true)
   assert.equal(registered('/api/codex/file-download', 'GET'), true)
   assert.equal(registered('/api/codex/drafts', 'GET'), false)
   assert.equal(registered('/api/codex/drafts', 'POST'), false)

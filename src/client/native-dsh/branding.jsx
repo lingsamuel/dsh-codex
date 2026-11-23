@@ -1,5 +1,5 @@
 // Codex 图标取自 agentsmd/agents.md 的 public/logos/codex.svg。
-function CodexBrandMark({ size }) {
+export function CodexBrandMark({ size }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="Codex">
       <path d="M16.0005 13.5992C16.4972 13.5995 16.9007 14.0029 16.9009 14.4996C16.9009 14.9965 16.4974 15.3997 16.0005 15.4H13.0005C12.5035 15.4 12.1002 14.9967 12.1002 14.4996C12.1004 14.0027 12.5036 13.5992 13.0005 13.5992H16.0005Z" />
@@ -10,7 +10,7 @@ function CodexBrandMark({ size }) {
 }
 
 // 定稿字标沿用 DSH BrandWordmark 的 d、e、H 和 S 轮廓。
-function CodexBrandName() {
+export function CodexBrandName() {
   return (
     <svg width={110} height={24} viewBox="0 0 110 24" role="img" aria-label="Codex on DSH">
       <g fill="currentColor" fillRule="evenodd">

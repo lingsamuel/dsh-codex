@@ -93,7 +93,7 @@ function EditableUserMessage({ Native, session, threadId, reportFailure, tEdit, 
     const originalWithAttachments = { ...input, content: { ...input.content, text: '', extraBlocks: [] } }
     return <>
       {renderFactorySlot(name, originalWithAttachments, ...args)}
-      <div style={editLayout}>
+      <div style={editLayout} data-codex-unsaved-edit data-codex-pending-edit={saving || undefined}>
         <InlineEditor label={t('edit')} value={draft} onChange={value => { if (!saving) setDraft(value) }}
           onSave={send} onCancel={cancel} />
         <div style={editFooter}>

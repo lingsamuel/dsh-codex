@@ -1,6 +1,7 @@
 {
   "name": "dsh-chatgpt",
   "version": "0.1.0",
+  "icon": "./assets/plugin-icon.svg",
   "description": "在 DeepSeek Harness 中展示和操作本机 Codex 会话",
   "repository": {
     "type": "git",
@@ -8,18 +9,22 @@
   },
   "type": "module",
   "files": [
+    "assets/plugin-icon.svg",
+    "locale/",
     "dist/client.js",
     "dist/file-reference-search.mjs",
     "dist/session-markdown.mjs",
     "dist/session-media-references.mjs",
     "manual/",
     "profile/cordis.patch.yml",
+    "profile/web-mode.yml",
     "src/host/",
     "src/shared/"
   ],
   "exports": {
     ".": "./src/host/plugin.mjs",
     "./client": "./dist/client.js",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "dsh": {

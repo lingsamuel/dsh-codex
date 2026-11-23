@@ -288,7 +288,7 @@ test('普通文件按内容去重，原生待发和历史引用上传时的快�
   const get = makeGet(store)
   const upload = async (thread, name, body) => {
     const query = new URLSearchParams({ sessionId: thread, name })
-    const response = await get(`/api/session/uploadFileBinary?${query}`, {
+    const response = await get(`/api/codex/file-upload?${query}`, {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body,
     })
     assert.equal(response.status, 200)

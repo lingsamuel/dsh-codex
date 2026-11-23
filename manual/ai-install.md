@@ -36,7 +36,7 @@ npm run package:plugin
 将示例路径替换为实际包的绝对路径。首次安装会创建 `codex` Profile。
 
 ```sh
-dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.0.tgz
+dsh plugin --profile codex add /absolute/path/to/dsh-chatgpt-0.1.9.tgz
 dsh --profile codex --dump-config
 ```
 

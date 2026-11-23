@@ -8,6 +8,7 @@ import { readThreadTurns } from './live-history.mjs'
 import { readVisibleConversationQueue } from './queue-watch.mjs'
 import { fileAttachmentInput, fileAttachmentOf, splitFileAttachmentInput } from '../shared/file-attachments.js'
 import { isLocalSessionId } from '../shared/local-session.js'
+import { codexFileUploadPath } from '../shared/upload-path.js'
 
 const noCache = { 'Cache-Control': 'no-store' }
 
@@ -38,7 +39,7 @@ export function createFileUploads(attachments, socketPath, ownerSignal, steers) 
   }
 
   const upload = {
-    path: '/api/session/uploadFileBinary', methods: ['POST'], requestBody: 'streaming',
+    path: codexFileUploadPath, methods: ['POST'], requestBody: 'streaming',
     async fetch(request) {
       const mediaType = request.headers.get('Content-Type')?.split(';', 1)[0].trim().toLowerCase()
       if (mediaType !== 'application/octet-stream') return new Response(null, { status: 415 })

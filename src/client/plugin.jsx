@@ -1,4 +1,5 @@
-import { FileUploadRuntime } from '@deepseek-ai/dsh-client-file-upload/src/client/runtime.ts'
+import { CodexFileUploadRuntime } from './native-dsh/file-upload.js'
+import { installCodexFileScope } from './native-dsh/dual-workspace-files.js'
 import { createHistoryCatalog } from './catalog.js'
 import { provideCodexControllers } from './native-dsh/controllers.js'
 import { installLiveStatus } from './native-dsh/live-status.jsx'
@@ -30,18 +31,33 @@ import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
 import { installWorktrees } from './native-dsh/worktree.jsx'
 import { installSidebarBrand } from './native-dsh/branding.jsx'
 import { installStartupPage } from './native-dsh/startup.jsx'
+import { installWebMode } from './web-mode.jsx'
+import { webModePath } from '../shared/web-mode.js'
 
 export const inject = ['slots', 'locale']
 
-export function apply(ctx) {
+export async function apply(ctx) {
   const controller = new AbortController()
-  const catalog = createHistoryCatalog(controller.signal)
   ctx.effect(() => () => controller.abort())
-
+  let mode = globalThis.__DSH_CHATGPT_WEB_MODE__
+  if (!mode) {
+    // 官方 Web 可在当前页面热装插件。此时仍使用页面已加载的原生会话控制器。
+    const response = await fetch(new URL(webModePath.slice(1) + '?mode=dsh', document.baseURI), {
+      signal: controller.signal,
+    })
+    if (response.ok) mode = await response.json()
+  }
+  if (controller.signal.aborted) return
+  if (mode) {
+    installWebMode(ctx, mode)
+    if (globalThis.__DSH_CHATGPT_WEB_MODE__?.mode !== 'codex') return
+    installCodexFileScope(ctx)
+  }
+  const catalog = createHistoryCatalog(controller.signal)
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
-  // 只加载原生浏览器上传组件。普通文件的服务端入口由 Codex 会话路由持有。
-  ctx.plugin(FileUploadRuntime)
-  installSidebarBrand(ctx)
+  // 复用原生上传组件，文件走 Codex 的独立路由。
+  ctx.plugin(CodexFileUploadRuntime)
+  if (!mode) installSidebarBrand(ctx)
   installComposer(ctx, catalog.store)
   const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installStartupPage(ctx, startupReady)
