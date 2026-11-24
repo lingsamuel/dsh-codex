@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 import { transformSync } from 'esbuild'
+import pkg from '../package.json' with { type: 'json' }
 
 const source = new URL('../src/client/web-mode.jsx', import.meta.url)
 
@@ -111,7 +112,7 @@ test('独占时隐藏所有模式入口，退出独占保留共存的 Codex 页�
   installWebMode(ctx, { ...coexist, mode: 'codex', exclusive: true })
   assert.equal(elements(workspace.component({ wide: true })).some(node => node?.type === 'switch'), false)
   const { options, render } = registration.get('plugins.bundle.config')
-  assert.equal(options.key, 'dsh-codex')
+  assert.equal(options.key, pkg.name)
   const view = elements(render({ ...options.inject(), t: key => copy()[key] }))
   const settings = view.filter(node => node?.type === 'switch')
   assert.deepEqual(settings.map(setting => setting.props.checked), [true, true])

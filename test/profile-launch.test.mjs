@@ -75,12 +75,12 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
 
 test('临时 Profile 加载插件默认配置，并在进程退出后清理', { skip: process.platform === 'win32' }, async t => {
   const { runtime, patch, dump } = await fixture(t)
-  assert.equal(parseEntryYaml(dump('--dump-default-config')).find(entry => entry.id === 'dsh-codex')?.name, pluginName)
+  assert.equal(parseEntryYaml(dump('--dump-default-config')).find(entry => entry.id === pluginName)?.name, pluginName)
   await writeFile(patch, savedSetting)
   assert.match(dump('--dump-config'), /busyEnterBehavior: steer/)
 
   const freshConfig = dump('--fresh-profile', '--dump-config')
-  assert.equal(parseEntryYaml(freshConfig).find(entry => entry.id === 'dsh-codex')?.name, pluginName)
+  assert.equal(parseEntryYaml(freshConfig).find(entry => entry.id === pluginName)?.name, pluginName)
   assert.doesNotMatch(freshConfig, /busyEnterBehavior: steer/)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === fileActions.id), fileActions)
   assert.deepEqual(parseEntryYaml(freshConfig).find(entry => entry.id === 'ui-sidebar-files'), {

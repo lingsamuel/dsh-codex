@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import pkg from '../../package.json' with { type: 'json' }
 import { canKeepWebPage, webModeFor, webModePath } from '../shared/web-mode.js'
 import { beginModeLoading, saveModeHandoff } from '../shared/web-mode-handoff.js'
 import { installModeBrand, playModeBrand } from './native-dsh/mode-brand.jsx'
@@ -268,7 +269,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
       if (canLeave()) window.location.reload()
     } }),
   }, ModeChanged))
-  ctx.slots.inject(pluginSlot, () => ctx.slots.register({ name: pluginSlot, key: 'dsh-codex', locale,
+  ctx.slots.inject(pluginSlot, () => ctx.slots.register({ name: pluginSlot, key: pkg.name, locale,
     inject: () => ({ state, change }),
   }, ModeSettings))
 }

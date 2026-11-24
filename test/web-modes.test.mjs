@@ -16,7 +16,7 @@ async function makeProfile(t, manifest) {
 
 test('独占只保存入口偏好，重开后仍覆盖显式 DSH 入口', async t => {
   const { createWebModeRoute, openWebModes } = await import('../src/host/web-mode.mjs')
-  const manifest = JSON.stringify({ dsh: { profile: { bundles: ['dsh-codex'] } } })
+  const manifest = JSON.stringify({ dsh: { profile: { bundles: ['dsh-for-codex'] } } })
   const profile = await makeProfile(t, manifest)
   const path = 'http://localhost/api/codex/web-mode?mode=dsh'
   const open = async () => createWebModeRoute(await openWebModes(profile))
@@ -120,7 +120,7 @@ test('Codex 启动图跳过原生会话功能并保留共用组件和独立插�
     '@deepseek-ai/dsh-session-log-export',
   ]
   const shared = '@deepseek-ai/dsh-client-ui-context-menu'
-  const codex = { id: 'dsh-codex', inject: [shared, ...native] }
+  const codex = { id: 'dsh-for-codex', inject: [shared, ...native] }
   const graph = {
     entries: [...native.map(id => ({ id })), { id: shared }, codex, { id: 'custom-plugin' }],
     batches: [

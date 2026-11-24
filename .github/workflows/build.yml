@@ -23,7 +23,7 @@ jobs:
       - run: npm run package:plugin
       - uses: actions/upload-artifact@v7
         with:
-          name: dsh-codex
+          name: dsh-for-codex
           path: artifacts/*.tgz
           if-no-files-found: error
       - name: Validate release tag
@@ -52,7 +52,7 @@ jobs:
           package-manager-cache: false
       - uses: actions/download-artifact@v8
         with:
-          name: dsh-codex
+          name: dsh-for-codex
           path: artifacts
       - run: npm publish "./artifacts/dsh-for-codex-${RELEASE_VERSION}.tgz" --access public
         env:
@@ -67,7 +67,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: dsh-codex
+          name: dsh-for-codex
           path: artifacts
       - run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \

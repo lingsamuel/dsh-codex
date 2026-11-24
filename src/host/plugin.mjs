@@ -1,4 +1,5 @@
 import { join } from 'node:path'
+import pkg from '../../package.json' with { type: 'json' }
 import { createHistoryRoutes } from './history.mjs'
 import { readCodex } from './app-server.mjs'
 import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs'
@@ -9,13 +10,14 @@ import { createWebModeRoute, openWebModes } from './web-mode.mjs'
 import { codexFileScopePrefix } from '../shared/dual-web-entry.js'
 import { webModeFor } from '../shared/web-mode.js'
 
-export const name = 'dsh-codex'
+export const name = pkg.name
 export const inject = ['connection', 'loader', 'attachments']
 
 export async function apply(ctx, { sharedWeb = false } = {}) {
   const owner = new AbortController()
   const profile = ctx.get('profileContext')
-  const cacheDirectory = process.env.DSH_CODEX_CACHE_DIR ?? (profile && join(profile.dir, name))
+  // 保留已有 Profile 的偏好和索引，数据目录名独立于插件 ID。
+  const cacheDirectory = process.env.DSH_CODEX_CACHE_DIR ?? (profile && join(profile.dir, 'dsh-codex'))
   ctx.effect(() => () => owner.abort())
   const loadSessionMedia = async () => {
     const [{ createSessionMediaReferences }, fileSystem] = await Promise.all([
