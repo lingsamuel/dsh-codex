@@ -17,6 +17,7 @@ import { installModelPicker } from './native-dsh/model-picker.js'
 import { installCodexSettings } from './native-dsh/codex-settings.jsx'
 import { installHistoryPreferences } from './native-dsh/history-preferences.jsx'
 import { installThreadTitleSettings } from './native-dsh/thread-title-settings.jsx'
+import { installThreadTitleHistory } from './native-dsh/thread-title-history.jsx'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 import { installCodexQuestions } from './native-dsh/question-ui.jsx'
@@ -79,6 +80,7 @@ export async function apply(ctx) {
   installFileReferences(ctx, catalog.store)
   installWorkspaceLinks(ctx)
   installHistoryDetails(ctx)
+  installThreadTitleHistory(ctx)
   installThreadReferences(ctx, catalog, controller.signal)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)

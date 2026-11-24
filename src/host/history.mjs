@@ -121,7 +121,8 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     questions.approvalRoute,
     questions.mcpRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit, steers),
-    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, historyPreferences.get),
+    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, historyPreferences.get,
+      titles.watchHistory),
     createOlderHistoryRoute(socketPath, ownerSignal, historyPreferences.get),
     route('history-items', (query, signal) => {
       const itemIds = query.getAll('itemId')
@@ -203,9 +204,15 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     }))),
     route('thread-references', (query, signal) => withCodexReader(socketPath, signal, rpc =>
       readThreadReferenceCandidates(rpc, query.get('threadId'), query.get('cwd'), query.get('query') ?? ''))),
-    route('turns', (query, signal) => {
+    route('turns', async (query, signal) => {
       const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
-      if (query.get('opening') === '1') return readOpeningFallback(socketPath, signal, threadId, historyPreferences.get)
+      if (query.get('opening') === '1') {
+        const [page, titleUpdates] = await Promise.all([
+          readOpeningFallback(socketPath, signal, threadId, historyPreferences.get),
+          titles.readHistory(threadId).catch(() => []),
+        ])
+        return titleUpdates.length ? { ...page, titleUpdates } : page
+      }
       return withCodexReader(socketPath, signal, request => readThreadTurns(request, {
         threadId,
         limit: 25,

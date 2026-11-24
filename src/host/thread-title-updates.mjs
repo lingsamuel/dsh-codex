@@ -149,11 +149,14 @@ export function createThreadTitleUpdates(socketPath, signal, checkTitle) {
       }
     }
     if (job.rounds.size < 2 || signal.aborted) return
+    const anchor = context.find(turn => job.rounds.has(turn.id))?.id
     const text = [...job.rounds.values()].flatMap(messages => [...messages.values()]).join('')
     for (const id of job.rounds.keys()) job.checked.add(id)
     if (job.checked.size > recentTurns) job.checked = new Set([...job.checked].slice(-recentTurns))
     job.rounds.clear()
-    if ([...text.replace(/[\s\p{P}]/gu, '')].length > 10) await checkTitle(thread, context, steeredTurns, signal)
+    if (anchor && [...text.replace(/[\s\p{P}]/gu, '')].length > 10) {
+      await checkTitle(thread, context, steeredTurns, anchor, signal)
+    }
   }
 
   signal.addEventListener('abort', () => {

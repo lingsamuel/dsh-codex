@@ -1117,11 +1117,13 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
     thread.status = { type: 'active' }
     fixture.broadcast({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } })
   }
-  const post = (fields, route = 'conversation-action') => fixture.get(`/api/codex/${route}`, {
+  const profile = join(fixture.directory, 'profile')
+  const get = fixture.openRoutes(profile)
+  const post = (fields, route = 'conversation-action') => get(`/api/codex/${route}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ threadId: thread.id, ...fields }),
   })
   return {
-    ...fixture, thread, post, text,
+    ...fixture, get, profile, thread, post, text,
     send: (clientUserMessageId = 'first', input = [text]) => post({ action: 'prompt', mode: 'queue', clientUserMessageId, input }),
     wait: event => once(events, event, { signal: AbortSignal.timeout(2_000) }),
     inferenceCount: () => started,
@@ -1276,6 +1278,12 @@ test('后续标题只按网页已结束轮次计数，两轮短输入跳过模�
   assert.match(input, /检查网页标题/)
   assert.match(input, /换个任务/)
   assert.match(input, /打包/)
+  assert.equal((await postCodex(title.get, 'title-settings', { showHistory: true })).status, 200)
+  assert.equal((await title.post({ action: 'rename', name: '手动命名' }, 'thread-action')).status, 200)
+  const history = await (await title.get('/api/codex/turns?threadId=main&opening=1')).json()
+  assert.deepEqual(history.titleUpdates, [{
+    turnId: 'turn-7', outcome: 'renamed', oldTitle: '检查网页标题', newTitle: '排查会话队列',
+  }])
 })
 
 test('同一轮的两次网页插话合计一轮，并且可触发新任务拟题', async t => {
@@ -1315,14 +1323,86 @@ test('拟标题模型、强度和开关保存到 Profile，换模型时清除强
   assert.equal(model.status, 200)
   assert.equal(follow.status, 200)
   const reopened = fixture.openRoutes(directory)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection, follow: true })
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection, follow: true, showHistory: false })
   const next = { provider: 'custom', model: 'no-effort-model' }
   assert.equal((await postCodex(reopened, 'title-settings', { selection: { ...next, reasoningEffort: 'high' } })).status, 400)
   assert.equal((await postCodex(reopened, 'title-settings', { selection: { reasoningEffort: 'high' } })).status, 400)
   assert.equal((await postCodex(reopened, 'title-settings', { selection: next })).status, 200)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: next, follow: true })
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: next, follow: true, showHistory: false })
   assert.equal((await postCodex(reopened, 'title-settings', { selection: null })).status, 200)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true })
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true, showHistory: false })
+})
+
+test('拟题注记关闭显示时仍保存，并可在线显示和隐藏', async t => {
+  const model = Promise.withResolvers()
+  const title = await titleFixture(t, { followTitle: null, waitForFollow: model.promise })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+
+  const control = new AbortController()
+  t.after(() => control.abort())
+  const reader = (await title.get('/api/codex/watch?threadId=main', { signal: control.signal })).body.getReader()
+  async function updatesWhen(match) {
+    const timeout = setTimeout(() => control.abort(), 3_000)
+    try {
+      while (true) {
+        const frame = await readSseFrame(reader)
+        if (!frame.startsWith('data: ')) continue
+        const update = JSON.parse(frame.slice(6))
+        if (update.type === 'title-history' && match(update.updates)) return update.updates
+      }
+    } finally {
+      clearTimeout(timeout)
+    }
+  }
+
+  const initial = await (await title.get('/api/codex/turns?threadId=main&opening=1')).json()
+  assert.deepEqual(initial.titleUpdates ?? [], [])
+  const snapshot = await readSseFrame(reader)
+  assert.equal(JSON.parse(snapshot.slice(6)).type, 'snapshot')
+  const started = title.wait('title-started')
+  for (const [id, text] of [['topic', '切换任务，检查队列消息丢失'], ['details', '先检查原生持久化和任务恢复']]) {
+    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+    title.finish()
+    await delay(180)
+  }
+  await started
+  assert.equal((await postCodex(title.get, 'title-settings', { showHistory: true })).status, 200)
+  assert.deepEqual(await updatesWhen(updates => updates.length > 0), [{ turnId: 'turn-3', outcome: 'pending' }])
+  model.resolve()
+  const saved = [{ turnId: 'turn-3', outcome: 'kept' }]
+  assert.deepEqual(await updatesWhen(updates => updates[0]?.outcome === 'kept'), saved)
+  const reopened = title.openRoutes(title.profile)
+  const opening = await (await reopened('/api/codex/turns?threadId=main&opening=1')).json()
+  assert.deepEqual(opening.titleUpdates, saved)
+  assert.equal(opening.data.length, 3)
+  assert.equal((await postCodex(title.get, 'title-settings', { showHistory: false })).status, 200)
+  assert.deepEqual(await updatesWhen(updates => updates.length === 0), [])
+  assert.equal((await postCodex(title.get, 'title-settings', { showHistory: true })).status, 200)
+  assert.deepEqual(await updatesWhen(updates => updates.length > 0), saved)
+  assert.equal(title.inferenceCount(), 2)
+  await reader.cancel()
+})
+
+test('拟题注记存储不可用时跳过模型请求', async t => {
+  const title = await titleFixture(t, { initialItem: {
+    id: 'old', type: 'userMessage', content: [{ type: 'text', text: '已有会话' }],
+  } })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  // 确定性地模拟 Profile 存储无法写入，不依赖测试运行用户的文件权限。
+  await mkdir(join(title.profile, 'web-automatic-titles.json'))
+  const detached = title.wait('title-detached')
+  for (const [id, text] of [['topic', '改为调查后台会话队列'], ['detail', '先核对消息持久化逻辑']]) {
+    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+    title.finish()
+    await delay(170)
+  }
+  await detached
+  assert.equal(title.inferenceCount(), 0)
+  assert.equal(title.thread.name, undefined)
 })
 
 test('拟标题在模型目录移除已保存档位后使用默认强度', async t => {
@@ -1397,27 +1477,32 @@ test('已写入原生历史的网页插话即使丢失回执也计入拟题', as
 })
 
 test('网页显式保存同名标题后，正在生成的后续标题不会覆盖它', async t => {
-  const pending = Promise.withResolvers()
-  const title = await titleFixture(t, { waitForFollow: pending.promise })
-  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
-  const first = title.wait('title-saved')
-  await title.send()
-  await first
-  title.finish()
-  const started = title.wait('title-started')
-  for (const [id, text] of [['phase-2', '切换任务，先检查会话队列'], ['phase-3', '找到领取待发消息失败的原因']]) {
-    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+  for (const followTitle of ['排查会话队列', null]) await t.test(followTitle ?? '保留原标题', async t => {
+    const pending = Promise.withResolvers()
+    const title = await titleFixture(t, { followTitle, waitForFollow: pending.promise })
+    assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+    const first = title.wait('title-saved')
+    await title.send()
+    await first
     title.finish()
-    await delay(160)
-  }
-  await started
-  assert.equal((await title.post({ action: 'rename', name: '检查网页标题' }, 'thread-action')).status, 200)
-  const detached = title.wait('title-detached')
-  pending.resolve()
-  await detached
-  await delay(40)
-  assert.equal(title.thread.name, '检查网页标题')
-  assert.equal(title.messages.filter(({ method }) => method === 'thread/name/set').length, 2)
+    const started = title.wait('title-started')
+    for (const [id, text] of [['phase-2', '切换任务，先检查会话队列'], ['phase-3', '找到领取待发消息失败的原因']]) {
+      assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+      title.finish()
+      await delay(160)
+    }
+    await started
+    assert.equal((await title.post({ action: 'rename', name: '检查网页标题' }, 'thread-action')).status, 200)
+    const detached = title.wait('title-detached')
+    pending.resolve()
+    await detached
+    await delay(40)
+    assert.equal(title.thread.name, '检查网页标题')
+    assert.equal(title.messages.filter(({ method }) => method === 'thread/name/set').length, 2)
+    assert.equal((await postCodex(title.get, 'title-settings', { showHistory: true })).status, 200)
+    const page = await (await title.get('/api/codex/turns?threadId=main&opening=1')).json()
+    assert.deepEqual(page.titleUpdates, [{ turnId: 'turn-3', outcome: 'not-applied' }])
+  })
 })
 
 test('首条消息写入期间原生会话记录短暂为空时继续拟标题', async t => {

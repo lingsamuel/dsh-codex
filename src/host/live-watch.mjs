@@ -55,7 +55,8 @@ function* historyChangeFrames({ turn, items, onlyIfLoaded }, lastPage) {
 }
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, readPreferences) {
+export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, readPreferences,
+  watchTitleHistory) {
   const watchNativeUnread = createNativeUnreadMonitor()
   return {
     path: '/api/codex/watch',
@@ -418,6 +419,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
               sqliteHome = sqliteDirectory(config)
               await sendSnapshot(initial, false, goalResult?.goal)
               reading = false
+              watchTitleHistory?.(initial.thread.id, send, signal)
               if (observeQueue) wakeQueue = watchConversationQueue(connection.request, initial.thread.id, sqliteHome, send, signal, steers)
               wakeFacts()
               await connection.closed

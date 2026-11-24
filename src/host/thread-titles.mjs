@@ -8,6 +8,7 @@ import { createDefaultPreference } from './default-preference.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
 import { codexModelOption, readVisibleProviderModels } from './models.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
+import { createThreadTitleHistory } from './thread-title-history.mjs'
 import { createThreadTitleUpdates, readFirstTitleMessage, readTitleContext } from './thread-title-updates.mjs'
 
 const readOnly = ':read-only'
@@ -157,7 +158,7 @@ function updatedTitlePrompt(name, context) {
     + JSON.stringify({ currentTitle: clipUtf8(name ?? '', 250), userMessages: messages })
 }
 
-async function generateTitle(socketPath, thread, selection, prompt, ownerSignal, allowKeep = false) {
+async function generateTitle(socketPath, thread, selection, prompt, ownerSignal, beforeRequest) {
   const events = new EventEmitter()
   let threadId, turnId, completed, answer
   // 保留连接到清理完成。即使 Host 停止，也要尝试中断独立轮次并解除订阅。
@@ -188,9 +189,11 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
     if (!started.thread.ephemeral || started.sandbox?.type !== 'readOnly' || started.approvalPolicy !== 'never') return
     if ((started.model && started.model !== model) || (started.modelProvider && started.modelProvider !== provider)) return
     ownerSignal?.throwIfAborted()
+    if (beforeRequest) await beforeRequest()
+    ownerSignal?.throwIfAborted()
     const { turn } = await request('turn/start', {
       threadId, input: [{ type: 'text', text: prompt, text_elements: [] }],
-      permissions: readOnly, runtimeWorkspaceRoots: [], outputSchema: allowKeep
+      permissions: readOnly, runtimeWorkspaceRoots: [], outputSchema: beforeRequest
         ? { ...titleSchema, properties: { title: { anyOf: [titleProperty, { type: 'null' }] } } } : titleSchema,
       ...(reasoningEffort !== undefined && { effort: reasoningEffort }),
     })
@@ -200,6 +203,7 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
     if (!completed) await Promise.race([once(events, 'completed', { signal }), connection.closed])
     if (completed?.id !== turnId || completed.status !== 'completed' || typeof answer !== 'string' || answer.length > 8192) return
     const { title } = JSON.parse(answer)
+    if (beforeRequest && title === null) return null
     if (typeof title !== 'string') return
     const value = title.trim()
     if (value && !/[\r\n\u2028\u2029]/u.test(value) && [...value].length <= titleLength) return value
@@ -214,10 +218,10 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
 export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirectory) {
   const lifetime = ownerSignal ?? new AbortController().signal
   const preference = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-title-settings.json'), 'settings')
-  const names = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-automatic-titles.json'), 'names')
+  const history = createThreadTitleHistory(cacheDirectory)
   const jobs = new Map()
   const manualNames = new Set()
-  let settings = { selection: null, follow: false }
+  let settings = { selection: null, follow: false, showHistory: false }
   let followController
   let track
   let modelController = new AbortController()
@@ -238,18 +242,17 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
       }
     }
     settings = next
+    history.show(settings.showHistory)
   }
 
   async function writeName(request, threadId, name) {
     await request('thread/name/set', { threadId, name })
-    await names.update(previous => ({ ...previous, [threadId]: name }))
   }
 
   async function mayUpdate(thread) {
     if (!supportsTitle(thread) || thread.status?.type !== 'idle' || manualNames.has(thread.id)) return false
     if (!thread.name) return true
-    const previous = await names.get()
-    return previous != null && Object.hasOwn(previous, thread.id) && previous[thread.id] === thread.name
+    return await history.managedName(thread.id) === thread.name
   }
 
   async function threadForContext(request, threadId, context, steeredTurns) {
@@ -257,7 +260,7 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     if (JSON.stringify(latest) === JSON.stringify(context)) return (await request('thread/read', { threadId })).thread
   }
 
-  async function checkTitle(thread, context, steeredTurns, followSignal) {
+  async function checkTitle(thread, context, steeredTurns, anchor, followSignal) {
     const initial = jobs.get(thread.id)?.completion
     if (initial) {
       await initial
@@ -268,16 +271,33 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     }
     if (!await mayUpdate(thread)) return
     const signal = AbortSignal.any([followSignal, modelController.signal])
+    let attempt
     const title = await generateTitle(socketPath, thread, settings.selection,
-      updatedTitlePrompt(thread.name, context), signal, true).catch(() => undefined)
-    if (!title || title === thread.name || signal.aborted) return
-    await submit(thread.id, () => withCodexReader(socketPath, signal, async request => {
-      const current = await threadForContext(request, thread.id, context, steeredTurns)
-      if (current && current.name === thread.name && await mayUpdate(current)) {
+      updatedTitlePrompt(thread.name, context), signal, async () => {
+        // 先确保这次独立请求有可恢复的记录，展示偏好不影响这笔写入。
+        attempt = await history.begin(thread.id, anchor)
+      }).catch(() => undefined)
+    if (attempt === undefined) return
+
+    let outcome = 'not-applied'
+    try {
+      if (signal.aborted || title === undefined) return
+      await submit(thread.id, () => withCodexReader(socketPath, signal, async request => {
+        const current = await threadForContext(request, thread.id, context, steeredTurns)
+        if (!current || current.name !== thread.name || !await mayUpdate(current)) return
         signal.throwIfAborted()
+        if (title === null || title === thread.name) {
+          outcome = 'kept'
+          return
+        }
         await writeName(request, thread.id, title)
-      }
-    }))
+        outcome = 'renamed'
+        await history.finish(thread.id, attempt, { outcome, oldTitle: current.name ?? null, newTitle: title })
+      }))
+    } finally {
+      // 成功改名与自动管理资格一并在会话串行队列中保存，避免覆盖并发的手动命名。
+      if (outcome !== 'renamed') await history.finish(thread.id, attempt, { outcome })
+    }
   }
 
   async function nameThread(thread, job) {
@@ -292,7 +312,10 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
       const saved = await readFirstTitleMessage(request, thread.id)
       if (saved?.turnId !== first.turnId || saved.item.id !== first.item.id || saved.text !== first.text) return
       const { thread: current } = await request('thread/read', { threadId: thread.id })
-      if (mayName(current)) await writeName(request, thread.id, title)
+      if (mayName(current)) {
+        await writeName(request, thread.id, title)
+        await history.name(thread.id, title)
+      }
     }))
   }
 
@@ -316,8 +339,9 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     return settings
   }, async (patch, signal) => {
     await ready
-    const { follow, selection } = patch
-    if ((follow === undefined && selection === undefined) || (follow !== undefined && typeof follow !== 'boolean')) {
+    const { follow, selection, showHistory } = patch
+    if ((follow === undefined && selection === undefined && showHistory === undefined)
+      || (follow !== undefined && typeof follow !== 'boolean') || (showHistory !== undefined && typeof showHistory !== 'boolean')) {
       throw invalidCapabilityRequest('无效的拟标题设置。')
     }
     let nextSelection = null
@@ -342,6 +366,7 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     const saved = await preference.update(previous => {
       signal.throwIfAborted()
       return { ...settings, ...previous, ...(follow !== undefined && { follow }),
+        ...(showHistory !== undefined && { showHistory }),
         ...(selection !== undefined && { selection: nextSelection }) }
     })
     applySettings(saved)
@@ -350,14 +375,15 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
 
   return {
     route, schedule,
+    watchHistory: history.watch,
+    async readHistory(threadId) {
+      await ready
+      return history.list(threadId)
+    },
     async manualRename(threadId) {
       manualNames.add(threadId)
       // 同名的显式改名也撤销自动管理。原生改名已经提交，偏好写入失败不改写该回执。
-      await names.update(previous => {
-        if (!previous || !Object.hasOwn(previous, threadId)) return previous
-        const { [threadId]: removed, ...remaining } = previous
-        return remaining
-      }).catch(() => {})
+      await history.releaseName(threadId).catch(() => {})
     },
   }
 }

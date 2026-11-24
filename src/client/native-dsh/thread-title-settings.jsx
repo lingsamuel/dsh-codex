@@ -19,6 +19,8 @@ const labels = {
     costHelp: '即使标题没有变化，拟题也可能增加订阅用量或 API 费用。',
     follow: '随会话更新标题',
     followHelp: '每累计两轮含网页发言的对话后检查任务是否变化。新增正文很短时跳过请求，手动起的标题会保留。',
+    showHistory: '在会话历史中显示标题更新',
+    showHistoryHelp: '在触发轮次下显示额外的拟题请求和结果。待确认表示请求或结果尚未核实，Token 用量以模型服务计量为准。关闭时仍记录。',
     loading: '正在读取…', retry: '重试', catalogError: '无法读取可用模型。',
   },
   en: {
@@ -28,6 +30,8 @@ const labels = {
     costHelp: 'Requests may use additional plan allowance or incur API costs even when the title stays the same.',
     follow: 'Update titles as the conversation evolves',
     followHelp: 'Check for a task change every two turns with web messages. Skip requests when the new text is very short. Keep manually set titles.',
+    showHistory: 'Show title updates in conversation history',
+    showHistoryHelp: 'Display extra title requests and their results below the triggering turn. Pending means the request or result has not been verified. Token usage is measured by the model provider. Requests are recorded when this is off.',
     loading: 'Loading…', retry: 'Retry', catalogError: 'Could not load available models.',
   },
 }
@@ -137,14 +141,14 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
     <PreferenceRow title={t('model')} description={<>{t('modelHelp')}<br />{t('costHelp')}</>}
       value={value} selectedLabel={settings ? (effortLabel ? `${label} · ${effortLabel}` : label) : t('loading')}
       options={settings && !saving ? options : []} onSelect={select} />
-    <div className={css.row}>
+    {['follow', 'showHistory'].map(field => <div className={css.row} key={field}>
       <div className={css.rowText}>
-        <div className={css.title}>{t('follow')}</div>
-        <div id={id} className={css.desc}>{t('followHelp')}</div>
+        <div className={css.title}>{t(field)}</div>
+        <div id={`${id}-${field}`} className={css.desc}>{t(`${field}Help`)}</div>
       </div>
-      <Switch checked={settings?.follow ?? false} label={t('follow')} describedBy={id}
-        disabled={!settings || saving} onChange={follow => void save({ follow })} />
-    </div>
+      <Switch checked={settings?.[field] ?? false} label={t(field)} describedBy={`${id}-${field}`}
+        disabled={!settings || saving} onChange={value => void save({ [field]: value })} />
+    </div>)}
     {(loadError || catalogError || saveError) && <div role="alert" className={css.desc}>
       {saveError || loadError || t('catalogError')}
       {(loadError || catalogError) && <Button size="sm" variant="outline"

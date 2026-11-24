@@ -84,6 +84,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const codexApprovals = createSnapshotStore([])
   const codexMcpRequests = createSnapshotStore([])
   const historyDetails = createSnapshotStore({})
+  const titleHistory = createSnapshotStore(new Map())
   const goalProjection = createSnapshotStore(undefined)
   const planProjection = createSnapshotStore(confirmedPlan(planModeOf(thread)))
   const permissions = createSnapshotStore({ permission: thread.webPermission })
@@ -98,7 +99,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const projections = new Map([['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection], ['plan', planProjection],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
     ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions],
-    ['historyDetails', historyDetails]])
+    ['historyDetails', historyDetails], ['titleHistory', titleHistory]])
   const partialTurns = new Map()
   const rows = []
   const rowsById = new Map()
@@ -478,6 +479,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace, reconnecting, preferences = page.preferences }, lifetime = signal) {
+    if (page.titleUpdates) publishTitleHistory(page.titleUpdates)
     if (!opened || replace) {
       const images = await readInlineCodexAttachments(page.data, lifetime)
       lifetime.throwIfAborted()
@@ -635,6 +637,16 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     })
   }
 
+  function publishTitleHistory(updates) {
+    const byTurn = new Map()
+    for (const update of updates) {
+      const turn = byTurn.get(update.turnId)
+      if (turn) turn.push(update)
+      else byTurn.set(update.turnId, [update])
+    }
+    titleHistory.set(byTurn)
+  }
+
   function receive(frame, lifetime) {
     return enqueue(async () => {
       // SSE 快照合并后才表示会话恢复，HTTP 补读只提供可查看的历史。
@@ -649,6 +661,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (frame.type === 'mcp-requests' && watchingInteractions) return codexMcpRequests.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
       if (frame.type === 'history-details-changed') return refreshShownHistoryItems(frame.turnIds, lifetime)
+      if (frame.type === 'title-history') return publishTitleHistory(frame.updates)
       if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime, frame.steers)
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
@@ -721,6 +734,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     return enqueue(async () => {
       // 新连接会重新扫描 rollout，旧文件被替换时不保留上一连接的补充条目。
       if (mode === 'connecting') {
+        titleHistory.set(new Map())
         updateCancelledToolCalls([])
         updateTurnDirectories()
         updateGoalHistory({}, {})
