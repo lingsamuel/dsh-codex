@@ -15,6 +15,7 @@ import { installCommands } from './native-dsh/commands.jsx'
 import { installPlanDocuments } from './native-dsh/plan-document.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
 import { installHistoryPreferences } from './native-dsh/history-preferences.jsx'
+import { installThreadTitleSettings } from './native-dsh/thread-title-settings.jsx'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 import { installCodexQuestions } from './native-dsh/question-ui.jsx'
@@ -95,6 +96,7 @@ export async function apply(ctx) {
   installFileDownloads(ctx)
   installModelPicker(ctx, controller.signal)
   installHistoryPreferences(ctx, controller.signal)
+  installThreadTitleSettings(ctx, controller.signal)
   installCommands(ctx)
   installPlanDocuments(ctx)
   installBackgroundTerminals(ctx, catalog.backgroundTerminals)

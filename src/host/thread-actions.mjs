@@ -25,7 +25,7 @@ function historyUnavailable(thread, allowArchived = false) {
 }
 
 /** 只开放会话管理动作。浏览器不能指定要转发的 RPC 或改变原生线程控制权。 */
-export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), backgroundTerminals, permissions) {
+export function createThreadActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), backgroundTerminals, permissions, titles) {
   const historyActions = new Set()
   return {
     path: '/api/codex/thread-action',
@@ -149,6 +149,7 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
             }
             const sent = await sendAfterRevert(request, threadId, revised, signal)
             if (sent.error) return json({ error: sent.error }, 409)
+            if (sent.turn?.id) titles?.schedule(runtime, undefined, sent.turn.id)
             return json(permission ? { ...sent, permission } : sent)
           })
           return await (modifiesHistory ? submit(threadId, run) : run())
@@ -161,7 +162,9 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
           }
           // 分叉和改名只需要原生记录，源线程可以保持未加载。
           if (action === 'fork') return request(method, { ...params, config: await threadTaskToolsConfig(socketPath, signal) })
-          return request(method, params)
+          const result = await request(method, params)
+          if (action === 'rename') await titles?.manualRename(threadId)
+          return result
         })
         const result = await (action === 'rename' || restoreArchived ? submit(threadId, run) : run())
         if (action === 'fork' || action === 'unarchive') {

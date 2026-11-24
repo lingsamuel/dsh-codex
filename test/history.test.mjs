@@ -1001,13 +1001,15 @@ test('目录转换部分失败后重试，仅向同目录已有项目迁移余�
 })
 
 async function titleFixture(t, { initialItem, modelResult = 'success', waitForModel, waitForClaim, provider = 'openai',
-  account = 'chatgpt', luna = true, defer = false, emptyRollout = false, unindexedHistory = false } = {}) {
+  account = 'chatgpt', luna = true, defer = false, emptyRollout = false, unindexedHistory = false,
+  followTitle = '排查会话队列', waitForFollow, loseSteerReceipt = false } = {}) {
   const thread = { id: 'main', cwd: '/workspace', historyMode: 'paginated', status: { type: 'idle' },
     model: 'main-model', modelProvider: provider, preview: initialItem ? '旧消息' : '' }
   const text = { type: 'text', text: '请检查网页标题逻辑', text_elements: [] }
   const queue = new Map()
   const events = new EventEmitter()
   let turn = initialItem ? { id: 'first-turn', items: [initialItem] } : undefined
+  const turns = turn ? [turn] : []
   let started = 0
   let detached = false
   const fixture = await fakeCodex(t, {
@@ -1018,14 +1020,27 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
       }
       return { result: { thread } }
     },
-    'thread/turns/list': () => {
+    'thread/turns/list': ({ sortDirection, limit, itemsView }) => {
       events.emit(detached ? 'title-revalidation' : 'history-read')
       if (turn && unindexedHistory) {
         unindexedHistory = false
         return { error: { code: -32601, message: 'list_turns is not supported yet' } }
       }
-      return turn ? { result: { data: [turn], nextCursor: null } }
+      const ordered = sortDirection === 'desc' ? turns.toReversed() : turns
+      return turn ? { result: { data: ordered.slice(0, limit).map(item => ({ ...item,
+        items: itemsView === 'summary' ? item.items.slice(0, 1) : item.items })), nextCursor: null } }
         : { error: { code: -32600, message: 'thread/turns/list is unavailable before first user message' } }
+    },
+    'thread/items/list': ({ turnId, sortDirection }) => {
+      const items = turns.find(candidate => candidate.id === turnId)?.items ?? []
+      const ordered = sortDirection === 'desc' ? items.toReversed() : items
+      return { result: { data: ordered.map(item => ({ item, turnId })), nextCursor: null } }
+    },
+    'turn/steer': ({ clientUserMessageId, input, expectedTurnId }, client) => {
+      assert.equal(expectedTurnId, turn.id)
+      turn.items.push({ type: 'userMessage', clientId: clientUserMessageId, id: `item-${clientUserMessageId}`, content: input })
+      if (loseSteerReceipt) client.terminate()
+      return { result: { turnId: turn.id } }
     },
     'thread/queue/list': () => {
       events.emit('queue-read')
@@ -1048,7 +1063,9 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
       return { result: { turn: { id: 'first-turn', items: [] } } }
     },
     'account/read': () => ({ result: { account: { type: account } } }),
-    'model/list': () => ({ result: { data: luna ? [{ model: 'gpt-5.6-luna' }] : [] } }),
+    'modelProvider/list': () => ({ result: { data: [{ id: 'openai', name: 'OpenAI' }, { id: 'custom', name: 'Custom' }] } }),
+    'model/list': ({ modelProvider }) => ({ result: { data: modelProvider === 'custom' ? [{ model: 'title-only-model' }]
+      : luna ? [{ model: 'gpt-6-luna' }] : [] } }),
     'config/read': () => ({ result: { config: { mcp_servers: { fixture: { enabled: true } } } } }),
     'thread/start': params => {
       assert.equal(params.ephemeral, true)
@@ -1056,22 +1073,25 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
         approvalPolicy: 'never' } }
     },
     'turn/start': async (params, client) => {
-      started++
+      const first = ++started === 1
       const startedTurn = { id: 'title-turn', status: 'inProgress', items: [] }
       events.emit('title-started', params)
       const finish = () => {
         const send = (method, params) => client.send(JSON.stringify({ method, params }))
+        const title = first ? '检查网页标题' : followTitle
         if (modelResult === 'success') send('item/completed', { threadId: 'title-thread', turnId: startedTurn.id,
-          item: { type: 'agentMessage', phase: 'final_answer', text: '{"title":"检查网页标题"}' } })
+          item: { type: 'agentMessage', phase: 'final_answer', text: JSON.stringify({ title }) } })
         send('turn/completed', { threadId: 'title-thread', turn: { ...startedTurn,
           status: modelResult === 'success' ? 'completed' : 'failed' } })
       }
-      if (waitForModel) void waitForModel.then(finish)
+      const waiting = first ? waitForModel : waitForFollow
+      if (waiting) void waiting.then(finish)
       else finish() // 轮次事件可能早于 turn/start 的响应。
       return { result: { turn: startedTurn } }
     },
     'thread/unsubscribe': () => {
       detached = true
+      events.emit('title-detached')
       return { result: {} }
     },
     'thread/name/set': ({ threadId, name }) => {
@@ -1084,9 +1104,12 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
   })
   function claim(submission) {
     queue.delete(submission.id)
-    turn = { id: 'first-turn', items: [{ type: 'userMessage', clientId: submission.clientUserMessageId,
-      id: `item-${submission.id}`, content: submission.input }] }
-    thread.preview = submission.input.find(part => part.type === 'text')?.text ?? ''
+    const item = { type: 'userMessage', clientId: submission.clientUserMessageId,
+      id: `item-${submission.id}`, content: submission.input }
+    if (turn?.items.some(entry => entry.id === item.id)) return
+    turn = { id: turns.length ? `turn-${turns.length + 1}` : 'first-turn', status: 'inProgress', items: [item] }
+    turns.push(turn)
+    thread.preview ||= submission.input.find(part => part.type === 'text')?.text ?? ''
     thread.status = { type: 'active' }
     fixture.broadcast({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } })
   }
@@ -1099,6 +1122,21 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
     wait: event => once(events, event, { signal: AbortSignal.timeout(2_000) }),
     inferenceCount: () => started,
     replaceFirstItem: item => { turn.items[0] = item },
+    finish() {
+      turn.status = 'completed'
+      thread.status = { type: 'idle' }
+      fixture.broadcast({ method: 'thread/status/changed', params: { threadId: thread.id, status: thread.status } })
+    },
+    fromCli(text, finish = true) {
+      claim({ id: `cli-${turns.length}`, input: [{ type: 'text', text }] })
+      if (finish) this.finish()
+      return turn.id
+    },
+    revertLast() {
+      turns.pop()
+      turn = turns.at(-1)
+      fixture.broadcast({ method: 'thread/reverted', params: { threadId: thread.id } })
+    },
   }
 }
 
@@ -1146,7 +1184,7 @@ test('网页首条消息进入历史后只用一个临时轮次拟标题，并�
     const update = await frameWhere(frame => frame.type === 'thread' && frame.id === title.thread.id)
     assert.equal(update.thread.name, '检查网页标题')
     const opening = title.messages.find(({ method }) => method === 'thread/start').params
-    assert.equal(opening.model, 'gpt-5.6-luna')
+    assert.equal(opening.model, 'gpt-6-luna')
     assert.equal(opening.threadSource, 'thread_title')
     assert.equal(opening.config.mcp_servers.fixture.enabled, false)
     assert.deepEqual(opening.environments, [])
@@ -1161,15 +1199,187 @@ test('网页首条消息进入历史后只用一个临时轮次拟标题，并�
   }
 })
 
-test('标题推理失败时写回首条文本摘录，并对第三方 provider 沿用原模型', async t => {
-  const title = await titleFixture(t, { modelResult: 'failure', provider: 'custom' })
-  const saved = title.wait('title-saved')
+test('默认拟题模型不可用时保留首条消息预览并跳过推理', async t => {
+  const title = await titleFixture(t, { luna: false })
+  const history = title.wait('history-read')
   assert.equal((await title.send()).status, 200)
-  assert.deepEqual(await saved, [title.text.text])
+  await history
+  await delay(220)
+  assert.equal(title.thread.preview, title.text.text)
+  assert.equal(title.thread.name, undefined)
+  assert.equal(title.inferenceCount(), 0)
+  assert.equal(title.messages.some(({ method }) => method === 'thread/start'), false)
+})
+
+test('首次拟题使用明确选择的提供商，推理失败时沿用预览', async t => {
+  const title = await titleFixture(t, { modelResult: 'failure' })
+  const selection = { provider: 'custom', model: 'title-only-model' }
+  assert.equal((await postCodex(title.get, 'title-settings', { selection })).status, 200)
+  const started = title.wait('title-started')
+  assert.equal((await title.send()).status, 200)
+  await started
+  await delay(50)
   const opening = title.messages.find(({ method }) => method === 'thread/start').params
-  assert.equal(opening.model, title.thread.model)
+  assert.equal(opening.model, selection.model)
   assert.equal(opening.modelProvider, 'custom')
+  assert.equal(title.thread.preview, title.text.text)
+  assert.equal(title.thread.name, undefined)
+})
+
+test('后续标题只按网页已结束轮次计数，两轮短输入跳过模型', async t => {
+  const title = await titleFixture(t)
+  const settings = await postCodex(title.get, 'title-settings', { follow: true })
+  assert.equal(settings.status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+  title.fromCli('这是一条来自 CLI 的消息，不应让网页自动拟标题')
+  title.fromCli('这也是来自 CLI 的一条消息')
+  const web = async (id, text) => {
+    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+    title.finish()
+    await delay(260)
+  }
+  await web('go-on', '继续')
+  await web('package', '打包！')
   assert.equal(title.inferenceCount(), 1)
+  await web('switch', '换个任务，调查会话队列为何丢消息')
+  assert.equal(title.inferenceCount(), 1)
+  const saved = title.wait('title-saved')
+  await web('confirm', '先检查发送和领取逻辑')
+  assert.deepEqual(await saved, ['排查会话队列'])
+  assert.equal(title.inferenceCount(), 2)
+  const input = title.messages.filter(({ method }) => method === 'turn/start').at(-1).params.input[0].text
+  assert.match(input, /检查网页标题/)
+  assert.match(input, /换个任务/)
+  assert.match(input, /打包/)
+})
+
+test('同一轮的两次网页插话合计一轮，并且可触发新任务拟题', async t => {
+  const title = await titleFixture(t, { followTitle: null })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+  const turnId = title.fromCli('在 CLI 中研究文件选择器', false)
+  const steer = (id, text) => title.post({ action: 'prompt', mode: 'steer', clientUserMessageId: id, expectedTurnId: turnId,
+    input: [{ type: 'text', text }] })
+  assert.equal((await steer('steer-1', '先暂停文件选择器，改查会话队列丢失')).status, 200)
+  assert.equal((await steer('steer-2', '重点看网页排队消息的持久化')).status, 200)
+  title.finish()
+  await delay(260)
+  assert.equal(title.inferenceCount(), 1)
+  const started = title.wait('title-started')
+  assert.equal((await title.send('go-on', [{ type: 'text', text: '继续' }])).status, 200)
+  title.finish()
+  const [request] = await started
+  assert.match(request.input[0].text, /改查会话队列丢失/)
+  assert.match(request.input[0].text, /网页排队消息的持久化/)
+  await delay(40)
+  assert.equal(title.thread.name, '检查网页标题')
+})
+
+test('拟标题模型和开关独立保存到 Profile', async t => {
+  const fixture = await titleFixture(t)
+  const directory = join(fixture.directory, 'profile')
+  const get = fixture.openRoutes(directory)
+  const selection = { provider: 'custom', model: 'title-only-model' }
+  const [model, follow] = await Promise.all([
+    postCodex(get, 'title-settings', { selection }),
+    postCodex(get, 'title-settings', { follow: true }),
+  ])
+  assert.equal(model.status, 200)
+  assert.equal(follow.status, 200)
+  const reopened = fixture.openRoutes(directory)
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection, follow: true })
+  assert.equal((await postCodex(reopened, 'title-settings', { selection: null })).status, 200)
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true })
+})
+
+test('后续拟题等待同一会话的首次拟题完成后再读取标题', async t => {
+  const pending = Promise.withResolvers()
+  const title = await titleFixture(t, { waitForModel: pending.promise })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-started')
+  await title.send()
+  await first
+  title.finish()
+  for (const [id, text] of [['phase-2', '切换任务，先检查会话队列'], ['phase-3', '找到领取待发消息失败的原因']]) {
+    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+    title.finish()
+    await delay(160)
+  }
+  assert.equal(title.inferenceCount(), 1)
+  const following = title.wait('title-started')
+  pending.resolve()
+  const [request] = await following
+  assert.match(request.input[0].text, /检查网页标题/)
+})
+
+test('回退保留的网页轮次仍参与后续拟题计数', async t => {
+  const title = await titleFixture(t)
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+  assert.equal((await title.send('retained', [{ type: 'text', text: '接下来排查会话队列中的消息丢失' }])).status, 200)
+  title.finish()
+  await delay(260)
+  title.fromCli('这条记录即将被回退')
+  title.revertLast()
+  const following = title.wait('title-started')
+  assert.equal((await title.send('after-revert', [{ type: 'text', text: '先检查待发记录是否成功领取' }])).status, 200)
+  title.finish()
+  const [request] = await following
+  assert.match(request.input[0].text, /队列中的消息丢失/)
+  assert.doesNotMatch(request.input[0].text, /即将被回退/)
+})
+
+test('已写入原生历史的网页插话即使丢失回执也计入拟题', async t => {
+  const title = await titleFixture(t, { loseSteerReceipt: true })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+  const turnId = title.fromCli('在 CLI 中研究文件选择器', false)
+  const result = await title.post({ action: 'prompt', mode: 'steer', clientUserMessageId: 'lost-ack', expectedTurnId: turnId,
+    input: [{ type: 'text', text: '暂停文件选择器，改为排查会话队列丢失的消息' }] })
+  assert.equal(result.status, 503)
+  title.finish()
+  await delay(220)
+  const following = title.wait('title-started')
+  assert.equal((await title.send('go-on', [{ type: 'text', text: '继续' }])).status, 200)
+  title.finish()
+  const [request] = await following
+  assert.match(request.input[0].text, /排查会话队列丢失的消息/)
+})
+
+test('网页显式保存同名标题后，正在生成的后续标题不会覆盖它', async t => {
+  const pending = Promise.withResolvers()
+  const title = await titleFixture(t, { waitForFollow: pending.promise })
+  assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
+  const first = title.wait('title-saved')
+  await title.send()
+  await first
+  title.finish()
+  const started = title.wait('title-started')
+  for (const [id, text] of [['phase-2', '切换任务，先检查会话队列'], ['phase-3', '找到领取待发消息失败的原因']]) {
+    assert.equal((await title.send(id, [{ type: 'text', text }])).status, 200)
+    title.finish()
+    await delay(160)
+  }
+  await started
+  assert.equal((await title.post({ action: 'rename', name: '检查网页标题' }, 'thread-action')).status, 200)
+  const detached = title.wait('title-detached')
+  pending.resolve()
+  await detached
+  await delay(40)
+  assert.equal(title.thread.name, '检查网页标题')
+  assert.equal(title.messages.filter(({ method }) => method === 'thread/name/set').length, 2)
 })
 
 test('首条消息写入期间原生会话记录短暂为空时继续拟标题', async t => {

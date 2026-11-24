@@ -24,6 +24,7 @@ import { createFileUploads } from './file-uploads.mjs'
 import { createFirstSubmission } from './first-submission.mjs'
 import { readThreadReferenceCandidates } from './thread-references.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
+import { createThreadTitles } from './thread-titles.mjs'
 import { createHistoryPreferences } from './history-preferences.mjs'
 import { createOlderHistoryRoute, readOpeningFallback, readTurnDetails } from './history-pages.mjs'
 
@@ -78,6 +79,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const modelDefault = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-model-default.json'), 'selection')
+  const titles = createThreadTitles(socketPath, ownerSignal, submit, cacheDirectory)
   const historyPreferences = createHistoryPreferences(cacheDirectory)
   const submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject, modelDefault.get, onDraftAccepted)
   const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
@@ -109,10 +111,12 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     permissions.catalogRoute,
     permissions.actionRoute,
     createModelDefaultRoute(socketPath, ownerSignal, modelDefault),
+    titles.route,
     historyPreferences.route,
-    createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
+    createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions, titles),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions, submitFirst),
-    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers, files?.resolve, submitFirst),
+    createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers,
+      files?.resolve, submitFirst, titles.schedule),
     questions.route,
     questions.approvalRoute,
     questions.mcpRoute,

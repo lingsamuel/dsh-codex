@@ -11,7 +11,7 @@ import { hasNoMaterializedHistory, readLatestTurn, readThreadTurns } from './liv
 import { updateModelSelection, validateModelDraft } from './models.mjs'
 import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread,
   unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
-import { createThreadTitleScheduler } from './thread-titles.mjs'
+import { createThreadTitles } from './thread-titles.mjs'
 import { resolveInputSkills } from './skills.mjs'
 import { resolveWorktreeCwd, validateWorktreeSelection, worktreeConflict } from './git-worktrees.mjs'
 import { createQueuedSteers } from './queued-steers.mjs'
@@ -59,6 +59,7 @@ function promptInput(input, threadId, resolveFile) {
 async function requireActiveThread(request, threadId) {
   const thread = await addressableThread(request, threadId)
   if (thread.status?.type !== 'active') throw conflict('turn-unavailable', '原轮次已结束或不再运行。')
+  return thread
 }
 
 async function workspaceThread(thread, permission) {
@@ -189,7 +190,7 @@ async function startQueued(request, threadId, fields, signal, permissions, sched
   if (steers.find(threadId, queuedSubmissionId)) throw uncertainQueueSteer()
   let permission
   function started(result) {
-    if (result.turn?.id) scheduleTitle(thread, undefined, result.turn.id)
+    if (result.turn?.id) scheduleTitle(thread, target.clientUserMessageId, result.turn.id)
     return permission ? { ...result, permission } : result
   }
   const hasDraft = fields.modelDraft !== undefined || fields.permissionDraft !== undefined
@@ -257,7 +258,7 @@ async function restoreQueuedSteer(request, steers, record) {
   }
 }
 
-async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }, steers) {
+async function queueAction(request, threadId, { operation, queuedSubmissionId, expectedTurnId, text }, steers, scheduleTitle) {
   if (operation === 'list') {
     const { data, steers: records } = await steers.read(request, threadId)
     return { data, ...(records.length && { steers: records }) }
@@ -296,7 +297,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     }
   }
 
-  await requireActiveThread(request, threadId)
+  const thread = await requireActiveThread(request, threadId)
   if (hasThreadReferences(item.input, threadId)) await requireThreadReadTool(request, threadId)
   const current = await readLatestTurn(request, threadId, 'notLoaded')
   if (current?.id !== expectedTurnId || current.status !== 'inProgress') {
@@ -315,6 +316,8 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     throw uncertainQueueSteer()
   }
   steers.removed(queued)
+  // 原生接纳与回执可能分开，拟题仍由原生历史确认。
+  scheduleTitle(thread, item.clientUserMessageId, expectedTurnId, true)
   let result
   try {
     result = await steerTurn(request, { threadId, input: item.input, clientUserMessageId: item.clientUserMessageId, expectedTurnId })
@@ -334,9 +337,9 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
 /** 只接受网页原生输入控件需要的字段，线程配置和审批策略始终由 Codex 决定。 */
 export function createConversationActionRoute(socketPath, ownerSignal, submit = createThreadSubmissionQueue(), permissions,
   openProject = createProjectOpener(), enablePlan, steers = createQueuedSteers(), resolveFile,
-  submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject)) {
+  submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject),
+  scheduleTitle = createThreadTitles(socketPath, ownerSignal, submit).schedule) {
   const worktreeStarts = new Map()
-  const scheduleTitle = createThreadTitleScheduler(socketPath, ownerSignal, submit)
 
   function withThreadCreation(signal, create) {
     return permissions ? permissions.withThreadCreation(signal, create) : withCodexReader(socketPath, signal, create)
@@ -420,6 +423,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
         const input = prepareThreadReferences(await resolveInputSkills(rpc, parts, () => runtime.cwd ?? thread.cwd), threadId)
         const params = { threadId, input, clientUserMessageId }
         if (runtime.status?.type === 'active' && mode === 'steer' && expectedTurnId) {
+          scheduleTitle(runtime, clientUserMessageId, expectedTurnId, true)
           try {
             const result = await steerTurn(rpc, { ...params, expectedTurnId })
             return permission ? { ...result, permission } : result
@@ -428,7 +432,10 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           }
         }
         const result = await (write ? write(rpc, 'thread/queue/add', params) : rpc('thread/queue/add', params)).catch(error => {
-          if (!explicitlyRejected(error)) uncertain?.()
+          if (!explicitlyRejected(error)) {
+            uncertain?.()
+            scheduleTitle(thread, clientUserMessageId)
+          }
           throw error
         })
         const queuedId = result.queuedSubmission?.id
@@ -520,7 +527,7 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
           // 原生取走消息之后由 Host 跟到回执，切换视图或取消网页请求不提前关闭连接。
           return withCodexReader(socketPath, keepsRunning ? ownerSignal : signal, rpc => operation === 'start'
             ? startQueued(rpc, threadId, fields, signal, permissions, scheduleTitle, steers, socketPath)
-            : queueAction(rpc, threadId, fields, steers))
+            : queueAction(rpc, threadId, fields, steers, scheduleTitle))
         }
         return json(await (operation !== 'list' ? submit(threadId, run) : run()))
       } catch (error) {

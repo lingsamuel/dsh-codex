@@ -6,31 +6,42 @@ import { dirname } from 'node:path'
 export function createDefaultPreference(path, field) {
   let preference = null
   let writes = Promise.resolve()
+  async function read() {
+    if (!path) return preference
+    const saved = await readFile(path, 'utf8').catch(error => {
+      if (error.code !== 'ENOENT') throw error
+    })
+    return saved == null ? null : JSON.parse(saved)[field] ?? null
+  }
+  function writeValue(resolve) {
+    const write = writes.then(async () => {
+      const value = await resolve()
+      if (path) {
+        const temporary = `${path}.${randomUUID()}.tmp`
+        try {
+          await mkdir(dirname(path), { recursive: true })
+          await writeFile(temporary, JSON.stringify({ [field]: value }), { mode: 0o600 })
+          await rename(temporary, path)
+        } finally {
+          await rm(temporary, { force: true })
+        }
+      }
+      preference = value
+      return value
+    })
+    writes = write.catch(() => {})
+    return write
+  }
   return {
     async get() {
       await writes
-      if (!path) return preference
-      const saved = await readFile(path, 'utf8').catch(error => {
-        if (error.code !== 'ENOENT') throw error
-      })
-      return saved == null ? null : JSON.parse(saved)[field] ?? null
+      return read()
     },
-    set(value) {
-      const write = writes.then(async () => {
-        if (path) {
-          const temporary = `${path}.${randomUUID()}.tmp`
-          try {
-            await mkdir(dirname(path), { recursive: true })
-            await writeFile(temporary, JSON.stringify({ [field]: value }), { mode: 0o600 })
-            await rename(temporary, path)
-          } finally {
-            await rm(temporary, { force: true })
-          }
-        }
-        preference = value
-      })
-      writes = write.catch(() => {})
-      return write
+    async set(value) {
+      await writeValue(() => value)
+    },
+    update(change) {
+      return writeValue(async () => change(await read()))
     },
   }
 }
