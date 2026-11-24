@@ -26,6 +26,13 @@
   fill: var(--dsw-alias-label-tertiary);
 }
 
+.reading {
+  fill: var(--dsw-alias-label-primary);
+  font-size: 8.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 [data-low] > .arc {
   stroke: var(--dsw-alias-state-error-primary);
   stroke-linecap: butt;

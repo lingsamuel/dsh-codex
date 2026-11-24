@@ -26,11 +26,16 @@ function windowLabel({ key, minutes }, t) {
 }
 
 function QuotaRing({ remaining }) {
-  return <svg viewBox="0 0 20 20" width="20" height="20" data-low={remaining <= 10 || undefined} aria-hidden="true">
+  const low = remaining < 10
+  const size = low ? 26 : 20
+  // 低余量时展开 0–10% 的弧长，中心数字仍表示真实的账户余量。
+  const arc = low ? remaining * 10 : remaining
+  return <svg viewBox="0 0 20 20" width={size} height={size} data-low={low || undefined} aria-hidden="true">
     <circle className={css.track} cx="10" cy="10" r="8" />
-    <circle className={css.center} cx="10" cy="10" r="2.5" />
+    {low ? <text className={css.reading} x="10" y="10" textAnchor="middle" dominantBaseline="central">{remaining}%</text>
+      : <circle className={css.center} cx="10" cy="10" r="2.5" />}
     {remaining > 0 && <circle className={css.arc} cx="10" cy="10" r="8" pathLength="100"
-      strokeDasharray={`${remaining} 100`} transform="rotate(-90 10 10)" />}
+      strokeDasharray={`${arc} 100`} transform="rotate(-90 10 10)" />}
   </svg>
 }
 
