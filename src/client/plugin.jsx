@@ -20,6 +20,7 @@ import { installThreadTitleSettings } from './native-dsh/thread-title-settings.j
 import { installThreadTitleHistory } from './native-dsh/thread-title-history.jsx'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
+import { installAccountQuota } from './native-dsh/account-quota.jsx'
 import { installCodexQuestions } from './native-dsh/question-ui.jsx'
 import { installCodexApprovals } from './native-dsh/approval-ui.jsx'
 import { installVisualizePreview } from './native-dsh/visualize-preview.jsx'
@@ -71,6 +72,7 @@ export async function apply(ctx) {
     installCodexFileScope(ctx, false)
   }
   installComposer(ctx, catalog.store)
+  installAccountQuota(ctx, catalog.accountRateLimits)
   const moveSidebarTerminals = installSidebarTerminals(ctx)
   const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx), moveSidebarTerminals)
   installCodexSchedule(ctx, controller.signal)

@@ -1,0 +1,69 @@
+.track,
+.arc {
+  fill: none;
+  stroke-width: 2.75;
+}
+
+.track {
+  stroke: var(--dsw-alias-border-l2);
+}
+
+.arc {
+  stroke: var(--dsw-alias-brand-primary);
+  stroke-linecap: round;
+}
+
+.panel {
+  position: fixed;
+  inset: auto 12px 72px auto;
+  width: min(260px, calc(100vw - 24px));
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  overflow: visible;
+}
+
+@supports (bottom: anchor(top)) {
+  .panel {
+    inset: auto max(12px, anchor(right, 12px)) calc(anchor(top, 64px) + 8px) 12px;
+    justify-self: end;
+  }
+}
+
+.content {
+  padding: 12px;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.title {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 600;
+}
+
+.windows {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+}
+
+.window {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  column-gap: 8px;
+}
+
+.window dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.reset {
+  grid-column: 1 / -1;
+  color: var(--dsw-alias-label-secondary);
+}

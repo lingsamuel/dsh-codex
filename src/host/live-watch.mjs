@@ -8,6 +8,7 @@ import { watchConversationQueue } from './queue-watch.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 import { readOpeningHistory } from './history-window.mjs'
 import { defaultHistoryPreferences } from '../shared/history-preferences.js'
+import { observeAccountRateLimits } from './account-rate-limits.mjs'
 
 const encoder = new TextEncoder()
 const heartbeatFrame = encoder.encode('event: heartbeat\ndata: {}\n\n')
@@ -68,6 +69,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
       const threadId = params.get('threadId')
       const catalog = params.get('scope') === 'catalog'
       const observeBackgroundTerminals = catalog && params.get('backgroundTerminals') === '1'
+      const observeAccountQuota = catalog && params.get('accountRateLimits') === '1'
       const observeQueue = params.get('queue') === '1'
       const observeQuestions = !catalog && params.get('questions') === '1'
       if (!catalog && !threadId) return Response.json({ error: '缺少 Codex 线程 ID。' }, { status: 400 })
@@ -147,6 +149,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           let rolloutFacts
           let observedThread
           let historyWatch
+          let updateAccountQuota
           let sqliteHome
           let settingsStamp
           let confirmedCwd
@@ -315,9 +318,10 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           }
 
           function notify(message, bytes) {
-            // 只处理通知。账户和服务端交互请求不进入此通道。
+            // 只处理通知。服务端交互请求由各自的入口处理。
             if (signal.aborted || message.id !== undefined) return
             if (catalog) {
+              updateAccountQuota?.(message)
               if (!catalogMethods.has(message.method)) return
               queueNotification(message, bytes)
               void readCatalogUpdates()
@@ -409,6 +413,7 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                 catalogReady = true
                 send({ type: 'catalog-ready' })
                 void readCatalogUpdates()
+                if (observeAccountQuota) updateAccountQuota = observeAccountRateLimits(connection.request, send, signal)
                 watchNativeUnread(sqliteHome, send, signal)
                 if (observeBackgroundTerminals) backgroundTerminals?.watch(send, signal)
                 await connection.closed

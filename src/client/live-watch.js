@@ -4,7 +4,7 @@ const idleTimeoutMs = 45_000
 const retryDelayMs = 3_000
 
 /** 打开认证后的 SSE。侧栏的连接独立于当前会话的历史连接。 */
-export function openLiveWatch(threadId, { receive, changeMode, queue, questions, backgroundTerminals, itemCursor, checkpoint }, signal) {
+export function openLiveWatch(threadId, { receive, changeMode, queue, questions, backgroundTerminals, accountRateLimits, itemCursor, checkpoint }, signal) {
   if (signal.aborted) return
   const url = new URL('api/codex/watch', document.baseURI)
   if (threadId) url.searchParams.set('threadId', threadId)
@@ -13,6 +13,7 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
   if (threadId && questions) url.searchParams.set('questions', '1')
   if (threadId && itemCursor) url.searchParams.set('itemCursor', itemCursor)
   if (!threadId && backgroundTerminals) url.searchParams.set('backgroundTerminals', '1')
+  if (!threadId && accountRateLimits) url.searchParams.set('accountRateLimits', '1')
   let connection
   let retryTimer
 

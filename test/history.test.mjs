@@ -3338,6 +3338,52 @@ test('缓存过期后的完整刷新失败，不会让已显示的旧工作区�
   assert.deepEqual((await (await get('/api/codex/catalog')).json()).threads, [indexed, legacy])
 })
 
+test('目录连接发布 Codex 账户窗口、合并稀疏更新并在切换账户时清空旧额度', { timeout: 2000 }, async t => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600
+  let rateLimits = {
+    limitId: 'codex',
+    primary: { usedPercent: 18, windowDurationMins: 300, resetsAt },
+    secondary: { usedPercent: 63, windowDurationMins: 10080, resetsAt },
+  }
+  const { get, broadcast } = await fakeCodex(t, {
+    'account/rateLimits/read': () => ({ result: {
+      rateLimits: { limitId: 'special-model' },
+      rateLimitsByLimitId: { codex: rateLimits },
+      accountId: 'private-account-id',
+    } }),
+  })
+  const request = new AbortController()
+  t.after(() => request.abort())
+  const response = await get('/api/codex/watch?scope=catalog&accountRateLimits=1', { signal: request.signal })
+  const frames = response.body.getReader()
+  const quota = async () => {
+    while (true) {
+      const message = await readSseFrame(frames)
+      if (!message.startsWith('data: ')) continue
+      const frame = JSON.parse(message.slice(6))
+      if (frame.type === 'account-rate-limits') return frame
+    }
+  }
+  const short = { key: 'primary', remaining: 82, minutes: 300, resetsAt }
+  const long = { key: 'secondary', remaining: 37, minutes: 10080, resetsAt }
+  assert.match(await readSseFrame(frames), /catalog-ready/)
+  assert.deepEqual(await quota(), { type: 'account-rate-limits', windows: [short, long] })
+
+  broadcast({ method: 'account/rateLimits/updated', params: { rateLimits: {
+    limitId: 'special-model', primary: { usedPercent: 99 },
+  } } })
+  broadcast({ method: 'account/rateLimits/updated', params: { rateLimits: {
+    limitId: 'codex', primary: { usedPercent: 100 }, secondary: null,
+  } } })
+  assert.deepEqual((await quota()).windows, [{ ...short, remaining: 0 }, long])
+
+  rateLimits = { limitId: 'codex', primary: { usedPercent: 22, windowDurationMins: 10080, resetsAt } }
+  broadcast({ method: 'account/updated', params: { authMode: 'chatgpt' } })
+  assert.deepEqual((await quota()).windows, [])
+  assert.deepEqual((await quota()).windows, [{ key: 'primary', remaining: 78, minutes: 10080, resetsAt }])
+  await frames.cancel()
+})
+
 test('SSE 积压达到字节上限时释放当前连接的监听和待发数据', { timeout: 5000 }, async t => {
   const { socketPath, clientClosed } = await fakeCodex(t, {})
   const observing = Promise.withResolvers()

@@ -40,6 +40,7 @@ export function createHistoryCatalog(signal) {
   const openedAt = Date.now()
   const emptyTerminals = new Map()
   const backgroundTerminals = createSnapshotStore(emptyTerminals)
+  const accountRateLimits = createSnapshotStore(null)
   const store = createSnapshotStore({
     projects: [],
     threads: [],
@@ -259,6 +260,7 @@ export function createHistoryCatalog(signal) {
   const catalog = {
     store,
     backgroundTerminals,
+    accountRateLimits,
     loadChildren,
     resolveSubagent,
     setReadState,
@@ -372,6 +374,8 @@ export function createHistoryCatalog(signal) {
       if (catchUp) void refresh(true)
     } else if (frame.type === 'background-terminals') {
       backgroundTerminals.set(new Map(Object.entries(frame.byThread)))
+    } else if (frame.type === 'account-rate-limits') {
+      accountRateLimits.set(frame.windows.length ? frame.windows : null)
     } else if (frame.type === 'unread') catalog.applyUnread(frame)
     else if (frame.type === 'notification') {
       const { method, params } = frame.notification
@@ -434,8 +438,12 @@ export function createHistoryCatalog(signal) {
 
   openLiveWatch(null, {
     receive,
-    changeMode: () => backgroundTerminals.set(emptyTerminals),
+    changeMode: () => {
+      backgroundTerminals.set(emptyTerminals)
+      accountRateLimits.set(null)
+    },
     backgroundTerminals: true,
+    accountRateLimits: true,
   }, signal)
   void refresh()
   void loadArchived()
