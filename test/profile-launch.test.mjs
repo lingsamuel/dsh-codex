@@ -11,6 +11,10 @@ const dshManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.
 const savedSetting = '- id: ui-conversation\n  config:\n    busyEnterBehavior: steer\n'
 const fileActions = { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' }
 const pluginName = 'dsh-for-codex'
+const restoredWebEntries = [
+  'client-hmr', 'plugin-inventory', 'ui-plugin-manager', 'ui-shortcuts',
+  'message-quotes', 'ui-secret-mask', 'remote-connection',
+]
 
 async function fixture(t) {
   await mkdir(join(project, '.runtime'), { recursive: true })
@@ -44,8 +48,9 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
     dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
   })
   const defaults = await readFile(join(root, 'profile', 'cordis.patch.yml'), 'utf8')
+  const omitted = new Set(['ui-goal', 'ui-sidebar-files', fileActions.id, ...restoredWebEntries])
   const previousDefaults = parseEntryYaml(defaults).map(patch => patch.insert ? {
-    insert: patch.insert.filter(entry => !['ui-goal', 'ui-sidebar-files', fileActions.id].includes(entry.id)),
+    insert: patch.insert.filter(entry => !omitted.has(entry.id)),
   } : patch)
   const previousPatch = stringifyEntryYaml(previousDefaults) + savedSetting
   await mkdir(profile, { recursive: true })
@@ -59,6 +64,10 @@ test('默认启动保留旧 Profile 的配置和已保存的网页设置', { ski
   assert.deepEqual(parseEntryYaml(config).find(entry => entry.id === 'ui-sidebar-files'), {
     id: 'ui-sidebar-files', name: '@deepseek-ai/dsh-client-ui-sidebar-files',
   })
+  const effective = parseEntryYaml(config)
+  for (const id of restoredWebEntries) {
+    assert.equal(effective.filter(entry => entry.id === id && entry.disabled !== true).length, 1, id)
+  }
   assert.equal(await readFile(patch, 'utf8'), previousPatch)
   assert.equal(await readFile(manifest, 'utf8'), previousManifest)
   const disabledFiles = '- id: ui-sidebar-files\n  disabled: true\n'

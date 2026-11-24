@@ -2,14 +2,14 @@ export const codexFileScopePrefix = 'codex:'
 export const nativeConversationPrefix = 'dsh.conversation.'
 export const codexConversationPrefix = 'dsh.codex.conversation.'
 export const nativeSessionClient = '@deepseek-ai/dsh-api-session-controller'
+export const codexClientReloadEvent = 'dsh-codex:client-reload'
 
-const conflictingClientPackages = new Set([
+export const conflictingClientPackages = new Set([
   nativeSessionClient,
   '@deepseek-ai/dsh-api-job-controller',
   '@deepseek-ai/dsh-api-terminal-controller',
   '@deepseek-ai/dsh-api-workspace-controller',
   '@deepseek-ai/dsh-client-file-upload',
-  '@deepseek-ai/dsh-client-hmr',
   '@deepseek-ai/dsh-client-ui-brand-official',
   '@deepseek-ai/dsh-client-ui-agent-preset',
   '@deepseek-ai/dsh-client-ui-jobs',
@@ -21,8 +21,8 @@ const conflictingClientPackages = new Set([
   '@deepseek-ai/dsh-session-log-export',
 ])
 
-export function selectCodexBoot(graph) {
-  const retained = new Set(graph.entries.filter(entry => !conflictingClientPackages.has(entry.id)).map(entry => entry.id))
+export function selectCodexBoot(graph, excluded = conflictingClientPackages) {
+  const retained = new Set(graph.entries.filter(entry => !excluded.has(entry.id)).map(entry => entry.id))
   // 有静态导入的模块仍须由加载器提供，服务依赖则只引用本页启用的条目。
   const entries = graph.entries.filter(entry => retained.has(entry.id)).map(entry => entry.inject
     ? { ...entry, inject: entry.inject.filter(id => retained.has(id)) }
@@ -31,4 +31,36 @@ export function selectCodexBoot(graph) {
     ...batch, entries: batch.entries.filter(id => retained.has(id)),
   })).filter(batch => batch.entries.length > 0)
   return { ...graph, entries, batches }
+}
+
+/** 在原生客户端装配前接入，启动和热更新都采用当前页面的插件清单。 */
+export function installCodexGraphSync(loader, boot, adapterId, selectGraph, requestReload) {
+  const adapterRev = boot.entries.find(entry => entry.id === adapterId)?.rev
+  const create = loader.create
+  let reloadRequested = false
+
+  function reloadPage() {
+    if (!reloadRequested) {
+      reloadRequested = true
+      requestReload()
+    }
+    return Promise.resolve()
+  }
+
+  loader.create = function (...args) {
+    const modules = create.apply(this, args)
+    const { entries } = modules
+    const sync = entries.sync.bind(entries)
+    const reload = entries.reload.bind(entries)
+    entries.sync = graph => {
+      // 由 DSH 自己识别 Host 版本变化及未知格式，避免用旧页的装配规则解释新版本。
+      if (graph?.release?.version !== boot.release?.version || graph?.release?.commit !== boot.release?.commit
+        || !Array.isArray(graph?.entries) || !Array.isArray(graph.batches)) return sync(graph)
+      // 会话视图仍持有 Codex adapter。先刷新文档才能完整释放旧绑定及对应的视图。
+      if (graph.entries.find(entry => entry?.id === adapterId)?.rev !== adapterRev) return reloadPage()
+      return sync(selectGraph(graph))
+    }
+    entries.reload = (id, rev) => id === adapterId && rev !== adapterRev ? reloadPage() : reload(id, rev)
+    return modules
+  }
 }

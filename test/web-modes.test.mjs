@@ -109,7 +109,6 @@ test('Codex 启动图跳过原生会话功能并保留共用组件和独立插�
   const { selectCodexBoot } = await import('../src/shared/dual-web-entry.js')
   const native = [
     '@deepseek-ai/dsh-api-session-controller',
-    '@deepseek-ai/dsh-client-hmr',
     '@deepseek-ai/dsh-api-job-controller',
     '@deepseek-ai/dsh-api-terminal-controller',
     '@deepseek-ai/dsh-client-ui-jobs',
@@ -120,17 +119,46 @@ test('Codex 启动图跳过原生会话功能并保留共用组件和独立插�
     '@deepseek-ai/dsh-session-log-export',
   ]
   const shared = '@deepseek-ai/dsh-client-ui-context-menu'
+  const hotReload = '@deepseek-ai/dsh-client-hmr'
   const codex = { id: 'dsh-for-codex', inject: [shared, ...native] }
   const graph = {
-    entries: [...native.map(id => ({ id })), { id: shared }, codex, { id: 'custom-plugin' }],
+    entries: [...native.map(id => ({ id })), { id: shared }, { id: hotReload }, codex, { id: 'custom-plugin' }],
     batches: [
       { phase: 'bootstrap', entries: native },
-      { phase: 'application', entries: [shared, codex.id, 'custom-plugin'] },
+      { phase: 'application', entries: [shared, hotReload, codex.id, 'custom-plugin'] },
     ],
   }
   assert.deepEqual(selectCodexBoot(graph), {
-    entries: [{ id: shared }, { ...codex, inject: [shared] }, { id: 'custom-plugin' }],
-    batches: [{ phase: 'application', entries: [shared, codex.id, 'custom-plugin'] }],
+    entries: [{ id: shared }, { id: hotReload }, { ...codex, inject: [shared] }, { id: 'custom-plugin' }],
+    batches: [{ phase: 'application', entries: [shared, hotReload, codex.id, 'custom-plugin'] }],
   })
   assert.deepEqual(graph.entries.find(entry => entry.id === codex.id).inject, [shared, ...native])
+})
+
+test('Codex 热更新沿用启动筛选，更新会话控制器前提示重新加载', async () => {
+  const { installCodexGraphSync, selectCodexBoot } = await import('../src/shared/dual-web-entry.js')
+  const adapter = { id: 'dsh-for-codex', rev: 'boot' }
+  const native = '@deepseek-ai/dsh-api-session-controller'
+  const feature = { id: 'extra-plugin', inject: [native] }
+  const graph = entries => ({ release: { version: '0.2.3' }, entries, batches: [{ entries: entries.map(row => row.id) }] })
+  const boot = graph([adapter])
+  const applied = []
+  const rebuilt = []
+  let reloads = 0
+  const loader = { create: () => ({
+    entries: { async sync(next) { applied.push(next) }, async reload(...args) { rebuilt.push(args) } },
+  }) }
+  installCodexGraphSync(loader, boot, adapter.id, selectCodexBoot, () => { reloads++ })
+  const { entries } = loader.create()
+  await entries.sync(graph([{ id: native }, adapter, feature]))
+  await entries.reload(feature.id, 'new')
+  await entries.sync(graph([feature]))
+  await entries.sync(graph([{ ...adapter, rev: 'new' }, feature]))
+  await entries.reload(adapter.id, 'new')
+  await entries.sync(boot)
+  const otherRelease = { release: { version: '0.2.4' } }
+  await entries.sync(otherRelease)
+  assert.deepEqual(applied, [graph([adapter, { ...feature, inject: [] }]), boot, otherRelease])
+  assert.deepEqual(rebuilt, [[feature.id, 'new']])
+  assert.equal(reloads, 1)
 })

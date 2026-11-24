@@ -14,11 +14,13 @@ DSH Codex 可以加入已有的 DSH Web，也可以单独启动只显示 Codex �
 
 `dsh-for-codex-min-<版本>.tgz` 指向 `./profile/cordis.patch.yml`。这份补丁沿用 DSH Base 的共享服务，加载 DSH 自带的 Web 服务器、网页运行时、侧栏和聊天等组件，并停用 DSH 原生会话、持久化和执行权限服务。会话持久化和执行策略由 Codex 负责。用户设置写入当前 Profile 的补丁层。浏览器使用 DSH 的访问令牌和 Cookie 访问同源 API。DSH 的 Web 服务器默认监听 `127.0.0.1:3190`，显式传入 `--port` 时使用指定端口。
 
-极简配置省去官方 Web 的插件管理页面（`ui-plugin-manager`）、定时任务和交互式侧栏终端。DSH 插件通过 `dsh plugin --profile codex add` 安装到示例使用的 `codex` 配置。网页里的「Codex 插件」设置调用 Codex App Server 管理 Codex 插件。
+极简配置沿用官方插件管理页面、客户端热更新、远程设备配对、快捷键设置、文本引用和消息凭据遮罩。网页侧栏的「插件」管理当前 DSH Profile。网页设置里的「Codex 插件」调用 Codex App Server。定时任务和依赖 DSH 会话的交互式侧栏终端仍由官方 DSH 模式提供。
 
 `dsh-for-codex-<版本>.tgz` 指向 `./profile/web-mode.yml`。这份补丁只加载 `dsh-for-codex`，并设置 `sharedWeb: true`。两种配置均使用 `dsh-for-codex` 作为插件条目 ID，插件详情页按 npm 包名挂载 Web 模式设置。插件在已有 Web 实例中挂载 Codex API 和入口控制。共存时由客户端启动图为每个页面选择会话与工作区控制器，并把解析后的模式固定在页面 URL。Web 的状态和认证服务由两种入口共享。Codex 的上传路由和工作区文件作用域分别标明来源，原生 DSH 会话继续走原来的文件服务。
 
 Codex 页的客户端启动图跳过依赖 DSH 原生会话的反馈、侧栏终端、后台任务、技能和自动化插件。会话标题栏沿用 DSH 的菜单与 Markdown 复制反馈，复制和下载从同一 Codex 导出接口读取完整历史。DSH 页使用官方 ZIP 日志导出。
+
+共存入口复用 DSH 的客户端热更新。Codex 页在应用 Host 的插件清单前，沿用启动时的筛选规则。普通插件在当前页面重新装配。Codex 会话控制器所在插件的变更通过原有的重新加载提示处理，旧页面在刷新前继续持有会话控制器。
 
 默认模式、共存选项和独占开关在 profile 的插件数据目录原子保存。共存时侧栏切换当前标签页，并更新新入口的默认值。单一入口和独占通过同一套客户端启动图选择统一入口，后台会话服务继续运行。已打开的其他模式标签页收到更新后提示重新加载。
 

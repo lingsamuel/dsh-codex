@@ -1,4 +1,6 @@
-import { codexConversationPrefix, nativeConversationPrefix, selectCodexBoot } from '../shared/dual-web-entry.js'
+import pkg from '../../package.json' with { type: 'json' }
+import { codexClientReloadEvent, codexConversationPrefix, conflictingClientPackages, installCodexGraphSync,
+  nativeConversationPrefix, selectCodexBoot } from '../shared/dual-web-entry.js'
 import { webModeFor } from '../shared/web-mode.js'
 import { createModeLoading, getModeBrandPieces, modeHandoffKey, modeHandoffStyles, showModeHandoff } from '../shared/web-mode-handoff.js'
 import { webModeStatus } from './web-mode.mjs'
@@ -43,7 +45,13 @@ export function installDualWebEntry(ctx, state) {
           if (url.href !== location.href) history.replaceState(history.state, '', url);
         }
         if (status.mode !== 'codex') return;
-        globalThis.__DSH_BOOT__ = ${codexBoot};
+        const boot = globalThis.__DSH_BOOT__ = ${codexBoot};
+        const excluded = new Set(${scriptValue([...conflictingClientPackages])});
+        ;(${installCodexGraphSync.toString()})(globalThis.__ModuleLoader__, boot, ${scriptValue(pkg.name)},
+          graph => (${selectCodexBoot.toString()})(graph, excluded), () => {
+            status.reloadRequired = true;
+            window.dispatchEvent(new Event(${scriptValue(codexClientReloadEvent)}));
+          });
         try {
           const local = window.localStorage;
           for (const method of ['getItem', 'setItem', 'removeItem']) {

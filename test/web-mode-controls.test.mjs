@@ -167,6 +167,23 @@ test('其他 DSH 页面发现独占后隐藏开关并提示重新加载', async 
   undo()
 })
 
+test('读取模式设置后仍提示重新加载已更新的 Codex 插件', async t => {
+  const { installWebMode } = await loadControls()
+  const { ctx, registration, copy, undo } = fixture(t)
+  const initial = { ...coexist, mode: 'codex', reloadRequired: true }
+  let refresh
+  t.mock.method(window, 'addEventListener', (event, listener) => {
+    if (event === 'focus') refresh = listener
+  })
+  t.mock.method(globalThis, 'fetch', async () => Response.json({ ...coexist, mode: 'codex' }))
+  installWebMode(ctx, initial)
+  await refresh()
+  const { options, render } = registration.get('shell.overlay')
+  const modal = elements(render({ ...options.inject(), t: key => copy()[key] })).find(node => node?.type === 'modal')
+  assert.equal(modal.props.description, 'DSH Codex 插件已变更，请重新加载当前页面。')
+  undo()
+})
+
 test('黑色徽标触发原生侧栏同样的模式切换，避免向上触发新建会话', async t => {
   const { installWebMode } = await loadControls()
   const { ctx, navigations, registration } = fixture(t)

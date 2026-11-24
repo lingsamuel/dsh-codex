@@ -45,7 +45,7 @@ dsh --profile web --dump-config
 
 ### 单独启动极简 DSH Web 服务
 
-使用带 `-min` 的包，示例沿用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。极简网页没有 DSH 插件管理入口，因此通过 CLI 安装 DSH 插件。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
+使用带 `-min` 的包，示例沿用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。启动后可通过网页侧栏的「插件 → 添加插件」管理 DSH 插件。「设置 → Codex 插件」管理 Codex 插件。
 
 ```sh
 dsh plugin --profile codex add '/absolute/path/to/dsh-for-codex-min-<版本>.tgz'

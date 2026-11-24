@@ -2,6 +2,7 @@ import { useSyncExternalStore } from 'react'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { Button, Modal, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import pkg from '../../package.json' with { type: 'json' }
+import { codexClientReloadEvent } from '../shared/dual-web-entry.js'
 import { canKeepWebPage, webModeFor, webModePath } from '../shared/web-mode.js'
 import { beginModeLoading, saveModeHandoff } from '../shared/web-mode-handoff.js'
 import { installModeBrand, playModeBrand } from './native-dsh/mode-brand.jsx'
@@ -17,6 +18,7 @@ const copy = {
     coexist: '允许标签页使用不同模式', coexistHelp: '各标签页可通过地址选择 DSH 或 Codex。',
     openDsh: '在新标签页打开 DSH', openCodex: '在新标签页打开 Codex',
     reload: '重新加载', changed: '实例模式已改变，请重新加载当前页面。',
+    pluginChanged: 'DSH Codex 插件已变更，请重新加载当前页面。',
     unavailable: '无法读取 Web 模式设置。', submission: '请等待当前的提交完成。',
     switching: '正在切换模式…', loadingPlugins: '正在载入插件…',
     loadingSession: sessionLoadingCopy.zh.loading, loadingLayout: '正在准备工作区…',
@@ -28,6 +30,7 @@ const copy = {
     coexist: 'Allow different modes in each tab', coexistHelp: 'Use the address to open DSH or Codex in individual tabs.',
     openDsh: 'Open DSH in a new tab', openCodex: 'Open Codex in a new tab',
     reload: 'Reload', changed: 'The instance mode changed. Reload this page to continue.',
+    pluginChanged: 'The DSH Codex plugin changed. Reload this page to continue.',
     unavailable: 'Could not read Web mode settings.', submission: 'Wait for the current submission to finish.',
     switching: 'Switching mode…', loadingPlugins: 'Loading plugins…',
     loadingSession: sessionLoadingCopy.en.loading, loadingLayout: 'Preparing the workspace…',
@@ -71,9 +74,9 @@ function SidebarMode({ wide, state, change, t }) {
 }
 
 function ModeChanged({ state, reload, t }) {
-  const { error, stale } = useSyncExternalStore(state.subscribe, state.getSnapshot)
+  const { error, reloadRequired, stale } = useSyncExternalStore(state.subscribe, state.getSnapshot)
   if (!stale) return null
-  return <Modal open title={t('mode')} description={error || t('changed')} closeLabel={t('reload')} onClose={reload}
+  return <Modal open title={t('mode')} description={error || t(reloadRequired ? 'pluginChanged' : 'changed')} closeLabel={t('reload')} onClose={reload}
     footer={<Button size="sm" variant="primary" onClick={reload}>{t('reload')}</Button>} />
 }
 
@@ -138,7 +141,7 @@ function installSidebarMode(ctx, state, change, t) {
 /** 设置保存成功后，按确认的入口决定是否播放导航动画。 */
 export function installWebMode(ctx, initial, hasModelDraft) {
   const action = new URL(webModePath.slice(1), document.baseURI)
-  const state = createSnapshotStore(initial)
+  const state = createSnapshotStore({ ...initial, stale: initial.reloadRequired === true })
   const controller = new AbortController()
   const channel = typeof window.BroadcastChannel === 'function'
     ? new window.BroadcastChannel(`dsh-codex:web-mode:${webModePath}`) : undefined
@@ -167,8 +170,9 @@ export function installWebMode(ctx, initial, hasModelDraft) {
   }
 
   function publish(next) {
-    const stale = next.available && next.mode !== initial.mode
-    state.set({ ...next, stale })
+    const reloadRequired = initial.reloadRequired === true
+    const stale = reloadRequired || next.available && next.mode !== initial.mode
+    state.set({ ...next, reloadRequired, stale })
   }
 
   async function refresh() {
@@ -228,7 +232,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
       }
     } catch (error) {
       document.documentElement?.removeAttribute('data-codex-mode-leaving')
-      if (!controller.signal.aborted) state.set({ ...current, error: error.message })
+      if (!controller.signal.aborted) publish({ ...current, error: error.message })
     } finally {
       if (!navigating) releaseInputs?.()
     }
@@ -245,6 +249,7 @@ export function installWebMode(ctx, initial, hasModelDraft) {
 
   ctx.effect(() => ctx.locale.register(locale, copy))
   ctx.effect(() => {
+    window.addEventListener(codexClientReloadEvent, () => publish(state.getSnapshot()), { signal: controller.signal })
     window.addEventListener('focus', refresh, { signal: controller.signal })
     window.addEventListener('pageshow', event => {
       if (!event.persisted) return

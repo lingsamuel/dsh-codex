@@ -46,7 +46,7 @@
 | 插件包 | DSH 加载的 YAML | 加载后会发生什么 |
 | --- | --- | --- |
 | `dsh-for-codex-<版本>.tgz` | `./profile/web-mode.yml` | DSH 加载 `dsh-for-codex` 并传入 `sharedWeb: true`。插件复用已有的 Web 服务器和网页组件，在同一地址提供 DSH 和 Codex 两种模式。 |
-| `dsh-for-codex-min-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载访问 Codex 所需的侧栏、聊天框和文件浏览器等组件，停用 DSH 原生会话服务。网页省去 DSH 插件管理、定时任务和交互式侧栏终端。 |
+| `dsh-for-codex-min-<版本>.tgz` | `./profile/cordis.patch.yml` | DSH 启动极简 Web 服务，加载 Codex 所需的网页组件和官方插件管理。会话与执行由 Codex 提供。 |
 
 早期构建采用旧命名。安装旧包时，按包内 `package/package.json` 的 `dsh.bundle.patch` 字段核对上表中的 YAML。
 
@@ -60,12 +60,12 @@
 - 关闭「允许标签页使用不同模式」后，当前实例按已保存的默认值统一进入一个模式，侧栏开关可切换整个实例。
 - 打开「Codex 独占」后，所有网页入口统一进入 Codex，侧栏开关隐藏，已有 DSH 标签页提示重新加载。后台 DSH 任务继续运行。退出独占时恢复之前的共存设置和默认值。
 - 展开侧栏时也可点击品牌区的黑色徽标切换。徽标翻转后载入目标模式，系统开启减少动态效果时直接切换。
-- 在 Codex 标签页中，DSH 插件装配更新在刷新后生效。
+- Codex 标签页支持 DSH 插件热更新。停用或更新 DSH Codex 本身时，页面会提示重新加载。
 - Codex 标签页自动省略 DSH 的消息反馈、侧栏终端、后台任务、技能菜单和自动化入口。使用 `$` 选择 Codex 技能，使用 `/ps` 或会话面板查看 Codex 后台进程。
 
 ### 单独启动极简 DSH Web 服务
 
-极简网页专用于 Codex 会话。这里没有官方 DSH Web 的「插件 → 添加插件」，无法从网页安装 DSH 插件。给这套配置添加 DSH 插件要在终端运行 `dsh plugin --profile codex add 包路径`。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
+极简网页专用于 Codex 会话，提供 DSH 的插件管理和热更新、快捷键设置、选中文本引用、消息凭据遮罩及远程设备配对。「插件 → 添加插件」管理当前 DSH Profile，「设置 → Codex 插件」管理 Codex 插件。设备配对使用当前实例的访问地址和监听设置。
 
 需要 DSH 0.2.3-alpha.2、pnpm 和 Node.js 24.22.3 或更新的 24.x，或 Node.js 26.13.1 及以上版本。运行时依赖已登录的 Codex 和本机共享 App Server，插件使用 App Server 0.171.0 验证。若共享服务尚未启动，可运行 `codex app-server daemon start`。
 

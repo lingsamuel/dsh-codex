@@ -25,9 +25,12 @@ async function legacyProfilePatch(home, profile, manifest) {
   const entries = composeEntries(layers)
   if (!entries.some(entry => entry.name === pluginName)) return
   const defaults = composeEntries([loadOverlayPatches('dsh', join(root, 'profile', 'cordis.patch.yml'))])
-  const viewIds = new Set(['ui-goal', 'ui-sidebar-files', 'ui-file-actions'])
+  const webEntryIds = new Set([
+    'ui-goal', 'ui-sidebar-files', 'ui-file-actions', 'client-hmr', 'plugin-inventory',
+    'ui-plugin-manager', 'remote-connection', 'ui-shortcuts', 'message-quotes', 'ui-secret-mask',
+  ])
   const configured = new Set(entries.map(entry => entry.id))
-  const missing = defaults.filter(entry => viewIds.has(entry.id) && !configured.has(entry.id))
+  const missing = defaults.filter(entry => webEntryIds.has(entry.id) && !configured.has(entry.id))
   if (!missing.length) return
   // 命令行补丁最后加载。先用 DSH 的合成器处理原来找不到目标的用户覆盖项。
   const missingIds = new Set(missing.map(entry => entry.id))
