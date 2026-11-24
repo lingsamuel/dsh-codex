@@ -28,7 +28,7 @@ Codex 页的客户端启动图跳过依赖 DSH 原生会话的反馈、后台任
 
 Build 工作流在分支和 tag 推送时测试、打包并上传产物。版本 tag 构建的两个包会附到对应的 GitHub Release。
 
-本地反复安装测试时运行 `npm run package:dev`。命令复用同一打包流程，在 `artifacts/dev/` 生成普通版和极简版测试包。npm 在暂存目录生成带时间标记的 `dev` 预发布版本，两包共用本次版本，仓库版本和锁文件保持原值。测试目录保留最近四次构建。使用 `dsh plugin --profile <名称> add <测试包路径>` 安装或更新同一 Profile。
+本地反复安装测试时运行 `npm run package:dev`。命令在 `artifacts/dev/` 生成普通版和极简版测试包，两包共用本次版本。例如正式版为 `0.1.3` 时，npm 依次生成 `0.1.4-dev.0`、`0.1.4-dev.1`。编号记录在本地 `.runtime/`，删除测试归档后仍会接着编号。仓库版本和锁文件保持原值，测试目录保留最近四次构建。使用 `dsh plugin --profile <名称> add <测试包路径>` 安装或更新同一 Profile。
 
 ## 工作区与会话目录
 

@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { cp, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
 import pkg from '../package.json' with { type: 'json' }
 
 const root = fileURLToPath(new URL('../', import.meta.url))
@@ -19,6 +20,32 @@ const staging = await mkdtemp(join(runtime, 'plugin-package-'))
 function npm(cwd, args, stdout = 'pipe') {
   return execFileSync(process.execPath, [process.env.npm_execpath, '--cache', cache, ...args], {
     cwd, encoding: 'utf8', stdio: ['ignore', stdout, 'inherit'],
+  })
+}
+
+async function bumpDevVersion(content, manifestPath) {
+  async function bump() {
+    npm(content, ['version', 'prerelease', '--preid=dev', '--no-git-tag-version', '--ignore-scripts'])
+    return JSON.parse(await readFile(manifestPath, 'utf8')).version
+  }
+
+  let version = await bump()
+  const base = version.split('-')[0]
+  const versionsPath = join(runtime, 'plugin-dev-versions.json')
+  // 单独保存编号，清理旧包后仍可继续递增。并行构建先各自领取版本再打包。
+  await withFileLock(versionsPath, async () => {
+    const saved = await readFile(versionsPath, 'utf8').catch(error => {
+      if (error.code !== 'ENOENT') throw error
+      return '{}'
+    })
+    const versions = JSON.parse(saved)
+    const previous = versions[base]
+    if (previous) {
+      await writeFile(manifestPath, JSON.stringify({ ...pkg, version: previous }, null, 2) + '\n')
+      version = await bump()
+    }
+    versions[base] = version
+    await writeFileAtomic(versionsPath, JSON.stringify(versions, null, 2) + '\n', { mode: 0o600 })
   })
 }
 
@@ -64,11 +91,7 @@ try {
     await cp(join(root, file), target, { recursive: true })
   }
   await writeFile(manifestPath, JSON.stringify(pkg, null, 2) + '\n')
-  if (development) {
-    // 每份暂存清单只升一次版本。时间和进程号区分连续或并行构建。
-    npm(content, ['version', 'prerelease', `--preid=dev.${Date.now()}.${process.pid}`,
-      '--no-git-tag-version', '--ignore-scripts'])
-  }
+  if (development) await bumpDevVersion(content, manifestPath)
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   const { version } = manifest
   const archive = `${artifactName}-${version}.tgz`
