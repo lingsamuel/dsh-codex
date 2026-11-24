@@ -1,3 +1,4 @@
+import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { readPage, writeCommandAction, writeConversationAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
 import { goalCommandObjective, planCommandText, replaceUserInputText, userInputText } from '../../shared/user-input.js'
@@ -314,7 +315,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
     },
     /** 问答面板与输入栏共用气泡交接。答题不会消耗输入栏的模型或权限草稿。 */
     beginQuestionReply(turnId, text, realtime) {
-      const requestId = crypto.randomUUID()
+      const requestId = randomUUID()
       const inTurn = realtime || Boolean(turnId && activeTurnId() === turnId)
       const placement = inTurn ? 'steering' : queueStore.getSnapshot().length ? 'queued' : 'transcript'
       const submission = { echo: { requestId, placement, time: Date.now(), text, attachments: [] } }
@@ -331,7 +332,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       const plan = planCommandText(parts)
       const isCommandOnly = plan === '' || (plan === undefined && Boolean(goal || goalCommandObjective(parts)))
       // 收不到首发回执时，重试仍用原来的身份核对投递结果。
-      const requestId = (plan !== '' && newSessionRequestId) || (!isCommandOnly && worktree?.id) || crypto.randomUUID()
+      const requestId = (plan !== '' && newSessionRequestId) || (!isCommandOnly && worktree?.id) || randomUUID()
       const expectedTurnId = mode === 'steer' && plan === undefined ? activeTurnId() : undefined
       const placement = expectedTurnId ? 'steering'
         : running || queueStore.getSnapshot().length ? 'queued' : 'transcript'
@@ -340,7 +341,7 @@ export function createSessionInput(ctx, threadId, history, modelDraft, permissio
       return trackSubmission(requestId, { echo, onAccept, onRetire, expectedTurnId, worktree, goal,
         model: modelDraft.getSnapshot(), permission: permissionDraft?.getSnapshot(), unarchive: archived })
     },
-    async prompt(content, mode, signal, requestId = newSessionRequestId ?? crypto.randomUUID()) {
+    async prompt(content, mode, signal, requestId = newSessionRequestId ?? randomUUID()) {
       const submission = submissions.get(requestId)
       const worktree = submission?.worktree
       const plan = planCommandText(content)

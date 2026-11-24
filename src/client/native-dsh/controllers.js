@@ -1,4 +1,5 @@
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { observe, projectCatalog, remoteFailure } from './catalog.js'
 import { createCodexHistory } from './session-events.js'
 import { createSessionInput } from './session-input.js'
@@ -97,7 +98,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
     const requestId = draft?.reviewRequestId ?? `${id}:review`
     // 审查保留占位草稿。只有当前审查得到回执，才允许同一草稿开启下一次审查。
     if (draft && requestId === acceptedId) {
-      const nextId = crypto.randomUUID()
+      const nextId = randomUUID()
       setLocalSessions(localSessions.getSnapshot().map(thread => thread === draft ? { ...draft, reviewRequestId: nextId } : thread))
     }
     return requestId
@@ -265,7 +266,7 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
       const current = localSessions.getSnapshot()
       const existing = current.find(thread => projectId ? thread.projectId === projectId : !thread.projectId && thread.cwd === directory)
       if (existing) return existing.id
-      const thread = localThread({ id: `web-new-${crypto.randomUUID()}`, cwd: directory, projectId })
+      const thread = localThread({ id: `web-new-${randomUUID()}`, cwd: directory, projectId })
       setLocalSessions([...current, thread])
       return thread.id
     },

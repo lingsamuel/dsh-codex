@@ -2,6 +2,7 @@ import {
   Button, IconBranchOutlineRegular, IconCheckOutlineRegular, IconChevronDownOutlineRegular,
   IconFolderCloseRegular, Menu, Modal, PathLabel,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
 import { abbreviateHomePath, relativizeToCwd } from '@deepseek-ai/dsh-util-workspace-path'
 import { useEffect, useRef, useState } from 'react'
 import { readPage, writeWorktreeAction } from '../api.js'
@@ -146,10 +147,10 @@ function WorktreePicker({ thread, draft, choice, project, home, idleBlock, setDr
       // 保存显示所需的 Git 信息，以便返回草稿时立即看到选中的分支。发送仍使用原生引用和路径。
       const branch = choices?.branches.find(item => item.ref === id)
       if (branch) {
-        if (choice?.baseRef !== id) setDraft({ kind: 'new', baseRef: id, branchLabel: branch.label, id: crypto.randomUUID() })
+        if (choice?.baseRef !== id) setDraft({ kind: 'new', baseRef: id, branchLabel: branch.label, id: randomUUID() })
       } else if (choice?.path !== id) {
         const tree = choices?.worktrees.find(item => item.path === id)
-        if (tree) setDraft({ kind: 'existing', path: id, branchLabel: tree.branchLabel, head: tree.head, id: crypto.randomUUID() })
+        if (tree) setDraft({ kind: 'existing', path: id, branchLabel: tree.branchLabel, head: tree.head, id: randomUUID() })
       }
     }
   }

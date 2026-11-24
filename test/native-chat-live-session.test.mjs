@@ -80,6 +80,12 @@ function mockTransport(t, sources = []) {
   return () => sources.at(-1)
 }
 
+function mockInsecureWebCrypto(t) {
+  document.baseURI = 'http://dsh-lan.test:3190/'
+  const getRandomValues = crypto.getRandomValues.bind(crypto)
+  t.mock.getter(globalThis, 'crypto', () => ({ getRandomValues }))
+}
+
 function turn(id, status, items) {
   return { id, status, startedAt: 100, items }
 }
@@ -661,8 +667,9 @@ test('原生队列保留条目身份，活跃轮次来自 Codex 历史头部', a
   assert.equal(history.session.getSnapshot().running, false)
 })
 
-test('空闲会话提交后立即回显，队列确认与历史推送之间气泡持续可见', async t => {
+test('局域网 HTTP 下空闲会话提交后立即回显，队列确认与历史推送之间气泡持续可见', async t => {
   const source = mockTransport(t)
+  mockInsecureWebCrypto(t)
   const ctx = { effect: install => t.after(install()) }
   const history = createCodexHistory(ctx, { id: 'thread' })
   const input = createSessionInput(ctx, 'thread', history, { getSnapshot: () => undefined, clear() {} })
@@ -776,8 +783,9 @@ test('Codex MCP 在网页草稿中使用全局配置，原生会话可读取自�
   assert.equal(threadId(), native.id)
 })
 
-test('首发回执丢失后刷新，重试沿用提交身份并把气泡交给原生历史', async t => {
+test('局域网 HTTP 下新建会话，首发回执丢失后刷新仍能沿用提交身份', async t => {
   const page = mockDraftPage(t)
+  mockInsecureWebCrypto(t)
   const sessions = page.reload()
   const native = { id: 'native', cwd: '/workspace', status: { type: 'idle' } }
   const createFetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('新建空会话无需 Host 请求') })
