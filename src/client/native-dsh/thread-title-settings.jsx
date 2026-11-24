@@ -1,11 +1,11 @@
 import { PreferenceRow } from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.tsx'
 import css from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.module.css'
 import { Button, IconCheckOutlineRegular, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
-import { useEffect, useId, useState } from 'react'
+import { useId, useState } from 'react'
 import { configuredModelGroup } from '../../shared/model-selection.js'
 import { defaultTitleEffort, defaultTitleModel } from '../../shared/thread-title-settings.js'
-import { readPage, writeCodexCapability } from '../api.js'
-import { codexSettingsItem } from './codex-settings.jsx'
+import { writeCodexCapability } from '../api.js'
+import { codexSettingsItem, createCodexPreference } from './codex-settings.jsx'
 
 const locale = 'codex.thread-title-settings'
 const endpoint = 'title-settings'
@@ -38,51 +38,19 @@ const labels = {
 
 const optionId = selection => selection ? JSON.stringify([selection.provider, selection.model]) : defaultOption
 
-function ThreadTitleSettings({ t, ownerSignal, channel }) {
+function ThreadTitleSettings({ t, useTitleSettings, useModelCatalog, load, loadModelCatalog, save }) {
   const id = useId()
-  const [settings, setSettings] = useState(null)
-  const [catalog, setCatalog] = useState(null)
-  const [loadError, setLoadError] = useState('')
-  const [catalogError, setCatalogError] = useState(false)
+  const { value: settings, error: loadError, saving } = useTitleSettings(state => state)
+  const { value: catalog, error: catalogError } = useModelCatalog(state => state)
   const [saveError, setSaveError] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [attempt, setAttempt] = useState(0)
 
-  useEffect(() => {
-    const lifetime = new AbortController()
-    const signal = AbortSignal.any([ownerSignal, lifetime.signal])
-    let read = 0
-    function refresh() {
-      const revision = ++read
-      void readPage(endpoint, {}, signal).then(result => {
-        if (signal.aborted || revision !== read) return
-        setSettings(result)
-        setLoadError('')
-      }).catch(error => { if (!signal.aborted && revision === read) setLoadError(error.message) })
-    }
-    refresh()
-    channel.addEventListener('message', refresh, { signal })
-    void readPage('models', {}, signal).then(result => {
-      if (signal.aborted) return
-      setCatalog(result)
-      setCatalogError(false)
-    }).catch(() => { if (!signal.aborted) setCatalogError(true) })
-    return () => lifetime.abort()
-  }, [ownerSignal, channel, attempt])
-
-  async function save(patch) {
+  async function apply(patch) {
     if (!settings || saving) return
-    setSaving(true)
     setSaveError('')
     try {
-      const result = await writeCodexCapability(endpoint, patch, ownerSignal)
-      if (ownerSignal.aborted) return
-      setSettings(result)
-      channel.postMessage(null)
+      await save(patch)
     } catch (error) {
-      if (!ownerSignal.aborted) setSaveError(error.message)
-    } finally {
-      setSaving(false)
+      setSaveError(error.message)
     }
   }
 
@@ -102,7 +70,7 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
   const efforts = selectedModel?.reasoning?.efforts ?? []
   const selectedEffort = efforts.find(level => level.id === selection?.reasoningEffort)
   const defaultEffort = defaultTitleEffort(activeModel, selectedModel?.reasoning)
-  const effortLabel = selectedEffort?.name ?? defaultEffort
+  const effortLabel = selectedEffort?.name ?? (catalog ? defaultEffort : selection?.reasoningEffort)
   const effortOptions = defaultEffort ? [
     { id: defaultEffortOption, label: t('effortDefault', { effort: defaultEffort }) },
     ...efforts.map(level => ({ id: `effort:${level.id}`, label: level.name, effort: level.id })),
@@ -119,51 +87,64 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
       icon: option.effort === selectedEffort?.id ? <IconCheckOutlineRegular size={14} /> : undefined,
     })),
   })
+  const loadingOptions = settings && !catalog && !catalogError ? [{ id: 'loading', label: t('loading'), disabled: true }] : []
 
   function select(next) {
-    if (next === value) return
+    if (!catalog || next === value) return
     if (next === defaultOption) {
-      void save({ selection: null })
+      void apply({ selection: null })
       return
     }
     const model = modelOptions.get(next)
     if (model) {
-      void save({ selection: { provider: model.provider, model: model.model } })
+      void apply({ selection: { provider: model.provider, model: model.model } })
       return
     }
     const option = effortOptions.find(choice => choice.id === next)
     if (option && option.effort !== selection?.reasoningEffort) {
-      void save({ selection: option.effort === undefined ? explicitModel : { ...explicitModel, reasoningEffort: option.effort } })
+      void apply({ selection: option.effort === undefined ? explicitModel : { ...explicitModel, reasoningEffort: option.effort } })
     }
   }
 
   return <>
     <PreferenceRow title={t('model')} description={<>{t('modelHelp')}<br />{t('costHelp')}</>}
       value={value} selectedLabel={settings ? (effortLabel ? `${label} · ${effortLabel}` : label) : t('loading')}
-      options={settings && !saving ? options : []} onSelect={select} />
+      options={settings && catalog && !saving ? options : loadingOptions} onSelect={select} />
     {['follow', 'showHistory'].map(field => <div className={css.row} key={field}>
       <div className={css.rowText}>
         <div className={css.title}>{t(field)}</div>
         <div id={`${id}-${field}`} className={css.desc}>{t(`${field}Help`)}</div>
       </div>
       <Switch checked={settings?.[field] ?? false} label={t(field)} describedBy={`${id}-${field}`}
-        disabled={!settings || saving} onChange={value => void save({ [field]: value })} />
+        disabled={!settings || saving} onChange={value => void apply({ [field]: value })} />
     </div>)}
     {(loadError || catalogError || saveError) && <div role="alert" className={css.desc}>
       {saveError || loadError || t('catalogError')}
       {(loadError || catalogError) && <Button size="sm" variant="outline"
-        onClick={() => setAttempt(previous => previous + 1)}>{t('retry')}</Button>}
+        onClick={() => {
+          if (loadError) void load()
+          if (catalogError) void loadModelCatalog()
+        }}>{t('retry')}</Button>}
     </div>}
   </>
 }
 
 /** 注册独立的拟标题模型与更新开关，页面间通过同源通知重新读取 Host 偏好。 */
-export function installThreadTitleSettings(ctx, ownerSignal) {
+export function installThreadTitleSettings(ctx, ownerSignal, modelCatalog, loadModelCatalog) {
+  const preference = createCodexPreference(endpoint, ownerSignal)
   const channel = new BroadcastChannel(locale)
+  channel.addEventListener('message', () => void preference.load())
+  ctx.on('connection/reset', () => void preference.load())
+  void preference.load()
   ctx.effect(() => () => channel.close())
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
     name: codexSettingsItem, id: 'codex-thread-title-settings', order: -17, locale,
-    inject: () => ({ ownerSignal, channel }),
+    inject: () => ({
+      hooks: { titleSettings: preference.store, modelCatalog }, load: preference.load, loadModelCatalog,
+      async save(patch) {
+        if (await preference.save(() => writeCodexCapability(endpoint, patch, ownerSignal))) channel.postMessage(null)
+      },
+    }),
   }, ThreadTitleSettings))
 }

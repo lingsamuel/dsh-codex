@@ -1,4 +1,5 @@
 import { createElement } from 'react'
+import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { readPage, writeThreadAction } from '../api.js'
 import { remoteFailure } from './catalog.js'
 import { installModelDefaultSettings } from './model-default-settings.jsx'
@@ -51,17 +52,24 @@ function filterDirectory(directory, session) {
 
 /** 复用 DSH 模型菜单，目录和会话设置均来自 Codex。 */
 export function installModelPicker(ctx, signal) {
-  installModelDefaultSettings(ctx, signal)
+  const modelCatalog = createSnapshotStore({ value: null, error: '' })
+  let pendingCatalog
+  // 设置切页不应取消输入栏或其他设置行正在等待的全局目录。
+  function loadModelCatalog() {
+    pendingCatalog ??= readPage('models', {}, signal).then(value => {
+      if (!signal.aborted) modelCatalog.set({ value, error: '' })
+      return { ok: true, value }
+    }, error => {
+      if (!signal.aborted) modelCatalog.update(state => { state.error = error.message })
+      return { ok: false, error: remoteFailure(error.message) }
+    }).finally(() => { pendingCatalog = undefined })
+    return pendingCatalog
+  }
+  installModelDefaultSettings(ctx, signal, modelCatalog, loadModelCatalog)
   ctx.inject(['remote', 'remote.session', 'sessions'], scope => {
     scope.effect(() => {
       const remote = scope.remote.session
-      const modelCatalog = replaceMethod(remote, 'modelCatalog', async () => {
-        try {
-          return { ok: true, value: await readPage('models', {}, signal) }
-        } catch (error) {
-          return { ok: false, error: remoteFailure(error.message) }
-        }
-      })
+      const restoreCatalog = replaceMethod(remote, 'modelCatalog', loadModelCatalog)
       const selectModel = replaceMethod(remote, 'selectModel', async ({ sessionId, provider, model, reasoningEffort }) => {
         const session = scope.sessions.binding(sessionId)?.session
         const state = session?.getSnapshot()
@@ -87,7 +95,7 @@ export function installModelPicker(ctx, signal) {
           return { ok: false, error: remoteFailure(error.message) }
         }
       })
-      return () => { selectModel(); modelCatalog() }
+      return () => { selectModel(); restoreCatalog() }
     })
   })
 
@@ -142,4 +150,5 @@ export function installModelPicker(ctx, signal) {
       return () => { unsubscribe(); restore?.() }
     })
   })
+  return { modelCatalog, loadModelCatalog }
 }

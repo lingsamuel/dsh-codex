@@ -1,8 +1,8 @@
 import { PreferenceRow } from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.tsx'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { configuredModelGroup } from '../../shared/model-selection.js'
-import { modelDefaultChanged, readPage, writeModelDefault } from '../api.js'
-import { codexSettingsItem } from './codex-settings.jsx'
+import { modelDefaultChanged, writeModelDefault } from '../api.js'
+import { codexSettingsItem, createCodexPreference } from './codex-settings.jsx'
 
 const locale = 'codex.model-default'
 const followCodex = 'follow-codex'
@@ -22,36 +22,17 @@ const labels = {
   },
 }
 
-function ModelDefaultSettings({ t, load, save }) {
-  const [data, setData] = useState(null)
-  const [loadError, setLoadError] = useState('')
+function ModelDefaultSettings({ t, useModelDefault, useModelCatalog, load, loadModelCatalog, save }) {
+  const { value: settings, error: loadError, saving } = useModelDefault(state => state)
+  const { value: catalog, error: catalogError } = useModelCatalog(state => state)
   const [writeError, setWriteError] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [attempt, setAttempt] = useState(0)
 
-  useEffect(() => {
-    const controller = new AbortController()
-    const { signal } = controller
-    let revision = 0
-    function refresh() {
-      const read = ++revision
-      void load(signal).then(result => {
-        if (signal.aborted || revision !== read) return
-        setData(result)
-        setLoadError('')
-      }).catch(error => { if (!signal.aborted && revision === read) setLoadError(error.message) })
-    }
-    window.addEventListener(modelDefaultChanged, refresh, { signal })
-    refresh()
-    return () => controller.abort()
-  }, [load, attempt])
-
-  const { catalog, saved } = data ?? {}
+  const saved = settings?.selection
   const native = catalog?.default
   const provider = configuredModelGroup(catalog)
   const models = provider?.models ?? []
   const nativeModel = models.find(model => model.id === native?.model)
-  const selectedModel = saved?.model ? catalog.groups.find(group => group.id === saved.provider)
+  const selectedModel = saved?.model ? catalog?.groups.find(group => group.id === saved.provider)
     ?.models.find(model => model.id === saved.model) : nativeModel
   const modelValue = !saved?.model ? followCodex
     : saved.provider === provider?.id ? `model:${saved.model}` : `saved:${saved.model}`
@@ -64,23 +45,26 @@ function ModelDefaultSettings({ t, load, save }) {
   const follow = { id: followCodex, label: t('follow') }
   const modelOptions = [{ id: followCodex, label: modelFollowLabel }, ...models.map(model => ({ id: `model:${model.id}`, label: model.name }))]
   const effortOptions = [...(!saved?.model ? [follow] : []), ...efforts.map(effort => ({ id: effort.id, label: effort.name }))]
+  const canSelect = settings && catalog && !saving
+  const retryOptions = loadError || catalogError ? [{ id: retry, label: t('retry') }] : []
+  const loadingOptions = settings && !catalog && !catalogError ? [{ id: 'loading', label: t('loading'), disabled: true }] : []
 
   async function apply(selection) {
-    setSaving(true)
     setWriteError('')
     try {
-      const result = await save(selection)
-      setData(current => ({ ...current, saved: result.selection }))
+      await save(selection)
     } catch (error) {
       setWriteError(error.message)
-    } finally {
-      setSaving(false)
     }
   }
 
   function selectModel(id) {
-    if (id === retry) { setAttempt(value => value + 1); return }
-    if (!data || saving || id === modelValue) return
+    if (id === retry) {
+      if (loadError) void load()
+      if (catalogError) void loadModelCatalog()
+      return
+    }
+    if (!canSelect || id === modelValue) return
     if (id === followCodex) {
       const reasoningEffort = saved?.reasoningEffort
       const nativeEfforts = nativeModel?.reasoning?.efforts
@@ -92,41 +76,41 @@ function ModelDefaultSettings({ t, load, save }) {
   }
 
   function selectEffort(id) {
-    if (!data || saving || id === effortValue) return
+    if (!canSelect || id === effortValue) return
     if (id === followCodex) void apply(null)
     else void apply({ ...(saved?.model && { provider: saved.provider, model: saved.model }), reasoningEffort: id })
   }
 
   return <>
-    <PreferenceRow title={t('model')} description={writeError || loadError || t('modelDescription')}
-      value={modelValue} selectedLabel={data ? modelLabel : t(loadError ? 'retry' : 'loading')}
-      options={data ? modelOptions : loadError ? [{ id: retry, label: t('retry') }] : []} onSelect={selectModel} />
-    <PreferenceRow title={t('effort')} description={data && !efforts.length ? t('unavailable') : t('effortDescription')}
-      value={effortValue} selectedLabel={data ? effortLabel : t('loading')}
-      options={data ? effortOptions : []} onSelect={selectEffort} />
+    <PreferenceRow title={t('model')} description={writeError || loadError || catalogError || t('modelDescription')}
+      value={modelValue} selectedLabel={settings ? modelLabel : t(loadError ? 'retry' : 'loading')}
+      options={canSelect ? [...modelOptions, ...retryOptions] : [...retryOptions, ...loadingOptions]} onSelect={selectModel} />
+    <PreferenceRow title={t('effort')} description={settings && catalog && !efforts.length ? t('unavailable') : t('effortDescription')}
+      value={effortValue} selectedLabel={settings ? effortLabel : t('loading')}
+      options={canSelect ? effortOptions : loadingOptions} onSelect={selectEffort} />
   </>
 }
 
 /** 通知同源标签页重读 Host 中保存的 Profile 默认值。 */
-export function installModelDefaultSettings(ctx, signal) {
+export function installModelDefaultSettings(ctx, signal, modelCatalog, loadModelCatalog) {
+  const preference = createCodexPreference('model-default', signal)
   const channel = new BroadcastChannel(modelDefaultChanged)
   const refresh = () => window.dispatchEvent(new Event(modelDefaultChanged))
-  channel.addEventListener('message', refresh)
+  channel.addEventListener('message', () => {
+    void preference.load()
+    refresh()
+  })
+  ctx.on('connection/reset', () => void preference.load())
+  void preference.load()
   const controls = {
-    async load(localSignal) {
-      const requestSignal = AbortSignal.any([signal, localSignal])
-      const [{ selection: saved }, catalog] = await Promise.all([
-        readPage('model-default', {}, requestSignal), readPage('models', {}, requestSignal),
-      ])
-      return { saved, catalog }
-    },
+    hooks: { modelDefault: preference.store, modelCatalog },
+    load: preference.load,
+    loadModelCatalog,
     async save(selection) {
-      const result = await writeModelDefault(selection, signal)
-      if (!signal.aborted) {
+      if (await preference.save(() => writeModelDefault(selection, signal))) {
         refresh()
         channel.postMessage(null)
       }
-      return result
     },
   }
   ctx.effect(() => () => channel.close())
