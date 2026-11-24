@@ -54,7 +54,7 @@ async function submissionConflict(attempt, changed = false) {
 }
 
 /** 网页临时 ID 只在显式提交时启动线程。Host 运行期间在内存保留原生目标、提交标识与简化回执。 */
-export function createFirstSubmission(socketPath, submit, permissions, openProject, readDefaultModel) {
+export function createFirstSubmission(socketPath, submit, permissions, openProject, readDefaultModel, onDraftAccepted) {
   const attempts = new Map()
 
   async function createThread(attempt, cwd, projectId, worktree, modelDraft, permissionDraft, signal) {
@@ -117,6 +117,8 @@ export function createFirstSubmission(socketPath, submit, permissions, openProje
       const finish = async result => {
         attempt.receipt = receiptOf({ ...result, planMode: result.planMode ?? (action === 'prompt' ? planMode : undefined),
           permission: result.permission ?? attempt.permission })
+        // 首发审查保留草稿，只有实际接续输入栏的首发才转交它的终端。
+        if (action !== 'review') onDraftAccepted?.(threadId, attempt.thread.id)
         attempt.state = 'accepted'
         return { ...attempt.receipt, ...await workspaceOf(attempt), clientUserMessageId }
       }

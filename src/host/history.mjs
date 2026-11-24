@@ -67,10 +67,10 @@ async function readThreadTerminals(request, threadId, status) {
 }
 
 /** 将 Codex 浏览与会话管理入口注册在 DSH 的受保护 API 下。 */
-export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, ownerSignal, cacheDirectory, attachmentStore) {
+export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, ownerSignal, cacheDirectory, attachmentStore,
+  submit = createThreadSubmissionQueue(), onDraftAccepted) {
   const readCatalog = createCatalogReader(socketPath, ownerSignal, cacheDirectory)
   const questions = createQuestionBridge(socketPath, ownerSignal)
-  const submit = createThreadSubmissionQueue()
   const steers = createQueuedSteers()
   const files = attachmentStore && createFileUploads(attachmentStore, socketPath, ownerSignal, steers)
   const openProject = createProjectOpener()
@@ -79,7 +79,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const modelDefault = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-model-default.json'), 'selection')
   const historyPreferences = createHistoryPreferences(cacheDirectory)
-  const submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject, modelDefault.get)
+  const submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject, modelDefault.get, onDraftAccepted)
   const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
   const enablePlan = (threadId, signal) => selectPlanMode(socketPath, signal, threadId, 'plan', false, permissions.observeDraftSettings)
   const route = (path, read) => ({

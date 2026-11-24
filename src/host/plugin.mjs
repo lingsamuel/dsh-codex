@@ -2,6 +2,9 @@ import { join } from 'node:path'
 import pkg from '../../package.json' with { type: 'json' }
 import { createHistoryRoutes } from './history.mjs'
 import { readCodex } from './app-server.mjs'
+import { resolveWorktreeCwd } from './git-worktrees.mjs'
+import { createThreadSubmissionQueue } from './thread-runtime.mjs'
+import { createSidebarTerminalOwners, installCodexSidebarTerminals } from './sidebar-terminals.mjs'
 import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs'
 import { createFileReferenceRoute } from './file-references.mjs'
 import { createSessionExportRoute } from './session-export.mjs'
@@ -37,8 +40,9 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     ...route,
     fetch: request => codexAvailable() ? route.fetch(request) : new Response(null, { status: 404 }),
   } : route))
-  const readWorkspace = async threadId => {
-    const { thread } = await readCodex('thread/read', { threadId }, process.env.DSH_CODEX_SOCKET, owner.signal)
+  const readWorkspace = async (threadId, signal = owner.signal) => {
+    const { thread } = await readCodex('thread/read', { threadId }, process.env.DSH_CODEX_SOCKET,
+      AbortSignal.any([signal, owner.signal]))
     return thread.cwd
   }
   const readCodexFileScope = id => resolveWorkspaceFileScope(id, readWorkspace)
@@ -51,7 +55,17 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     } })
     ctx.provide('sandboxPolicy', { workspaceRoot: process.cwd() })
   }
-  for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory, ctx.attachments)) {
+  const submit = createThreadSubmissionQueue()
+  const terminalOwners = createSidebarTerminalOwners()
+  ctx.inject(['typert', 'subprocess', 'sandboxPolicy'], scope => installCodexSidebarTerminals(scope, {
+    owners: terminalOwners,
+    available: codexAvailable,
+    readWorkspace,
+    // 与首发共享草稿的提交顺序，两个动作可以用同一选择创建并复用 Git 检出。
+    resolveDraftWorktree: (draftId, cwd, selection, signal) => submit(draftId, () => resolveWorktreeCwd(cwd, selection, signal)),
+  }))
+  for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory, ctx.attachments, submit,
+    (draftId, threadId) => terminalOwners.associate(draftId, threadId))) {
     register(route)
   }
   const [{ formatCodexMarkdown }, { formatSessionMarkdown }, sessionMedia] = await Promise.all([

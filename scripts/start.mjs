@@ -28,6 +28,7 @@ async function legacyProfilePatch(home, profile, manifest) {
   const webEntryIds = new Set([
     'ui-goal', 'ui-sidebar-files', 'ui-file-actions', 'client-hmr', 'plugin-inventory',
     'ui-plugin-manager', 'remote-connection', 'ui-shortcuts', 'message-quotes', 'ui-secret-mask',
+    'terminal-controller', 'ui-sidebar-terminal',
   ])
   const configured = new Set(entries.map(entry => entry.id))
   const missing = defaults.filter(entry => webEntryIds.has(entry.id) && !configured.has(entry.id))

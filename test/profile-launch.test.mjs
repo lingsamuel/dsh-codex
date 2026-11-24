@@ -14,6 +14,7 @@ const pluginName = 'dsh-for-codex'
 const restoredWebEntries = [
   'client-hmr', 'plugin-inventory', 'ui-plugin-manager', 'ui-shortcuts',
   'message-quotes', 'ui-secret-mask', 'remote-connection',
+  'terminal-controller', 'ui-sidebar-terminal',
 ]
 
 async function fixture(t) {

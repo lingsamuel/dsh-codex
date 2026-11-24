@@ -3,6 +3,7 @@ import { readPage, writeCommandAction, writeConversationAction } from '../api.js
 import { remoteFailure } from './catalog.js'
 import { goalCommandObjective, planCommandText, replaceUserInputText, userInputText } from '../../shared/user-input.js'
 import { threadReferencesIn } from '../../shared/thread-references.js'
+import { worktreeSelection } from '../../shared/local-session.js'
 
 const accepted = { ok: true, value: { accepted: true } }
 const failedSubmission = { reason: 'failed' }
@@ -12,12 +13,6 @@ function failure(error) {
   const detail = remoteFailure(error.message)
   if (error.reason) detail.code = `session/${error.reason}`
   return { ok: false, error: detail }
-}
-
-function worktreeSelection(worktree) {
-  if (!worktree) return
-  const { kind, id, path, baseRef } = worktree
-  return { kind, id, path, baseRef }
 }
 
 /** 使用 DSH 输入栏的提交生命周期，原生历史或队列确认送达后移除本地回显。 */

@@ -8,7 +8,7 @@ import test from 'node:test'
 import { WebSocketServer } from 'ws'
 import { createHistoryRoutes } from '../src/host/history.mjs'
 
-async function commandFixture(t, methods, settings = {}) {
+async function commandFixture(t, methods, settings = {}, onDraftAccepted) {
   const runtime = join(process.cwd(), '.runtime')
   await mkdir(runtime, { recursive: true })
   const directory = await mkdtemp(join(runtime, 'cmd-'))
@@ -50,14 +50,14 @@ async function commandFixture(t, methods, settings = {}) {
     await rm(directory, { recursive: true, force: true })
   })
 
-  const routes = createHistoryRoutes(socketPath, owner.signal, join(directory, 'cache'))
+  const routes = createHistoryRoutes(socketPath, owner.signal, join(directory, 'cache'), undefined, undefined, onDraftAccepted)
   const threadId = `web-new-${randomUUID()}`
   const request = (path, fields) => routes.find(route => route.path === path).fetch(new Request(`http://localhost${path}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ threadId, newSession: { cwd: directory }, clientUserMessageId: 'my-command-id', ...settings, ...fields }),
   }))
   return {
-    calls, command: fields => request('/api/codex/command-action', fields),
+    calls, threadId, command: fields => request('/api/codex/command-action', fields),
     prompt: fields => request('/api/codex/conversation-action', { action: 'prompt', mode: 'queue', ...fields }),
   }
 }
@@ -164,7 +164,8 @@ test('审查首发应用所选模型提供商与协作模式', async t => {
 })
 
 test('显式审查结束后，同一网页入口可独立发送首条消息', async t => {
-  const { calls, command, prompt } = await commandFixture(t, {
+  const handoffs = []
+  const { calls, threadId, command, prompt } = await commandFixture(t, {
     'review/start': ({ threadId }, _, thread) => {
       thread.status.type = 'active'
       return { result: { reviewThreadId: threadId, turn: { id: 'review-turn' } } }
@@ -173,17 +174,19 @@ test('显式审查结束后，同一网页入口可独立发送首条消息', as
       thread.status.type = 'active'
       return { result: { queuedSubmission: { id: 'queued-message', clientUserMessageId } } }
     },
-  })
+  }, {}, (...ids) => handoffs.push(ids))
   const review = await command({ action: 'review', target: { type: 'uncommittedChanges' }, clientUserMessageId: 'review' })
   assert.equal(review.status, 200)
   const checked = await review.json()
   assert.equal(checked.thread.id, 'native-thread')
+  assert.deepEqual(handoffs, [])
 
   const first = await prompt({ input: [{ type: 'text', text: '继续未发送的任务' }], clientUserMessageId: 'prompt' })
   assert.equal(first.status, 200)
   const sent = await first.json()
   assert.equal(sent.thread.id, 'native-thread-2')
   assert.equal(sent.queuedSubmission.clientUserMessageId, 'prompt')
+  assert.deepEqual(handoffs, [[threadId, 'native-thread-2']])
   assert.deepEqual(calls.filter(({ method }) => method === 'review/start' || method === 'thread/queue/add')
     .map(({ method, params }) => [method, params.threadId]), [
     ['review/start', 'native-thread'], ['thread/queue/add', 'native-thread-2'],

@@ -7,7 +7,7 @@ import { subagentAddress } from './subagents.js'
 import { directoryTitle, writeConversationAction, writeThreadAction } from '../api.js'
 import { workspaceProjectId } from '../workspaces.js'
 import { searchResultLimit } from '../thread-search.js'
-import { isLocalSessionId } from '../../shared/local-session.js'
+import { isLocalSessionId, worktreeSelection } from '../../shared/local-session.js'
 
 const flatSessionOrderKey = '__flat_session_order__'
 const workspaceSlot = 'sidebar.workspaces'
@@ -22,7 +22,7 @@ function localThread({ id, cwd, projectId, reviewRequestId }) {
 function readLocalSessions() {
   try {
     const saved = JSON.parse(globalThis.window?.sessionStorage?.getItem(localSessionKey) ?? '[]')
-    return Array.isArray(saved) ? saved.filter(row => isLocalSessionId(row?.id) && typeof row.cwd === 'string').map(localThread) : []
+    return Array.isArray(saved) ? saved.filter(row => isLocalSessionId(row?.id) && typeof row.cwd === 'string') : []
   } catch {
     return []
   }
@@ -82,16 +82,26 @@ function codexBinding(ctx, thread, catalog, modelDrafts, permissionDrafts, workt
 }
 
 /** 为 DSH 提供 Codex 会话与工作区控制器。选择与保留引用都留在当前页面。 */
-export function provideCodexControllers(ctx, catalog, withForkFeedback) {
-  const localSessions = createSnapshotStore(readLocalSessions())
+export function provideCodexControllers(ctx, catalog, withForkFeedback, moveSidebarTerminals) {
+  const savedDrafts = readLocalSessions()
+  const localSessions = createSnapshotStore(savedDrafts.map(localThread))
+  const worktreeDrafts = createSnapshotStore(new Map(savedDrafts.filter(draft => draft.worktree).map(draft => [draft.id, draft.worktree])))
   const localSession = id => localSessions.getSnapshot().find(thread => thread.id === id)
-  const setLocalSessions = sessions => {
-    localSessions.set(sessions)
-    // 保存占位和审查提交身份。正文与附件继续由 DSH 恢复。
+  function persistLocalSessions() {
+    // 刷新后仍用同一选择 ID 复用草稿终端已创建的工作树。
     try {
-      const identities = sessions.map(({ id, cwd, projectId, reviewRequestId }) => ({ id, cwd, projectId, reviewRequestId }))
+      const identities = localSessions.getSnapshot().map(({ id, cwd, projectId, reviewRequestId }) => {
+        const choice = worktreeDrafts.getSnapshot().get(id)
+        const worktree = choice && { ...worktreeSelection(choice), branchLabel: choice.branchLabel, head: choice.head }
+        return { id, cwd, projectId, reviewRequestId, worktree }
+      })
       globalThis.window?.sessionStorage?.setItem(localSessionKey, JSON.stringify(identities))
     } catch { /* 当前页仍然可以打开占位会话。 */ }
+  }
+  ctx.effect(() => worktreeDrafts.subscribe(persistLocalSessions))
+  const setLocalSessions = sessions => {
+    localSessions.set(sessions)
+    persistLocalSessions()
   }
   function reviewSubmissionId(id, acceptedId) {
     const draft = localSession(id)
@@ -132,7 +142,6 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
   const retention = new Map()
   const modelDrafts = createSnapshotStore(new Map())
   const permissionDrafts = createSnapshotStore(new Map())
-  const worktreeDrafts = createSnapshotStore(new Map())
   const goalDrafts = createSnapshotStore(new Map())
   let navigation
   const scopeId = Symbol('Codex session')
@@ -207,6 +216,8 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
           if (confirmed || !current) {
             catalog.acceptThread(permission ? { ...thread, webPermission: permission } : thread, workspacePaths, confirmed)
           }
+          const consumeDraft = confirmed && !keepInput && localSession(id)
+          const moveTerminals = consumeDraft && moveSidebarTerminals?.(id, thread)
           // DSH 先完成输入栏的发送交接。若用户期间已打开其他会话，保留当前视图。
           setTimeout(() => {
             if (catalog.store.getSnapshot().selected?.id === id && navigation) {
@@ -219,7 +230,12 @@ export function provideCodexControllers(ctx, catalog, withForkFeedback) {
                 reference?.release()
               }
             } else handoff?.()
-            if (confirmed && !keepInput && localSession(id)) forgetLocalSession(id)
+            if (consumeDraft) {
+              if (moveTerminals) {
+                void moveTerminals.catch(error => { ctx.logger.warn('草稿终端交接失败', error) })
+                  .then(() => forgetLocalSession(id))
+              } else forgetLocalSession(id)
+            }
           }, 0)
         }
         record = { binding: codexBinding(fiber.ctx.extend({ [scopeId]: id }), thread, catalog,

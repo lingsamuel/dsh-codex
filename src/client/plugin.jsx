@@ -28,6 +28,7 @@ import { installHistoryDetails } from './native-dsh/history-details.jsx'
 import { installThreadReferences } from './native-dsh/thread-references.jsx'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
+import { installSidebarTerminals } from './native-dsh/sidebar-terminal.js'
 import { installCodexSkills } from './native-dsh/skills.js'
 import { installCodexCapabilities } from './native-dsh/codex-capabilities.jsx'
 import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
@@ -66,7 +67,8 @@ export async function apply(ctx) {
     installCodexFileScope(ctx, false)
   }
   installComposer(ctx, catalog.store)
-  const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
+  const moveSidebarTerminals = installSidebarTerminals(ctx)
+  const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx), moveSidebarTerminals)
   installStartupPage(ctx, startupReady)
   installTrajectory(ctx)
   installProjectWorkspaces(ctx, catalog)

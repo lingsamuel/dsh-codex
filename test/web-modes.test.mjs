@@ -5,6 +5,34 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { webModeFor } from '../src/shared/web-mode.js'
 
+test('共存页各自搜集待关闭终端，保留原来的终端 shell 偏好', async () => {
+  const { installCodexStorageScope } = await import('../src/shared/dual-web-entry.js')
+  class Storage {
+    records = new Map()
+    setItem(key, value) { this.records.set(key, value) }
+    getItem(key) { return this.records.get(key) ?? null }
+    removeItem(key) { this.records.delete(key) }
+    key(index) { return [...this.records.keys()][index] ?? null }
+  }
+  const local = new Storage()
+  const session = new Storage()
+  const prefix = 'dsh.terminal.close.v1.'
+  local.setItem(prefix + 'native', 'pending native')
+  local.setItem('dsh.terminal.shell', '/bin/zsh')
+  session.setItem(prefix + 'session', 'unrelated storage')
+  installCodexStorageScope(local, Storage.prototype)
+  local.setItem(prefix + 'codex', 'pending codex')
+  assert.equal(local.key(0), null)
+  assert.equal(local.key(1), 'dsh.terminal.shell')
+  assert.equal(local.key(2), prefix + 'codex')
+  assert.equal(local.getItem(prefix + 'native'), null)
+  assert.equal(local.getItem(prefix + 'codex'), 'pending codex')
+  assert.equal(local.getItem('dsh.terminal.shell'), '/bin/zsh')
+  local.removeItem(prefix + 'codex')
+  assert.equal(local.records.get(prefix + 'native'), 'pending native')
+  assert.equal(session.key(0), prefix + 'session')
+})
+
 async function makeProfile(t, manifest) {
   const runtime = fileURLToPath(new URL('../.runtime/', import.meta.url))
   await mkdir(runtime, { recursive: true })
@@ -110,27 +138,27 @@ test('Codex 启动图跳过原生会话功能并保留共用组件和独立插�
   const native = [
     '@deepseek-ai/dsh-api-session-controller',
     '@deepseek-ai/dsh-api-job-controller',
-    '@deepseek-ai/dsh-api-terminal-controller',
     '@deepseek-ai/dsh-client-ui-jobs',
     '@deepseek-ai/dsh-client-ui-message-feedback',
     '@deepseek-ai/dsh-client-ui-schedule',
-    '@deepseek-ai/dsh-client-ui-sidebar-terminal',
     '@deepseek-ai/dsh-client-ui-skill',
     '@deepseek-ai/dsh-session-log-export',
   ]
   const shared = '@deepseek-ai/dsh-client-ui-context-menu'
   const hotReload = '@deepseek-ai/dsh-client-hmr'
+  const terminal = { id: '@deepseek-ai/dsh-api-terminal-controller' }
+  const terminalTab = { id: '@deepseek-ai/dsh-client-ui-sidebar-terminal', inject: [terminal.id] }
   const codex = { id: 'dsh-for-codex', inject: [shared, ...native] }
   const graph = {
-    entries: [...native.map(id => ({ id })), { id: shared }, { id: hotReload }, codex, { id: 'custom-plugin' }],
+    entries: [...native.map(id => ({ id })), { id: shared }, { id: hotReload }, terminal, terminalTab, codex, { id: 'custom-plugin' }],
     batches: [
       { phase: 'bootstrap', entries: native },
-      { phase: 'application', entries: [shared, hotReload, codex.id, 'custom-plugin'] },
+      { phase: 'application', entries: [shared, hotReload, terminal.id, terminalTab.id, codex.id, 'custom-plugin'] },
     ],
   }
   assert.deepEqual(selectCodexBoot(graph), {
-    entries: [{ id: shared }, { id: hotReload }, { ...codex, inject: [shared] }, { id: 'custom-plugin' }],
-    batches: [{ phase: 'application', entries: [shared, hotReload, codex.id, 'custom-plugin'] }],
+    entries: [{ id: shared }, { id: hotReload }, terminal, terminalTab, { ...codex, inject: [shared] }, { id: 'custom-plugin' }],
+    batches: [{ phase: 'application', entries: [shared, hotReload, terminal.id, terminalTab.id, codex.id, 'custom-plugin'] }],
   })
   assert.deepEqual(graph.entries.find(entry => entry.id === codex.id).inject, [shared, ...native])
 })

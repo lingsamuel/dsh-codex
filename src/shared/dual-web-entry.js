@@ -1,13 +1,38 @@
 export const codexFileScopePrefix = 'codex:'
-export const nativeConversationPrefix = 'dsh.conversation.'
-export const codexConversationPrefix = 'dsh.codex.conversation.'
 export const nativeSessionClient = '@deepseek-ai/dsh-api-session-controller'
 export const codexClientReloadEvent = 'dsh-codex:client-reload'
+
+/** 同源的 DSH 与 Codex 页面各自恢复终端的标签绑定和待关闭操作。 */
+export function installCodexStorageScope(local, prototype) {
+  const terminalPrefixes = ['dsh.terminal.binding.v1.', 'dsh.terminal.close.v1.']
+  const prefixes = ['dsh.conversation.', ...terminalPrefixes]
+  const codexPrefix = prefix => 'dsh.codex.' + prefix.slice(4)
+  for (const method of ['getItem', 'setItem', 'removeItem']) {
+    const original = prototype[method]
+    prototype[method] = function (key, ...args) {
+      if (this !== local || typeof key !== 'string') return original.call(this, key, ...args)
+      const prefix = prefixes.find(prefix => key.startsWith(prefix))
+      if (prefix) key = codexPrefix(prefix) + key.slice(prefix.length)
+      else if (key === 'dsh.sessions.current') key = 'dsh.codex.sessions.current'
+      return original.call(this, key, ...args)
+    }
+  }
+  const indexKey = prototype.key
+  prototype.key = function (index) {
+    const key = indexKey.call(this, index)
+    if (this !== local || key === null) return key
+    for (const prefix of terminalPrefixes) {
+      const codex = codexPrefix(prefix)
+      if (key.startsWith(codex)) return prefix + key.slice(codex.length)
+      if (key.startsWith(prefix)) return null
+    }
+    return key
+  }
+}
 
 export const conflictingClientPackages = new Set([
   nativeSessionClient,
   '@deepseek-ai/dsh-api-job-controller',
-  '@deepseek-ai/dsh-api-terminal-controller',
   '@deepseek-ai/dsh-api-workspace-controller',
   '@deepseek-ai/dsh-client-file-upload',
   '@deepseek-ai/dsh-client-ui-brand-official',
@@ -16,7 +41,6 @@ export const conflictingClientPackages = new Set([
   '@deepseek-ai/dsh-client-ui-message-feedback',
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-schedule',
-  '@deepseek-ai/dsh-client-ui-sidebar-terminal',
   '@deepseek-ai/dsh-client-ui-skill',
   '@deepseek-ai/dsh-session-log-export',
 ])

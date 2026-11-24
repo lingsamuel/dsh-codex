@@ -1,6 +1,6 @@
 import pkg from '../../package.json' with { type: 'json' }
-import { codexClientReloadEvent, codexConversationPrefix, conflictingClientPackages, installCodexGraphSync,
-  nativeConversationPrefix, selectCodexBoot } from '../shared/dual-web-entry.js'
+import { codexClientReloadEvent, conflictingClientPackages, installCodexStorageScope, installCodexGraphSync,
+  selectCodexBoot } from '../shared/dual-web-entry.js'
 import { webModeFor } from '../shared/web-mode.js'
 import { createModeLoading, getModeBrandPieces, modeHandoffKey, modeHandoffStyles, showModeHandoff } from '../shared/web-mode-handoff.js'
 import { webModeStatus } from './web-mode.mjs'
@@ -53,18 +53,7 @@ export function installDualWebEntry(ctx, state) {
             window.dispatchEvent(new Event(${scriptValue(codexClientReloadEvent)}));
           });
         try {
-          const local = window.localStorage;
-          for (const method of ['getItem', 'setItem', 'removeItem']) {
-            const original = Storage.prototype[method];
-            Storage.prototype[method] = function (key, ...args) {
-              if (this === local && typeof key === 'string') {
-                const prefix = ${scriptValue(nativeConversationPrefix)};
-                if (key.startsWith(prefix)) key = ${scriptValue(codexConversationPrefix)} + key.slice(prefix.length);
-                else if (key === 'dsh.sessions.current') key = 'dsh.codex.sessions.current';
-              }
-              return original.call(this, key, ...args);
-            };
-          }
+          ;(${installCodexStorageScope.toString()})(window.localStorage, Storage.prototype);
         } catch {}
       })();
     ` })
