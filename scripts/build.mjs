@@ -1,10 +1,11 @@
 import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dshTrajectorySource } from './dsh-trajectory.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
+const outdir = process.argv[2] ?? 'dist'
 const { name } = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
 const trajectoryLicenses = await Promise.all([
   '@deepseek-ai/dsh-client-ui-trajectory', '@tanstack/react-virtual', '@tanstack/virtual-core',
@@ -16,7 +17,7 @@ const trajectoryLicenses = await Promise.all([
 const client = await build({
   absWorkingDir: root,
   entryPoints: ['src/client/plugin.jsx'],
-  outfile: 'dist/client.js',
+  outfile: join(outdir, 'client.js'),
   bundle: true,
   format: 'cjs',
   jsx: 'automatic',
@@ -50,7 +51,7 @@ await build({
     'file-reference-search': fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-file-reference-local/src/search.ts')),
     'session-markdown': 'src/host/session-markdown.mjs',
   },
-  outdir: 'dist',
+  outdir,
   outExtension: { '.js': '.mjs' },
   bundle: true,
   format: 'esm',
@@ -61,7 +62,7 @@ await build({
 await build({
   absWorkingDir: root,
   entryPoints: [fileURLToPath(import.meta.resolve('@deepseek-ai/dsh-api-session-controller/src/media-references.ts'))],
-  outfile: 'dist/session-media-references.mjs',
+  outfile: join(outdir, 'session-media-references.mjs'),
   bundle: true,
   format: 'cjs',
   platform: 'node',

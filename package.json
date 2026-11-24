@@ -43,6 +43,7 @@
     "build": "node scripts/build.mjs",
     "prepack": "npm run build",
     "package:plugin": "node scripts/package.mjs",
+    "package:dev": "node scripts/package.mjs --dev",
     "prestart": "npm run build",
     "start": "node scripts/start.mjs",
     "test": "node --test"
