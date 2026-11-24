@@ -6,12 +6,14 @@ import { codexSqliteHome, CodexRpcError, openCodexReader, withCodexReader } from
 import { createCodexCapabilityRoute, invalidCapabilityRequest, requiredValue } from './codex-capability-route.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
+import { readLatestTurn } from './live-history.mjs'
 import { codexModelOption, readVisibleProviderModels } from './models.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
 import { createThreadTitleHistory } from './thread-title-history.mjs'
 import { createThreadTitleUpdates, readFirstTitleMessage, readTitleContext } from './thread-title-updates.mjs'
 
 const readOnly = ':read-only'
+const booleanSettings = ['follow', 'showHistory', 'restoreOnFork', 'restoreManualOnFork']
 const titleLength = 36
 const titleProperty = { type: 'string', minLength: 1, maxLength: titleLength }
 const titleSchema = {
@@ -221,7 +223,7 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
   const history = createThreadTitleHistory(cacheDirectory)
   const jobs = new Map()
   const manualNames = new Set()
-  let settings = { selection: null, follow: false, showHistory: false }
+  let settings = { selection: null, follow: false, showHistory: false, restoreOnFork: true, restoreManualOnFork: true }
   let followController
   let track
   let modelController = new AbortController()
@@ -314,7 +316,7 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
       const { thread: current } = await request('thread/read', { threadId: thread.id })
       if (mayName(current)) {
         await writeName(request, thread.id, title)
-        await history.name(thread.id, title)
+        await history.recordName(thread.id, first.turnId, null, title, 'automatic')
       }
     }))
   }
@@ -339,9 +341,10 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     return settings
   }, async (patch, signal) => {
     await ready
-    const { follow, selection, showHistory } = patch
-    if ((follow === undefined && selection === undefined && showHistory === undefined)
-      || (follow !== undefined && typeof follow !== 'boolean') || (showHistory !== undefined && typeof showHistory !== 'boolean')) {
+    const { selection } = patch
+    const switches = Object.fromEntries(booleanSettings.filter(field => patch[field] !== undefined).map(field => [field, patch[field]]))
+    if ((selection === undefined && !Object.keys(switches).length)
+      || Object.values(switches).some(value => typeof value !== 'boolean')) {
       throw invalidCapabilityRequest('无效的拟标题设置。')
     }
     let nextSelection = null
@@ -365,9 +368,7 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     }
     const saved = await preference.update(previous => {
       signal.throwIfAborted()
-      return { ...settings, ...previous, ...(follow !== undefined && { follow }),
-        ...(showHistory !== undefined && { showHistory }),
-        ...(selection !== undefined && { selection: nextSelection }) }
+      return { ...settings, ...previous, ...switches, ...(selection !== undefined && { selection: nextSelection }) }
     })
     applySettings(saved)
     return settings
@@ -380,10 +381,36 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
       await ready
       return history.list(threadId)
     },
-    async manualRename(threadId) {
+    async manualRename(request, { threadId, name }, unarchived) {
+      const before = unarchived ?? await request('thread/read', { threadId })
+        .then(({ thread }) => thread).catch(() => undefined)
+      const turnId = before && await readLatestTurn(request, threadId, 'notLoaded')
+        .then(turn => turn?.id ?? null).catch(() => undefined)
+      const result = await request('thread/name/set', { threadId, name })
       manualNames.add(threadId)
-      // 同名的显式改名也撤销自动管理。原生改名已经提交，偏好写入失败不改写该回执。
-      await history.releaseName(threadId).catch(() => {})
+      // 同名改名也撤销自动管理。只有核对过轮次才能把这次操作用于历史分叉。
+      const saved = turnId === undefined ? history.releaseName(threadId)
+        : history.recordName(threadId, turnId, before.name ?? null, name.trim(), 'manual')
+      await saved.catch(() => {})
+      return result
+    },
+    async restoreForkTitle(request, threadId, branch) {
+      await ready
+      const { restoreOnFork, restoreManualOnFork } = settings
+      if (!restoreOnFork) return branch
+      // 分支可能已出现在实时目录中，写回前用同一队列及原生读回保护并发改名。
+      return submit(branch.id, async () => {
+        if (manualNames.has(branch.id)) return (await request('thread/read', { threadId: branch.id })).thread
+        const restored = await history.forkTitle(request, threadId, branch, restoreManualOnFork)
+        if (!restored) return branch
+        if (restored.name !== branch.name) {
+          const { thread: current } = await request('thread/read', { threadId: branch.id })
+          if (current.name !== branch.name) return current
+          await writeName(request, branch.id, restored.name)
+        }
+        await history.inherit(branch.id, restored).catch(() => {})
+        return { ...branch, name: restored.name }
+      }).catch(() => branch) // 新分支已创建，恢复失败仍返回原生成功回执。
     },
   }
 }

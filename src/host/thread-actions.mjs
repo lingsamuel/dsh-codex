@@ -155,18 +155,24 @@ export function createThreadActionRoute(socketPath, ownerSignal, submit = create
           return await (modifiesHistory ? submit(threadId, run) : run())
         }
         const restoreArchived = (action === 'fork' || action === 'rename') && input.unarchive === true
+        const forkAtTurn = action === 'fork' && Boolean(lastTurnId)
         const run = () => withCodexReader(socketPath, signal, async request => {
+          let unarchived
           if (restoreArchived) {
             const { thread } = await request('thread/read', { threadId })
-            await unarchiveForSubmission(request, thread)
+            unarchived = await unarchiveForSubmission(request, thread)
           }
           // 分叉和改名只需要原生记录，源线程可以保持未加载。
-          if (action === 'fork') return request(method, { ...params, config: await threadTaskToolsConfig(socketPath, signal) })
-          const result = await request(method, params)
-          if (action === 'rename') await titles?.manualRename(threadId)
-          return result
+          if (action === 'fork') {
+            const result = await request(method, { ...params, config: await threadTaskToolsConfig(socketPath, signal) })
+            return forkAtTurn && titles
+              ? { ...result, thread: await titles.restoreForkTitle(request, threadId, result.thread) }
+              : result
+          }
+          if (action === 'rename' && titles) return titles.manualRename(request, params, unarchived)
+          return request(method, params)
         })
-        const result = await (action === 'rename' || restoreArchived ? submit(threadId, run) : run())
+        const result = await (action === 'rename' || restoreArchived || forkAtTurn ? submit(threadId, run) : run())
         if (action === 'fork' || action === 'unarchive') {
           return json({ ...result, workspacePaths: await resolveWorkspacePaths([result.thread.cwd]) })
         }

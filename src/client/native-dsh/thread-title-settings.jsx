@@ -11,6 +11,7 @@ const locale = 'codex.thread-title-settings'
 const endpoint = 'title-settings'
 const defaultOption = 'default'
 const defaultEffortOption = 'effort-default'
+const titleSwitches = ['follow', 'showHistory', 'restoreOnFork', 'restoreManualOnFork']
 const labels = {
   zh: {
     model: '拟标题模型', default: '{model}（默认）', unavailable: '{model}（不可用）',
@@ -21,6 +22,10 @@ const labels = {
     followHelp: '每累计两轮含网页发言的对话后检查任务是否变化。新增正文很短时跳过请求，手动起的标题会保留。',
     showHistory: '在会话历史中显示标题更新',
     showHistoryHelp: '在触发轮次下显示额外的拟标题请求和结果。待确认表示请求或结果尚未核实，Token 用量以模型服务计量为准。关闭时仍记录。',
+    restoreOnFork: '从旧回复分叉时恢复当时的标题',
+    restoreOnForkHelp: '用所选轮次的历史标题命名分支。当时未命名或没有可确认的记录时，沿用 Codex 的分支标题。',
+    restoreManualOnFork: '分叉时也回滚手动改名',
+    restoreManualOnForkHelp: '从手动改名之前的回复分叉时，恢复当时的标题。适用于在 DSH 中改的标题。',
     loading: '正在读取…', retry: '重试', catalogError: '无法读取可用模型。',
   },
   en: {
@@ -32,6 +37,10 @@ const labels = {
     followHelp: 'Check for a task change every two turns with web messages. Skip requests when the new text is very short. Keep manually set titles.',
     showHistory: 'Show title updates in conversation history',
     showHistoryHelp: 'Display extra title requests and their results below the triggering turn. Pending means the request or result has not been verified. Token usage is measured by the model provider. Requests are recorded when this is off.',
+    restoreOnFork: 'Restore the title when forking from an earlier reply',
+    restoreOnForkHelp: 'Give the fork the title from the selected turn. Use the Codex fork title if the conversation was unnamed or the previous title is unknown.',
+    restoreManualOnFork: 'Also roll back manual renames when forking',
+    restoreManualOnForkHelp: 'Restore the earlier title when forking from a reply before a manual rename in DSH.',
     loading: 'Loading…', retry: 'Retry', catalogError: 'Could not load available models.',
   },
 }
@@ -110,13 +119,14 @@ function ThreadTitleSettings({ t, useTitleSettings, useModelCatalog, load, loadM
     <PreferenceRow title={t('model')} description={<>{t('modelHelp')}<br />{t('costHelp')}</>}
       value={value} selectedLabel={settings ? (effortLabel ? `${label} · ${effortLabel}` : label) : t('loading')}
       options={settings && catalog && !saving ? options : loadingOptions} onSelect={select} />
-    {['follow', 'showHistory'].map(field => <div className={css.row} key={field}>
+    {titleSwitches.map(field => <div className={css.row} key={field}>
       <div className={css.rowText}>
         <div className={css.title}>{t(field)}</div>
         <div id={`${id}-${field}`} className={css.desc}>{t(`${field}Help`)}</div>
       </div>
       <Switch checked={settings?.[field] ?? false} label={t(field)} describedBy={`${id}-${field}`}
-        disabled={!settings || saving} onChange={value => void apply({ [field]: value })} />
+        disabled={!settings || saving || (field === 'restoreManualOnFork' && !settings.restoreOnFork)}
+        onChange={value => void apply({ [field]: value })} />
     </div>)}
     {(loadError || catalogError || saveError) && <div role="alert" className={css.desc}>
       {saveError || loadError || t('catalogError')}

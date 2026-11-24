@@ -1010,17 +1010,27 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
   const events = new EventEmitter()
   let turn = initialItem ? { id: 'first-turn', items: [initialItem] } : undefined
   const turns = turn ? [turn] : []
+  const branches = new Map()
+  let turnCount = turns.length
   let started = 0
   let detached = false
   const fixture = await fakeCodex(t, {
-    'thread/read': () => {
+    'thread/read': ({ threadId }) => {
+      if (branches.has(threadId)) return { result: { thread: branches.get(threadId).thread } }
       if (turn && emptyRollout) {
         emptyRollout = false
         return { error: { code: -32603, message: 'failed to read thread: rollout at /workspace/draft.jsonl is empty' } }
       }
       return { result: { thread } }
     },
-    'thread/turns/list': ({ sortDirection, limit, itemsView }) => {
+    'thread/turns/list': ({ threadId, sortDirection, limit, itemsView, cursor }) => {
+      const branch = branches.get(threadId)
+      if (branch) {
+        const ordered = sortDirection === 'asc' ? branch.turns : branch.turns.toReversed()
+        const start = Number(cursor ?? 0)
+        const end = start + Math.min(limit, 3)
+        return { result: { data: ordered.slice(start, end), nextCursor: end < ordered.length ? String(end) : null } }
+      }
       events.emit(detached ? 'title-revalidation' : 'history-read')
       if (turn && unindexedHistory) {
         unindexedHistory = false
@@ -1098,9 +1108,17 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
       events.emit('title-detached')
       return { result: {} }
     },
+    'thread/fork': ({ threadId, lastTurnId }) => {
+      const source = branches.get(threadId) ?? { thread, turns }
+      const end = lastTurnId ? source.turns.findIndex(entry => entry.id === lastTurnId) + 1 : source.turns.length
+      const branch = { ...source.thread, id: `branch-${branches.size + 1}`, forkedFromId: threadId }
+      branches.set(branch.id, { thread: branch, turns: source.turns.slice(0, end) })
+      return { result: { thread: branch } }
+    },
     'thread/name/set': ({ threadId, name }) => {
-      assert.equal(threadId, thread.id)
-      thread.name = name
+      const target = branches.get(threadId)?.thread ?? thread
+      assert.equal(threadId, target.id)
+      target.name = name.trim()
       fixture.broadcast({ method: 'thread/name/updated', params: { threadId, threadName: name } })
       events.emit('title-saved', name)
       return { result: {} }
@@ -1111,7 +1129,8 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
     const item = { type: 'userMessage', clientId: submission.clientUserMessageId,
       id: `item-${submission.id}`, content: submission.input }
     if (turn?.items.some(entry => entry.id === item.id)) return
-    turn = { id: turns.length ? `turn-${turns.length + 1}` : 'first-turn', status: 'inProgress', items: [item] }
+    turnCount++
+    turn = { id: turnCount === 1 ? 'first-turn' : `turn-${turnCount}`, status: 'inProgress', items: [item] }
     turns.push(turn)
     thread.preview ||= submission.input.find(part => part.type === 'text')?.text ?? ''
     thread.status = { type: 'active' }
@@ -1125,6 +1144,11 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
   return {
     ...fixture, get, profile, thread, post, text,
     send: (clientUserMessageId = 'first', input = [text]) => post({ action: 'prompt', mode: 'queue', clientUserMessageId, input }),
+    async fork(lastTurnId, threadId = thread.id, request = get) {
+      const response = await postCodex(request, 'thread-action', { action: 'fork', threadId, lastTurnId })
+      assert.equal(response.status, 200)
+      return (await response.json()).thread
+    },
     wait: event => once(events, event, { signal: AbortSignal.timeout(2_000) }),
     inferenceCount: () => started,
     replaceFirstItem: item => { turn.items[0] = item },
@@ -1248,7 +1272,7 @@ test('拟标题请求显式使用所选模型的默认档位', async t => {
   }
 })
 
-test('后续标题只按网页已结束轮次计数，两轮短输入跳过模型', async t => {
+test('后续标题只按网页已结束轮次计数，两轮短输入跳过模型，分叉恢复当时的标题', async t => {
   const title = await titleFixture(t)
   const settings = await postCodex(title.get, 'title-settings', { selection: { reasoningEffort: 'medium' }, follow: true })
   assert.equal(settings.status, 200)
@@ -1278,12 +1302,71 @@ test('后续标题只按网页已结束轮次计数，两轮短输入跳过模�
   assert.match(input, /检查网页标题/)
   assert.match(input, /换个任务/)
   assert.match(input, /打包/)
+  assert.equal((await postCodex(title.get, 'title-settings', { restoreManualOnFork: false })).status, 200)
+  assert.equal((await title.fork('turn-6')).name, '检查网页标题')
+  assert.equal((await title.fork('turn-7')).name, '排查会话队列')
+  assert.equal(title.inferenceCount(), 2)
   assert.equal((await postCodex(title.get, 'title-settings', { showHistory: true })).status, 200)
   assert.equal((await title.post({ action: 'rename', name: '手动命名' }, 'thread-action')).status, 200)
   const history = await (await title.get('/api/codex/turns?threadId=main&opening=1')).json()
   assert.deepEqual(history.titleUpdates, [{
     turnId: 'turn-7', outcome: 'renamed', oldTitle: '检查网页标题', newTitle: '排查会话队列',
   }])
+})
+
+test('从旧回复分叉时恢复手动改名前的标题，并按分叉保留的轮次再次恢复', async t => {
+  const title = await titleFixture(t)
+  title.thread.name = '会话初始标题'
+  const firstTurn = title.fromCli('第一轮')
+  const secondTurn = title.fromCli('第二轮')
+  assert.equal((await title.post({ action: 'rename', name: '  第二轮标题  ' }, 'thread-action')).status, 200)
+  for (let index = 3; index <= 7; index++) title.fromCli(`第 ${index} 轮`)
+  const eighthTurn = title.fromCli('第八轮')
+  assert.equal((await title.post({ action: 'rename', name: '第八轮标题' }, 'thread-action')).status, 200)
+
+  const reopened = title.openRoutes(title.profile)
+  const past = await title.fork('turn-7', title.thread.id, reopened)
+  assert.equal(past.name, '第二轮标题')
+  assert.equal((await title.fork(firstTurn, past.id, reopened)).name, '会话初始标题')
+  assert.equal((await title.fork(secondTurn, past.id, reopened)).name, '第二轮标题')
+  assert.equal((await title.fork(eighthTurn)).name, '第八轮标题')
+  assert.equal((await title.fork()).name, '第八轮标题')
+  assert.equal(title.thread.name, '第八轮标题')
+
+  assert.equal((await postCodex(title.get, 'title-settings', { restoreManualOnFork: false })).status, 200)
+  assert.equal((await title.fork('turn-7')).name, '第八轮标题')
+  assert.equal((await postCodex(title.get, 'title-settings', { restoreOnFork: false, restoreManualOnFork: true })).status, 200)
+  assert.equal((await title.fork('turn-7')).name, '第八轮标题')
+  assert.equal((await postCodex(title.get, 'title-settings', { restoreOnFork: true })).status, 200)
+  assert.equal((await title.fork('turn-7')).name, '第二轮标题')
+  assert.equal(title.inferenceCount(), 0)
+})
+
+test('分叉点没有标题或源标题由外部改名时保留原生标题', async t => {
+  const title = await titleFixture(t)
+  const firstTurn = title.fromCli('第一轮仍未命名')
+  title.fromCli('第二轮手动命名')
+  assert.equal((await title.post({ action: 'rename', name: '手动标题' }, 'thread-action')).status, 200)
+  assert.equal((await title.fork(firstTurn)).name, '手动标题')
+  title.thread.name = '在 CLI 修改的标题'
+  assert.equal((await title.fork(firstTurn)).name, '在 CLI 修改的标题')
+  assert.deepEqual(title.messages.filter(({ method }) => method === 'thread/name/set').map(({ params }) => params.threadId), ['main'])
+})
+
+test('原生回退删掉改名轮次后，多次分叉仍能沿已记录的标题恢复', async t => {
+  const title = await titleFixture(t)
+  title.thread.name = '初始标题'
+  const earlier = title.fromCli('较早回复')
+  title.fromCli('后来被回退的回复')
+  assert.equal((await title.post({ action: 'rename', name: '回退前标题' }, 'thread-action')).status, 200)
+  title.revertLast()
+  const replacement = title.fromCli('回退后的新回复')
+  assert.equal((await title.post({ action: 'rename', name: '回退后标题' }, 'thread-action')).status, 200)
+
+  assert.equal((await title.fork(earlier)).name, '初始标题')
+  const branch = await title.fork(replacement)
+  assert.equal(branch.name, '回退后标题')
+  assert.equal((await title.fork(earlier, branch.id)).name, '初始标题')
 })
 
 test('同一轮的两次网页插话合计一轮，并且可触发新任务拟标题', async t => {
@@ -1323,14 +1406,19 @@ test('拟标题模型、强度和开关保存到 Profile，换模型时清除强
   assert.equal(model.status, 200)
   assert.equal(follow.status, 200)
   const reopened = fixture.openRoutes(directory)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection, follow: true, showHistory: false })
+  const expected = { selection, follow: true, showHistory: false, restoreOnFork: true, restoreManualOnFork: true }
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), expected)
   const next = { provider: 'custom', model: 'no-effort-model' }
   assert.equal((await postCodex(reopened, 'title-settings', { selection: { ...next, reasoningEffort: 'high' } })).status, 400)
   assert.equal((await postCodex(reopened, 'title-settings', { selection: { reasoningEffort: 'high' } })).status, 400)
   assert.equal((await postCodex(reopened, 'title-settings', { selection: next })).status, 200)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: next, follow: true, showHistory: false })
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { ...expected, selection: next })
   assert.equal((await postCodex(reopened, 'title-settings', { selection: null })).status, 200)
-  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true, showHistory: false })
+  assert.equal((await postCodex(reopened, 'title-settings', { restoreOnFork: 'false' })).status, 400)
+  assert.equal((await postCodex(reopened, 'title-settings', { restoreManualOnFork: false })).status, 200)
+  const restarted = fixture.openRoutes(directory)
+  assert.deepEqual(await (await restarted('/api/codex/title-settings')).json(),
+    { ...expected, selection: null, restoreManualOnFork: false })
 })
 
 test('拟标题注记关闭显示时仍保存，并可在线显示和隐藏', async t => {
@@ -2459,7 +2547,7 @@ test('会话管理只发送批准的原生 RPC，并保留已读版本冲突', a
   assert.equal((await post('pin', { pinned: true })).status, 200)
   assert.equal((await post('thread/resume')).status, 400)
   assert.deepEqual(messages.map(message => message.method).filter(method => !/^initialize/.test(method)),
-    ['thread/readState/update', 'thread/name/set', 'thread/section/move'])
+    ['thread/readState/update', 'thread/read', 'thread/name/set', 'thread/section/move'])
 })
 
 test('会话生命周期使用原生归档、删除和按轮次分支', async t => {
@@ -2535,7 +2623,8 @@ test('归档会话明确提交改名时才取消归档，保持原线程未加�
   assert.equal(archived, false)
   assert.equal(thread.name, '新名称')
   assert.deepEqual(messages.filter(({ method }) => method.startsWith('thread/')).map(({ method }) => method),
-    ['thread/name/set', 'thread/read', 'thread/list', 'thread/unarchive', 'thread/name/set'])
+    ['thread/read', 'thread/turns/list', 'thread/name/set', 'thread/read', 'thread/list', 'thread/unarchive',
+      'thread/turns/list', 'thread/name/set'])
 })
 
 test('已归档源会话收到明确确认后才取消归档，并直接使用原生分叉', async t => {
