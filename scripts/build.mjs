@@ -2,18 +2,20 @@ import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { patchedDshSource } from './patched-dsh-source.mjs'
 import { dshTrajectorySource } from './dsh-trajectory.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const outdir = process.argv[2] ?? 'dist'
 const { name } = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
+const scheduleFork = new URL('../forks/dsh-schedule-for-codex/', import.meta.url)
+const scheduleLicense = (await readFile(new URL('LICENSE', scheduleFork), 'utf8')).trimEnd()
 const clientLicenses = await Promise.all([
-  '@deepseek-ai/dsh-client-ui-trajectory', '@deepseek-ai/dsh-client-ui-schedule', '@tanstack/react-virtual', '@tanstack/virtual-core',
+  '@deepseek-ai/dsh-client-ui-trajectory', '@tanstack/react-virtual', '@tanstack/virtual-core',
 ].map(async name => {
   const notice = await readFile(new URL('./LICENSE', import.meta.resolve(`${name}/package.json`)), 'utf8')
   return `/*! ${name}\n${notice.trimEnd()}\n*/`
 }))
+clientLicenses.push(`/*! @deepseek-ai/dsh-client-ui-schedule\n${scheduleLicense}\n*/`)
 
 const client = await build({
   absWorkingDir: root,
@@ -25,10 +27,7 @@ const client = await build({
   jsx: 'automatic',
   // DSH 时间模块从 rrule 的 CommonJS 入口读取默认导出。
   alias: { rrule: 'rrule/dist/es5/rrule.js' },
-  plugins: await Promise.all([
-    dshTrajectorySource(),
-    patchedDshSource('@deepseek-ai/dsh-client-ui-schedule', '../forks/dsh-schedule-for-codex/client.patch'),
-  ]),
+  plugins: [await dshTrajectorySource()],
   platform: 'browser',
   write: false,
   external: [
@@ -51,18 +50,15 @@ const styleMeta = clientStyles ? `, meta: () => ({ stylesheets: { 'client.css': 
 await mkdir(dirname(clientEntry.path), { recursive: true })
 await writeFile(clientEntry.path, `${clientEntry.text.trimEnd()}${styleMeta} });\n`)
 
-const schedule = '@deepseek-ai/dsh-schedule'
-const scheduleLicense = await readFile(new URL('./LICENSE', import.meta.resolve(schedule + '/package.json')), 'utf8')
 await build({
   absWorkingDir: root,
-  entryPoints: [fileURLToPath(import.meta.resolve(schedule + '/src/index.ts'))],
+  entryPoints: [fileURLToPath(new URL('host/index.ts', scheduleFork))],
   outfile: join(outdir, 'dsh-schedule-for-codex.mjs'),
   bundle: true,
   format: 'cjs',
   platform: 'node',
   external: ['@deepseek-ai/dsh-storage-domain'],
-  plugins: [await patchedDshSource(schedule, '../forks/dsh-schedule-for-codex/host.patch', '../forks/dsh-schedule-for-codex/runtime.patch')],
-  banner: { js: `/*! ${schedule}\n${scheduleLicense.trimEnd()}\n*/
+  banner: { js: `/*! @deepseek-ai/dsh-schedule\n${scheduleLicense}\n*/
 import { createRequire } from 'node:module'
 const hostRequire = createRequire(import.meta.url)
 export function createScheduleForCodex(storageDomain, ctx, delivery, changed, domainName) {

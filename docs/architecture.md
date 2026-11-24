@@ -32,7 +32,7 @@ Build 工作流在分支和 tag 推送时测试、打包并上传产物。版本
 
 ### 定时任务
 
-`dsh-schedule-for-codex` 以锁定版本的官方 Schedule 源码构建。补丁沿用时间规则、任务管理、存储格式和界面组件，按 Profile 将任务保存在独立的 `codex_schedule_*` 域。Codex 页面通过独立的同源接口和变更流读取该域；原生 DSH 页继续使用官方 Schedule 的接口和存储。Host 插件的生命周期与页面切换独立。
+`dsh-schedule-for-codex` 直接构建仓库中维护的 Schedule 源码。它沿用官方的时间规则、任务管理、存储格式和界面组件，按 Profile 将任务保存在独立的 `codex_schedule_*` 域。Codex 页面通过独立的同源接口和变更流读取该域；原生 DSH 页继续使用官方 Schedule 的接口和存储。Host 插件的生命周期与页面切换独立。上游版本和更新流程见 [fork 维护说明](../forks/dsh-schedule-for-codex/README.md)。
 
 投递使用现有的线程恢复、串行提交和原生队列逻辑。写队列前先持久保存消息标识，回执不明时从原生队列与历史核对同一次投递。Host 在确认接纳后推进计划并记录投递。已接纳但仍在队列或当前轮次的消息会推迟该任务的下一次投递。
 

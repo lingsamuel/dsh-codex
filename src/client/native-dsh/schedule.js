@@ -1,4 +1,4 @@
-import { apply, inject } from '@deepseek-ai/dsh-client-ui-schedule/src/client/index.ts'
+import { apply, inject } from '../../../forks/dsh-schedule-for-codex/client/index.ts'
 import { codexSchedulePath } from '../../shared/schedule-for-codex.js'
 
 /** 管理页沿用官方组件，读写和变更通知只使用 Codex 的任务入口。 */
