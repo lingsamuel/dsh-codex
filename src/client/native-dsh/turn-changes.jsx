@@ -1,5 +1,5 @@
 import {
-  Button, CodeBlock, DiffBlock, DisclosureRow, FileTypeIcon,
+  Button, CodeBlock, DiffBlock, DisclosureRow, FileTypeIcon, PathLabel,
   IconChevronDownOutlineRegular, IconChevronUpOutlineRegular, IconEditOutlineRegular, IconInspectOutlineRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useMemo, useState } from 'react'
@@ -44,7 +44,8 @@ function ChangedFileList({ files, copy, t }) {
   return <div style={stackStyle}>
     {visibleFiles.map(file => {
       const selected = file.path === selectedPath
-      return <DisclosureRow key={file.path} icon={<FileTypeIcon path={file.path} size={16} />} title={file.path}
+      return <DisclosureRow key={file.path} icon={<FileTypeIcon path={file.path} size={16} />} title=""
+        collapsedContent={<PathLabel path={file.path} />} keepContentWhenOpen
         open={selected} expandable expandOnRowClick onToggle={() => setSelectedPath(selected ? null : file.path)}>
         {selected && <FileDiffs file={file} copy={copy} />}
       </DisclosureRow>
