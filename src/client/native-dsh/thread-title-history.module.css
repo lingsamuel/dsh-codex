@@ -1,0 +1,16 @@
+/* 原生折叠栏固定为单行，允许标题记录随文字增加行高。 */
+.row {
+  height: auto;
+  min-height: calc(24px + var(--dsh-content-font-delta, 0px));
+}
+
+.title {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: normal;
+}
+
+.title,
+.details {
+  overflow-wrap: anywhere;
+}
