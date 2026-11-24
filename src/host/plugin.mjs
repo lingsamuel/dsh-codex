@@ -9,6 +9,7 @@ import { createVisualizeRoute, visualizeMaxBytes } from './visualize-preview.mjs
 import { createFileReferenceRoute } from './file-references.mjs'
 import { createSessionExportRoute } from './session-export.mjs'
 import { installDualWebEntry } from './dual-web-entry.mjs'
+import { installCodexSchedule } from './schedule-for-codex.mjs'
 import { createWebModeRoute, openWebModes } from './web-mode.mjs'
 import { resolveWorkspaceFileScope } from './workspace-paths.mjs'
 import { codexFileScopePrefix } from '../shared/dual-web-entry.js'
@@ -56,6 +57,7 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     ctx.provide('sandboxPolicy', { workspaceRoot: process.cwd() })
   }
   const submit = createThreadSubmissionQueue()
+  installCodexSchedule(ctx, register, submit, owner.signal)
   const terminalOwners = createSidebarTerminalOwners()
   ctx.inject(['typert', 'subprocess', 'sandboxPolicy'], scope => installCodexSidebarTerminals(scope, {
     owners: terminalOwners,

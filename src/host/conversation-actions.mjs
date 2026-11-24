@@ -9,7 +9,7 @@ import { fileAttachmentOf, splitFileAttachmentInput } from '../shared/file-attac
 import { createProjectOpener } from './project-actions.mjs'
 import { hasNoMaterializedHistory, readLatestTurn, readThreadTurns } from './live-history.mjs'
 import { updateModelSelection, validateModelDraft } from './models.mjs'
-import { addressableThread, createThreadSubmissionQueue, readConversationQueue, resumeThread,
+import { addressableThread, createThreadSubmissionQueue, findThreadSubmission, readConversationQueue, resumeThread,
   unarchiveForSubmission, waitForThreadActivity } from './thread-runtime.mjs'
 import { createThreadTitles } from './thread-titles.mjs'
 import { resolveInputSkills } from './skills.mjs'
@@ -379,24 +379,15 @@ export function createConversationActionRoute(socketPath, ownerSignal, submit = 
   }
 
   async function recoverPrompt(rpc, thread, clientUserMessageId, reportQueuedForLater) {
-    const queuedSubmission = (await readConversationQueue(rpc, thread.id)).find(item => item.clientUserMessageId === clientUserMessageId)
+    const result = await findThreadSubmission(rpc, thread.id, clientUserMessageId)
+    const { queuedSubmission, turn } = result ?? {}
     if (queuedSubmission) {
       const { started, queuedForLater } = await startOnlyQueuedMessage(rpc, thread.id, queuedSubmission.id, reportQueuedForLater)
       scheduleTitle(thread, clientUserMessageId, started?.turn?.id)
       return { queuedSubmission, ...(queuedForLater && { queuedForLater }) }
     }
-    // 接纳后的消息可能已离开队列，按原生客户端 ID 向后查找。
-    let cursor
-    do {
-      const page = await readThreadTurns(rpc, { threadId: thread.id, limit: 25, cursor, sortDirection: 'desc', itemsView: 'full' })
-      const turn = page.data.find(candidate => candidate.items?.some(item => item.type === 'userMessage' && item.clientId === clientUserMessageId))
-      if (turn) {
-        scheduleTitle(thread, clientUserMessageId, turn.id)
-        return { turn }
-      }
-      if (cursor === page.nextCursor) return
-      cursor = page.nextCursor
-    } while (cursor)
+    if (turn) scheduleTitle(thread, clientUserMessageId, turn.id)
+    return result
   }
 
   async function recoverWorktreePrompt(rpc, thread, clientUserMessageId, signal, reportQueuedForLater) {

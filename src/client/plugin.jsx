@@ -37,6 +37,7 @@ import { installWorktrees } from './native-dsh/worktree.jsx'
 import { installSidebarBrand } from './native-dsh/branding.jsx'
 import { installStartupPage } from './native-dsh/startup.jsx'
 import { installTrajectory } from './native-dsh/trajectory.jsx'
+import { installCodexSchedule } from './native-dsh/schedule.js'
 import { installWebMode } from './web-mode.jsx'
 import { webModePath } from '../shared/web-mode.js'
 
@@ -70,6 +71,7 @@ export async function apply(ctx) {
   installComposer(ctx, catalog.store)
   const moveSidebarTerminals = installSidebarTerminals(ctx)
   const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx), moveSidebarTerminals)
+  installCodexSchedule(ctx, controller.signal)
   installStartupPage(ctx, startupReady)
   installTrajectory(ctx)
   installProjectWorkspaces(ctx, catalog)

@@ -1,0 +1,378 @@
+--- a/client/index.ts
++++ b/client/index.ts
+@@ -48,7 +48,6 @@
+ import { createDeleteToastSource, ScheduleDeleteToast } from './DeleteToast.tsx'
+ import { SCHEDULE_TASK_ID, SCHEDULE_TASK_KIND, scheduleTaskDefinition } from './definition.ts'
+ import { ScheduleCatalogAction } from './ScheduleCatalogAction.tsx'
+-import { ScheduleTurnCard, type ScheduleTurnCardInjected } from './ScheduleTurnCard.tsx'
+ import { scheduleTurnDefinition } from './schedule-turn.ts'
+ import { ScheduleTaskTab, type ScheduleTaskBindingInjected, type ScheduleTaskCatalogInjected, type ScheduleTaskTabInjected } from './ScheduleTaskTab.tsx'
+ import { ScheduleTaskTabTitle } from './ScheduleTaskTabTitle.tsx'
+@@ -64,7 +63,7 @@
+ import { en as managerEn, ja as managerJa, es as managerEs, fr as managerFr, de as managerDe, ru as managerRu, pt as managerPt, zh as managerZh, type TaskManagerKey } from './task-manager-locales.ts'
+
+ const MANAGER_NS = 'schedule.manager'
+-const PANEL_ID = 'schedules' as MainPanelId
++const PANEL_ID = 'codex-schedules' as MainPanelId
+
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface LocaleNamespaceMap {
+@@ -77,8 +76,8 @@
+
+ /** Required services for catalogs, ambient Session marks, the right Sidebar, Remote queries, linked-Session navigation, and access. */
+ export const inject = [
+-  'slots', 'locale', 'remote', 'remote.schedule', 'conversation', 'uiConversation', 'uiWorkspace', 'sessions',
+-  'workspaces', 'sidebarRightTabs', 'sidebarRight', 'remoteAccess',
++  'slots', 'locale', 'uiWorkspace', 'sessions',
++  'workspaces', 'sidebarRightTabs', 'sidebarRight',
+ ]
+
+ async function settle<T>(call: () => Promise<RemoteResult<T>>): Promise<RemoteResult<T> | undefined> {
+@@ -103,7 +102,10 @@
+  * one created task while the current Peer may read the task catalog.
+  * @param ctx - browser services used by these contributions.
+  */
+-export function apply(ctx: ClientContext): void {
++export function apply(ctx: ClientContext, transport: {
++  request: <T>(method: string, params?: unknown) => Promise<RemoteResult<T>>
++  subscribe: (listener: () => void) => () => void
++}): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en, ja, es, fr, de, ru, pt }), 'ui-schedule: dictionaries')
+   const managerDictionaries = {
+     zh: managerZh,
+@@ -118,19 +120,15 @@
+   ctx.effect(() => ctx.locale.register(MANAGER_NS, managerDictionaries), 'ui-schedule: manager dictionaries')
+   const t = ctx.locale.bind(MANAGER_NS)
+   ctx.effect(() => ctx.sidebarRightTabs.register(scheduleTaskDefinition(t)), 'ui-schedule: task tab type')
+-  // The created task is a Turn-level element, not a Tool-group row: the Turn
+-  // Definition publishes the settled result and the tail list entry below
+-  // renders the card beneath the closing prose.
+-  ctx.uiConversation.events.register(scheduleTurnDefinition)
+-  ctx.remoteAccess.whenAccess('schedule/catalog', function* () {
++  ctx.effect(function* () {
+     const manager = createCatalogSource<ScheduleCatalogEntry>({
+-      list: () => ctx.remote.schedule.catalog(),
++      list: () => transport.request('catalog'),
+       remove: async (id): Promise<RemoteResult<ScheduleDeleteResult>> => {
+-        const result = await ctx.remote.schedule.edit({ id, action: 'delete' })
++        const result = await transport.request('edit', { id, action: 'delete' })
+         if (!result.ok) return result
+         return { ok: true, value: 'deleted' in result.value ? { id, deleted: true } : { id, deleted: false, code: 'schedule_not_found' } }
+       },
+-      subscribeChanged: listener => ctx.remote.$on('schedule/changed', listener),
++      subscribeChanged: transport.subscribe,
+       subscribeReset: listener => ctx.on('connection/reset', listener),
+     })
+     // One outcome store behind one `shell.overlay` entry announces every deletion
+@@ -164,18 +162,18 @@
+      * @returns the settled bulk-removal outcome.
+      */
+     const clearEnded = createClearEnded({
+-      removeInactive: () => ctx.remote.schedule.deleteInactive(),
++      removeInactive: () => transport.request('deleteInactive'),
+       refresh,
+     })
+     const detail: TaskDetailInjected & ScheduleTaskCatalogInjected = {
+       hooks: manager.hooks,
+       onDelete: reportedDelete(manager.onDelete),
+       onRetry: manager.onRetry,
+-      loadHistory: request => ctx.remote.schedule.history(request),
++      loadHistory: request => transport.request('history', request),
+       onOpenSession: openSession,
+       hostActions: {
+         edit: async (request) => {
+-          const result = await settle(() => ctx.remote.schedule.edit(request))
++          const result = await settle(() => transport.request('edit', request))
+           if (result === undefined) return { failed: 'host.saveError' }
+           if (!result.ok) return { failed: inputCorrection(result.error) ?? 'host.saveError' }
+           await refresh()
+@@ -183,14 +181,14 @@
+           return { failed: result.value.code === 'schedule_conflict' ? 'host.conflict' : 'detail.missing' }
+         },
+         run: async (id) => {
+-          const result = await settle(() => ctx.remote.schedule.run({ id }))
++          const result = await settle(() => transport.request('run', { id }))
+           if (result === undefined || !result.ok) return { failed: 'host.runError' }
+           await refresh()
+           if (!('code' in result.value)) return 'queued'
+           return { failed: result.value.code === 'schedule_execution_pending' ? 'host.executionPending' : 'detail.missing' }
+         },
+         loadNewSessionInterval: async () => {
+-          const result = await settle(() => ctx.remote.schedule.deliveryLimits())
++          const result = await settle(() => transport.request('deliveryLimits'))
+           return result?.ok === true ? result.value.newSessionIntervalSeconds : undefined
+         },
+       },
+@@ -215,11 +213,6 @@
+       locale: MANAGER_NS,
+       inject: (): ScheduleTaskCatalogInjected & ScheduleTaskBindingInjected => ({ hooks: detail.hooks, taskBindings }),
+     }, ScheduleTaskTabTitle))
+-    // New and every recommendation open a new conversation with a request in its
+-    // composer, appended to the draft of a reused blank conversation.
+-    const startWithPrompt = (prompt: string): void => {
+-      ctx.uiWorkspace.startSession(undefined, { prompt, whenDraftExists: 'append' })
+-    }
+     yield ctx.slots.inject('main', () => ctx.slots.register({
+       name: 'main',
+       key: PANEL_ID,
+@@ -227,14 +220,12 @@
+       store: createEditorStore(),
+       inject: (): TaskManagerInjected => ({
+         ...detail,
+-        onNewTask: () => { startWithPrompt(t('host.createPrompt')) },
+-        onUseRecommendation: startWithPrompt,
+         onClearEnded: async () => {
+           const outcome = await clearEnded()
+           deleteToast.reportClear(outcome)
+         },
+         onCreateTask: async (request) => {
+-          const result = await settle(() => ctx.remote.schedule.create(request))
++          const result = await settle(() => transport.request('create', request))
+           if (result === undefined) return { failed: 'host.createError' }
+           if (!result.ok) return { failed: inputCorrection(result.error) ?? 'host.createError' }
+           manager.retainCreated(result.value)
+@@ -250,19 +241,6 @@
+       locale: MANAGER_NS,
+       label: () => t('panel'),
+     }, TaskManagerIcon))
+-    yield ctx.slots.inject('conversation.chat.turnTail', () => ctx.slots.register({
+-      name: 'conversation.chat.turnTail',
+-      id: 'schedule-created',
+-      order: 20,
+-      locale: MANAGER_NS,
+-      inject: (sessionId: SessionId): ScheduleTurnCardInjected => ({
+-        hooks: { catalog: manager.hooks.catalog },
+-        onRetry: manager.onRetry,
+-        openTaskDetail: (id) => {
+-          ctx.sidebarRight.openTab(SCHEDULE_TASK_KIND, { params: { sessionId, id } })
+-        },
+-      }),
+-    }, ScheduleTurnCard))
+     yield ctx.slots.inject(
+       'conversation.session.header.utilities',
+       () => ctx.slots.register({
+--- a/client/TaskManagerPage.tsx
++++ b/client/TaskManagerPage.tsx
+@@ -20,7 +20,6 @@
+ import { formatScheduleFrequency, nextRunParts, taskName, zoneLabel } from './schedule-format.ts'
+ import type { FrequencyZone } from './schedule-format.ts'
+ import { ScheduleEmptyIllustration } from './ScheduleEmptyIllustration.tsx'
+-import { ScheduleRecommendations } from './ScheduleRecommendations.tsx'
+ import css from './TaskManagerPage.module.css'
+
+ /** Injected catalog and task actions for the management page. */
+@@ -31,13 +30,11 @@
+    * Start a new Session, where a reminder is created by asking the model to
+    * schedule it, using the existing new-conversation action.
+    */
+-  readonly onNewTask: () => void
+   /**
+    * Start a new Session with a recommended task's request prefilled, through
+    * the same new-conversation action as `onNewTask`.
+    * @param prompt - the recommendation's localized request.
+    */
+-  readonly onUseRecommendation: (prompt: string) => void
+   /**
+    * Remove every ended Host task, after this page has confirmed the action.
+    *
+@@ -66,8 +63,7 @@
+  * @returns the searchable task list beside the selected task's detail.
+  */
+ export function TaskManagerPage(props: TaskManagerPageProps) {
+-  const { useCatalog, onNewTask, onUseRecommendation, onClearEnded, onRetry, onCreateTask, t } = props
+-  const [createMenuOpen, setCreateMenuOpen] = useState(false)
++  const { useCatalog, onClearEnded, onRetry, onCreateTask, t } = props
+   const [manualOpen, setManualOpen] = useState(false)
+   const catalog = useCatalog(snapshot => snapshot)
+   const { records, status } = catalog
+@@ -85,7 +81,6 @@
+   const { record: catalogRecord, task: selected,
+     props: { id: detailId, confirmId, onConfirm: setConfirmId, onTabChange: setTab } } = detail
+   const rowRef = useRef<HTMLButtonElement | null>(null)
+-  const createTriggerRef = useRef<HTMLButtonElement>(null)
+   const headingRef = useRef<HTMLHeadingElement>(null)
+   const clearTriggerRef = useRef<HTMLButtonElement | null>(null)
+   // Set when the confirmation opens: its settled removal can hide the trigger
+@@ -108,8 +103,6 @@
+   ), [records, statusFilter])
+   const rows = useMemo(() => rowIndex.search(search), [rowIndex, search])
+
+-  const showRecommendations = status === 'ready' && rows.length === 0 && search.trim() === ''
+-    && (statusFilter === 'active' || statusFilter === 'all')
+   const emptyTitle = search.trim() !== '' ? 'list.noMatches'
+     : statusFilter === 'paused' ? 'list.emptyPaused'
+       : statusFilter === 'ended' ? 'list.emptyInactive'
+@@ -206,23 +199,8 @@
+             <div className={css.pageHeading}>
+               <h1 ref={headingRef} tabIndex={-1}>{t('title')}</h1>
+               <div className={css.creationActions}>
+-                <span className={css.createGroup} role="group" aria-label={t('host.create')}>
+-                  <Button variant="primary" size="sm" className={clsx(css.headerAction, css.createPrimary)} icon={<IconPlusOutlineRegular size={13} />}
+-                    onClick={onNewTask}>{t('new.action')}</Button>
+-                  <Menu open={createMenuOpen} onClose={() => { setCreateMenuOpen(false) }} align="end" portal autoFocus
+-                    listClassName={css.createMenu}
+-                    anchor={<Button ref={createTriggerRef} variant="primary" size="sm" className={css.createMore} aria-label={t('host.createMethod')}
+-                      aria-haspopup="menu" aria-expanded={createMenuOpen} onClick={() => { setCreateMenuOpen(value => !value) }}>
+-                      <IconChevronDownOutlineRegular size={12} />
+-                    </Button>}>
+-                    <MenuItemButton icon={<ReferenceIconRegular kind="session" size={14} />}
+-                      onSelect={() => { setCreateMenuOpen(false); onNewTask() }}>{t('host.chatCreate')}</MenuItemButton>
+-                    <MenuItemButton icon={<IconEditOutlineRegular size={14} />}
+-                      onSelect={() => { setCreateMenuOpen(false); createManually(createTriggerRef.current) }}>
+-                      {t('host.manualCreate')}
+-                    </MenuItemButton>
+-                  </Menu>
+-                </span>
++                <Button variant="primary" size="sm" className={css.headerAction} icon={<IconPlusOutlineRegular size={13} />}
++                  onClick={event => { createManually(event.currentTarget) }}>{t('new.action')}</Button>
+               </div>
+             </div>
+             <div className={css.filters}>
+@@ -285,7 +263,7 @@
+                 </Tooltip>}
+               />}
+             </div>
+-            <div className={clsx(css.list, showRecommendations && css.listWithRecommendations)}>
++            <div className={css.list}>
+               {selected === undefined && <CatalogFeedback status={status} populated={rows.length > 0} onRetry={onRetry} t={t} />}
+               {status === 'ready' && rows.length === 0 && <div className={css.empty} role="status">
+                 <ScheduleEmptyIllustration className={css.emptyIllustration} />
+@@ -294,7 +272,6 @@
+                   {t('empty.action')}
+                 </Button>
+               </div>}
+-              {showRecommendations && <ScheduleRecommendations t={t} onUse={onUseRecommendation} />}
+               <ul className={css.listRows} aria-label={t('list.label')} aria-busy={status === 'loading'}>
+                 {rows.map((record) => {
+                   // One pair per row: the same absolute stamp and distance reach
+--- a/client/TaskDetail.tsx
++++ b/client/TaskDetail.tsx
+@@ -5,7 +5,6 @@
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ScheduleCatalogEntry, ScheduleCreateRequest, ScheduleEditRequest, ScheduleId } from '@deepseek-ai/dsh-schedule/client'
+ import type { SessionId } from '@deepseek-ai/dsh-session/types'
+-import type { SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
+ import {
+   Button, IconCloseOutlineRegular, IconEllipsisOutlineRegular, IconPauseOutlineRegular, IconPlayOutlineRegular,
+   IconChevronRightOutlineRegular, Menu, MenuItemButton, Modal, Tooltip,
+@@ -13,7 +12,7 @@
+ import { CatalogFeedback } from './CatalogFeedback.tsx'
+ import { DeliveryHistory, type DeliveryHistoryInjected } from './DeliveryHistory.tsx'
+ import type { CatalogDeleteOutcome, CatalogSnapshot } from './catalog-source.ts'
+-import { TaskEditorFields, draftTarget, newTaskDraft, projectChoices, reapplyTaskDraft, taskDraft, taskDraftIssue, taskDraftPatch } from './TaskEditorFields.tsx'
++import { TaskEditorFields, draftTarget, newTaskDraft, reapplyTaskDraft, taskDraft, taskDraftIssue, taskDraftPatch } from './TaskEditorFields.tsx'
+ import type { TaskEditorDraft } from './TaskEditorFields.tsx'
+ import type { TaskEditorStoreProps } from './editor-store.ts'
+ import { timingFromDraft } from './editor-timing.ts'
+@@ -207,12 +206,8 @@
+   const cached = stored?.base !== undefined && !storedDirty && !stored.pending && stored.failure === undefined
+     && stored.base.updatedAt !== task?.updatedAt ? undefined : stored
+   const base = cached?.base ?? task
+-  const input = cached?.draft ?? (task === undefined ? initial : taskDraft(task))
+-  const projects = projectChoices(workspaces.items, t('host.defaultProject'))
+-  // Until a directory is chosen, a new form follows the Workspace list as it arrives.
+-  const draft = task === undefined && input.cwd === '' ? { ...input, cwd: projects.defaultCwd } : input
+-  const dirty = base === undefined
+-    ? JSON.stringify(draft) !== JSON.stringify({ ...initial, cwd: initial.cwd || projects.defaultCwd }) : storedDirty
++  const draft = cached?.draft ?? (task === undefined ? initial : taskDraft(task))
++  const dirty = base === undefined ? JSON.stringify(draft) !== JSON.stringify(initial) : storedDirty
+   const issue = dirty ? taskDraftIssue(draft, changes) : undefined
+   const valid = issue === undefined
+   const [actionPending, setPending] = useState<'toggle' | 'run' | 'delete' | null>(null)
+@@ -261,7 +256,11 @@
+   const nextRunAt = task === undefined ? '' : taskNextRunAt(task)
+   const next = task === undefined ? undefined : nextRunParts(nextRunAt, t('time.locale'), now, t)
+   // SessionListState gives every listed id a byId row.
+-  const choices = sessions.ids.map(value => ({ value, label: (sessions.byId[value] as SessionSummary).displayTitle }))
++  const choices = sessions.ids.flatMap(value => {
++    const session = sessions.byId[value]
++    return session !== undefined && !session.blank
++      && !workspaces.archivedSessionIds.includes(value) ? [{ value, label: session.displayTitle }] : []
++  })
+   const setDraft = (value: TaskEditorDraft): void => {
+     props.actions.setDraft(key, { base, draft: value, ...(task === undefined ? { initial } : {}),
+       ...(cached?.failure === 'host.conflict' ? { failure: cached.failure } : {}) })
+@@ -389,7 +388,7 @@
+             : failure !== null && <p className={css.saveFailure} role="alert">{t(failure)}</p>}
+           <TaskEditorFields draft={draft} onChange={setDraft}
+             disabled={pending || executionActive || deletingTask} held={actionHold}
+-            projects={projects} original={base} t={t} />
++            sessions={choices} t={t} />
+           {draft.target === 'new'
+             && <NewSessionLimit load={hostActions.loadNewSessionInterval} t={t} />}
+           {failure === null && issue !== undefined && issue !== 'incomplete'
+--- a/client/TaskEditorFields.tsx
++++ b/client/TaskEditorFields.tsx
+@@ -47,7 +47,7 @@
+
+ /** Initialize a new task without creating or activating a Session. */
+ export function newTaskDraft(): TaskEditorDraft {
+-  return { ...defaultTiming(), title: '', prompt: '', target: 'new_once', sessionId: '', cwd: '' }
++  return { ...defaultTiming(), title: '', prompt: '', target: 'session', sessionId: '', cwd: '' }
+ }
+
+ /** Seed an edit without normalizing unsupported stored rules. */
+@@ -126,13 +126,12 @@
+  * @param props.disabled - whether the fields reject input.
+  * @param props.held - whether a disabled state keeps the enabled look because it lasts only one brief request.
+  */
+-export function TaskEditorFields({ draft, onChange, projects, disabled, held, original, t }: {
++export function TaskEditorFields({ draft, onChange, sessions, disabled, held, t }: {
+   readonly draft: TaskEditorDraft
+   readonly onChange: (draft: TaskEditorDraft) => void
+-  readonly projects: ProjectChoices
++  readonly sessions: readonly { value: string; label: string }[]
+   readonly disabled: boolean
+   readonly held: boolean
+-  readonly original?: ScheduleCatalogEntry | undefined
+   readonly t: PropsLocale<'schedule.manager'>['t']
+ }): ReactNode {
+   const [dateOpen, setDateOpen] = useState(false)
+@@ -146,9 +145,6 @@
+   const change = (patch: Partial<TaskEditorDraft>): void => { onChange({ ...draft, ...patch }) }
+   const clock = draft.frequency === 'daily' ? `${draft.dailyTime}:00` : draft.start.slice(11)
+   const frequencyZone: FrequencyZone = { system: Intl.DateTimeFormat().resolvedOptions().timeZone, label: zone => zoneLabel(zone, t) }
+-  const targetLabel = (target: TaskEditorDraft['target']): string =>
+-    t(target === 'session' ? 'host.currentConversation' : target === 'new_once' ? 'host.targetNewOnce' : 'host.targetNew')
+-  const currentSessionId = original?.target.kind === 'session' ? original.target.sessionId : ''
+   const weekdays = draft.frequency === 'weekly' && draft.weekdays.length === 5 && [1, 2, 3, 4, 5].every(day => draft.weekdays.includes(day))
+   const frequencyItems = [
+     { id: 'weekly', label: t('rule.weekly') }, { id: 'weekdays', label: t('rule.weekdays') },
+@@ -157,11 +153,6 @@
+     { id: 'once', label: t('rule.once') }, { id: 'advanced', label: t('host.frequency.advanced') },
+   ]
+   const frequencyValue = weekdays ? 'weekdays' : draft.frequency
+-  // The directory line tells which folder a Workspace title such as Default workspace stands for.
+-  const workspaceItems = projects.items.map(choice => ({
+-    id: choice.value, label: <span className={css.workspaceMenuItem}><span>{choice.label}</span>
+-      <PathLabel path={choice.value} className={css.workspaceMenuPath} /></span>,
+-  }))
+   return <fieldset disabled={disabled} className={held ? `${css.taskEditor} ${css.editorHeld}` : css.taskEditor} onKeyDownCapture={(event) => {
+     if (event.key !== 'Escape' || event.defaultPrevented || !dateOpen && !clockOpen) return
+     event.preventDefault(); event.stopPropagation()
+@@ -173,21 +164,10 @@
+     <label className={css.editorField}>{t('detail.instruction')}<textarea className={css.instruction} aria-required placeholder={t('detail.instructionPlaceholder')}
+       value={draft.prompt} onChange={(event) => { change({ prompt: event.target.value }) }} /></label>
+     <div className={css.ruleRows}>
+-      <RuleSelectRow label={t('host.target')} value={draft.target} current={targetLabel(draft.target)} disabled={disabled}
+-        listClassName={css.targetMenu} items={[
+-          ...(currentSessionId === '' ? [] : [{ id: 'session', label: targetLabel('session') }]),
+-          ...(['new_once', 'new'] as const).map(value => ({
+-            id: value, label: <span className={css.targetMenuItem}><span>{targetLabel(value)}</span>
+-              <span className={css.targetMenuDescription}>{t(value === 'new_once' ? 'host.targetNewOnceHelp' : 'host.targetNewHelp')}</span></span>,
+-          })),
+-        ]}
+-        onChange={(value) => { change({ target: value as TaskEditorDraft['target'],
+-          sessionId: value === 'session' ? currentSessionId : draft.sessionId,
+-          cwd: value === 'session' ? '' : draft.target === 'session' ? projects.defaultCwd : draft.cwd }) }} />
+-      {draft.target !== 'session' && <RuleSelectRow label={t('host.project')} value={draft.cwd} disabled={disabled}
+-        current={projects.items.find(choice => choice.value === draft.cwd)?.label ?? (draft.cwd || t('host.ungrouped'))}
+-        listClassName={css.workspaceMenu} items={workspaceItems.length === 0 ? [{ id: '', label: t('host.ungrouped'), disabled: true }]
+-          : workspaceItems} onChange={(cwd) => { change({ cwd }) }} />}
++      <RuleSelectRow label={t('host.target')} value={draft.sessionId} disabled={disabled || sessions.length === 0}
++        current={sessions.find(choice => choice.value === draft.sessionId)?.label ?? (draft.sessionId || t('detail.session'))}
++        items={sessions.map(choice => ({ id: choice.value, label: choice.label }))}
++        onChange={sessionId => { change({ sessionId }) }} />
+     </div>
+     <section className={css.editorField} aria-label={t('rule.title')}><h3>{t('rule.title')}</h3><div className={css.ruleRows}>
+       <RuleSelectRow label={t('rule.repeat')} value={frequencyValue} disabled={disabled} items={frequencyItems}

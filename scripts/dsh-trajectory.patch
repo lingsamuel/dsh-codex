@@ -1,5 +1,5 @@
---- a/layout.ts
-+++ b/layout.ts
+--- a/client/layout.ts
++++ b/client/layout.ts
 @@ -42,4 +42,5 @@
    eventLocations?: ReadonlyMap<number, ConversationLocation>
    partial: TrajectorySnapshot['partial']
@@ -21,8 +21,8 @@
 +        pushStep(location?.turn ?? 0, location?.step ?? 1, laidList)
        }
        prevAbsTime = finiteTime(node.time) ?? prevAbsTime
---- a/TrajectoryView.tsx
-+++ b/TrajectoryView.tsx
+--- a/client/TrajectoryView.tsx
++++ b/client/TrajectoryView.tsx
 @@ -11,4 +11,5 @@
  import {
    TrajectoryTable,
@@ -98,8 +98,8 @@
 +          labelTurn={labelTurn}
            requestNumbers={requestNumbers}
            turns={timelineTurns}
---- a/TrajectoryTable.tsx
-+++ b/TrajectoryTable.tsx
+--- a/client/TrajectoryTable.tsx
++++ b/client/TrajectoryTable.tsx
 @@ -397,4 +397,5 @@
  /** Props for the trajectory ledger. */
  export interface TrajectoryTableProps {
@@ -165,8 +165,8 @@
 +                          : `${sectionLabel(selected.turn)} · ${selected.group}`}
                        </span>
                      </>
---- a/trajectory-search-index.ts
-+++ b/trajectory-search-index.ts
+--- a/client/trajectory-search-index.ts
++++ b/client/trajectory-search-index.ts
 @@ -2,4 +2,5 @@
 
  import type { TrajectoryTurnModel } from './layout.ts'

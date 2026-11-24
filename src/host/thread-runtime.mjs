@@ -1,11 +1,25 @@
 import { setTimeout as delay } from 'node:timers/promises'
-import { CodexRpcError, readCodexPages } from './app-server.mjs'
+import { CodexRpcError, iterateCodexPages, readCodexPages } from './app-server.mjs'
+import { readThreadTurns } from './live-history.mjs'
 
 /** 从原生队列读取当前顺序。读取待发记录无需加载线程。 */
 export function readConversationQueue(request, threadId) {
   return readCodexPages(cursor => request('thread/queue/list', {
     threadId, limit: 100, ...(cursor != null && { cursor }),
   }))
+}
+
+/** 回执可能已从待发队列进入历史。按原生客户端消息标识查找同一次提交。 */
+export async function findThreadSubmission(request, threadId, clientUserMessageId) {
+  const queuedSubmission = (await readConversationQueue(request, threadId))
+    .find(item => item.clientUserMessageId === clientUserMessageId)
+  if (queuedSubmission) return { queuedSubmission }
+  for await (const page of iterateCodexPages(cursor => readThreadTurns(request, {
+    threadId, limit: 25, cursor, sortDirection: 'desc', itemsView: 'full',
+  }))) {
+    const turn = page.data.find(candidate => candidate.items?.some(item => item.type === 'userMessage' && item.clientId === clientUserMessageId))
+    if (turn) return { turn }
+  }
 }
 
 /** 从原生状态检查网页能否提交输入。浏览路径直接使用 thread/read。 */

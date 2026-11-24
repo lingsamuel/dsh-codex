@@ -2,13 +2,14 @@ import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { patchedDshSource } from './patched-dsh-source.mjs'
 import { dshTrajectorySource } from './dsh-trajectory.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const outdir = process.argv[2] ?? 'dist'
 const { name } = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
-const trajectoryLicenses = await Promise.all([
-  '@deepseek-ai/dsh-client-ui-trajectory', '@tanstack/react-virtual', '@tanstack/virtual-core',
+const clientLicenses = await Promise.all([
+  '@deepseek-ai/dsh-client-ui-trajectory', '@deepseek-ai/dsh-client-ui-schedule', '@tanstack/react-virtual', '@tanstack/virtual-core',
 ].map(async name => {
   const notice = await readFile(new URL('./LICENSE', import.meta.resolve(`${name}/package.json`)), 'utf8')
   return `/*! ${name}\n${notice.trimEnd()}\n*/`
@@ -16,12 +17,18 @@ const trajectoryLicenses = await Promise.all([
 
 const client = await build({
   absWorkingDir: root,
+  nodePaths: [fileURLToPath(new URL('../node_modules/', import.meta.url))],
   entryPoints: ['src/client/plugin.jsx'],
   outfile: join(outdir, 'client.js'),
   bundle: true,
   format: 'cjs',
   jsx: 'automatic',
-  plugins: [await dshTrajectorySource()],
+  // DSH 时间模块从 rrule 的 CommonJS 入口读取默认导出。
+  alias: { rrule: 'rrule/dist/es5/rrule.js' },
+  plugins: await Promise.all([
+    dshTrajectorySource(),
+    patchedDshSource('@deepseek-ai/dsh-client-ui-schedule', '../forks/dsh-schedule-for-codex/client.patch'),
+  ]),
   platform: 'browser',
   write: false,
   external: [
@@ -33,7 +40,7 @@ const client = await build({
     '@deepseek-ai/dsh-client-ui-primitives',
   ],
   banner: {
-    js: `${trajectoryLicenses.join('\n')}\nwindow.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,
+    js: `${clientLicenses.join('\n')}\nwindow.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,
   },
   footer: { js: 'return module.exports; }' },
 })
@@ -43,6 +50,26 @@ const clientStyles = client.outputFiles.find(file => file.path.endsWith('.css'))
 const styleMeta = clientStyles ? `, meta: () => ({ stylesheets: { 'client.css': { text: () => ${JSON.stringify(clientStyles.text)} } } })` : ''
 await mkdir(dirname(clientEntry.path), { recursive: true })
 await writeFile(clientEntry.path, `${clientEntry.text.trimEnd()}${styleMeta} });\n`)
+
+const schedule = '@deepseek-ai/dsh-schedule'
+const scheduleLicense = await readFile(new URL('./LICENSE', import.meta.resolve(schedule + '/package.json')), 'utf8')
+await build({
+  absWorkingDir: root,
+  entryPoints: [fileURLToPath(import.meta.resolve(schedule + '/src/index.ts'))],
+  outfile: join(outdir, 'dsh-schedule-for-codex.mjs'),
+  bundle: true,
+  format: 'cjs',
+  platform: 'node',
+  external: ['@deepseek-ai/dsh-storage-domain'],
+  plugins: [await patchedDshSource(schedule, '../forks/dsh-schedule-for-codex/host.patch', '../forks/dsh-schedule-for-codex/runtime.patch')],
+  banner: { js: `/*! ${schedule}\n${scheduleLicense.trimEnd()}\n*/
+import { createRequire } from 'node:module'
+const hostRequire = createRequire(import.meta.url)
+export function createScheduleForCodex(storageDomain, ctx, delivery, changed, domainName) {
+  const module = { exports: {} }
+  const require = id => id === '@deepseek-ai/dsh-storage-domain' ? storageDomain : hostRequire(id)` },
+  footer: { js: '  return new module.exports.ScheduleService(ctx, {}, delivery, changed, domainName)\n}' },
+})
 
 // 新版 DSH 随包发布搜索模块的 TypeScript 源码，由项目构建产出 Host 可加载的 JavaScript。
 await build({
