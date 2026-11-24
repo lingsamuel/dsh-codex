@@ -32,7 +32,7 @@ function QuotaRing({ remaining }) {
   const arc = low ? remaining * 10 : remaining
   return <svg viewBox="0 0 20 20" width={size} height={size} data-low={low || undefined} aria-hidden="true">
     <circle className={css.track} cx="10" cy="10" r="8" />
-    {low ? <text className={css.reading} x="10" y="10" textAnchor="middle" dominantBaseline="central">{remaining}%</text>
+    {low ? <text className={css.reading} x="10" y="10" textAnchor="middle" dominantBaseline="central">{remaining}</text>
       : <circle className={css.center} cx="10" cy="10" r="2.5" />}
     {remaining > 0 && <circle className={css.arc} cx="10" cy="10" r="8" pathLength="100"
       strokeDasharray={`${arc} 100`} transform="rotate(-90 10 10)" />}
