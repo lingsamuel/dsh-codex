@@ -27,9 +27,10 @@ const hook = registerHooks({
     if (specifier === './live-watch.js' || specifier === '../live-watch.js') return { shortCircuit: true, url: liveWatchModule }
     const source = {
       '@deepseek-ai/dsh-client-ui-primitives': `export const Button = null, DisclosureRow = null, IconApiOutlineMedium = null,
-        IconQuestionOutlineRegular = null, IconRefreshOutlineRegular = null, InlineEditor = null, Modal = null, Tag = null, Toast = null`,
+        IconChevronDownOutlineRegular = null, IconQuestionOutlineRegular = null, IconRefreshOutlineRegular = null,
+        InlineEditor = null, Modal = null, Tag = null, Toast = null`,
       react: `export const createElement = (type, props, ...children) => ({ type, props, children });
-        export const useState = value => [value, () => {}], useEffect = null, useLayoutEffect = null,
+        export const useState = value => [value, () => {}], useEffect = null, useId = null, useLayoutEffect = null,
           useMemo = read => read(), useRef = value => ({ current: value }), useSyncExternalStore = null`,
       'react/jsx-runtime': 'export const Fragment = Symbol(), jsx = (type, props) => ({ type, props }), jsxs = jsx',
     }[specifier]

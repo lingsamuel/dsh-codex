@@ -1,7 +1,9 @@
 import { GeneralSection } from '@deepseek-ai/dsh-client-ui-settings-general/src/client/GeneralSection.tsx'
-import fold from '@deepseek-ai/dsh-client-ui-settings-models/src/client/ModelsSection.module.css'
+import fontGroup from '@deepseek-ai/dsh-client-ui-theme/src/client/FontSettingsGroup.module.css'
+import fontRow from '@deepseek-ai/dsh-client-ui-theme/src/client/FontSizeRow.module.css'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { useEffect } from 'react'
+import { IconChevronDownOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { useEffect, useId, useState } from 'react'
 import { readPage } from '../api.js'
 import { CodexBrandMark } from './branding.jsx'
 import { adaptSlot } from './slot-adapter.js'
@@ -59,14 +61,33 @@ export function createCodexPreference(endpoint, signal) {
   }
 }
 
+function CodexSettingsGroup({ title, children }) {
+  const regionId = useId()
+  const [open, setOpen] = useState(false)
+  return <div className={fontGroup.group}>
+    <div className={fontRow.row}>
+      <div className={fontRow.rowText}>
+        <div className={fontRow.title}>{title}</div>
+      </div>
+      <div className={fontRow.control}>
+        <button type="button" className={fontRow.expander} aria-label={title} title={title}
+          aria-expanded={open} aria-controls={regionId} onClick={() => setOpen(value => !value)}>
+          <IconChevronDownOutlineRegular size={12} />
+        </button>
+      </div>
+    </div>
+    {/* 收起时保留已载入的选项和进行中的自动保存。 */}
+    <div id={regionId} hidden={!open}>{children}</div>
+  </div>
+}
+
 function CodexSettings({ renderSlot, loadModelCatalog, t }) {
   useEffect(() => { void loadModelCatalog() }, [loadModelCatalog])
   return <GeneralSection renderSlot={(_, props) => <>
     {renderSlot(codexSettingsItem, props)}
-    {folds.map(([slot, label]) => <details key={slot} className={fold.customized}>
-      <summary className={fold.customizedSummary}>{t(label)}</summary>
-      <div className={fold.customizedBody}>{renderSlot(slot, props)}</div>
-    </details>)}
+    {folds.map(([slot, label]) => <CodexSettingsGroup key={slot} title={t(label)}>
+      {renderSlot(slot, props)}
+    </CodexSettingsGroup>)}
   </>} />
 }
 
