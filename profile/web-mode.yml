@@ -1,5 +1,5 @@
 - insert:
     - id: dsh-codex
-      name: '@lingsamuel/dsh-codex'
+      name: dsh-for-codex
       config:
         sharedWeb: true

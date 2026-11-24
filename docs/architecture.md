@@ -10,13 +10,13 @@ DSH Codex 可以加入已有的 DSH Web，也可以单独启动只显示 Codex �
 
 ## 部署与访问
 
-两个 `.tgz` 的 npm 名称都是 `@lingsamuel/dsh-codex`，输出文件使用 `dsh-codex` 前缀。两包的唯一区别是 `package.json` 中的 `dsh.bundle.patch` 字段。CLI 安装时由 `dsh plugin --profile <名称> add <包路径>` 选定目标 Profile，网页安装时使用当前实例的 Profile。
+两个 `.tgz` 的 npm 名称都是 `dsh-for-codex`，输出文件使用同名前缀。两包的唯一区别是 `package.json` 中的 `dsh.bundle.patch` 字段。CLI 安装时由 `dsh plugin --profile <名称> add <包路径>` 选定目标 Profile，网页安装时使用当前实例的 Profile。
 
-`dsh-codex-min-<版本>.tgz` 指向 `./profile/cordis.patch.yml`。这份补丁沿用 DSH Base 的共享服务，加载 DSH 自带的 Web 服务器、网页运行时、侧栏和聊天等组件，并停用 DSH 原生会话、持久化和执行权限服务。会话持久化和执行策略由 Codex 负责。用户设置写入当前 Profile 的补丁层。浏览器使用 DSH 的访问令牌和 Cookie 访问同源 API。DSH 的 Web 服务器默认监听 `127.0.0.1:3190`，显式传入 `--port` 时使用指定端口。
+`dsh-for-codex-min-<版本>.tgz` 指向 `./profile/cordis.patch.yml`。这份补丁沿用 DSH Base 的共享服务，加载 DSH 自带的 Web 服务器、网页运行时、侧栏和聊天等组件，并停用 DSH 原生会话、持久化和执行权限服务。会话持久化和执行策略由 Codex 负责。用户设置写入当前 Profile 的补丁层。浏览器使用 DSH 的访问令牌和 Cookie 访问同源 API。DSH 的 Web 服务器默认监听 `127.0.0.1:3190`，显式传入 `--port` 时使用指定端口。
 
 极简配置省去官方 Web 的插件管理页面（`ui-plugin-manager`）、定时任务和交互式侧栏终端。DSH 插件通过 `dsh plugin --profile codex add` 安装到示例使用的 `codex` 配置。网页里的「Codex 插件」设置调用 Codex App Server 管理 Codex 插件。
 
-`dsh-codex-<版本>.tgz` 指向 `./profile/web-mode.yml`。这份补丁只加载 `@lingsamuel/dsh-codex`，并设置 `sharedWeb: true`。插件在已有 Web 实例中挂载 Codex API 和入口控制。共存时由客户端启动图为每个页面选择会话与工作区控制器，并把解析后的模式固定在页面 URL。Web 的状态和认证服务由两种入口共享。Codex 的上传路由和工作区文件作用域分别标明来源，原生 DSH 会话继续走原来的文件服务。
+`dsh-for-codex-<版本>.tgz` 指向 `./profile/web-mode.yml`。这份补丁只加载 `dsh-for-codex`，并设置 `sharedWeb: true`。插件在已有 Web 实例中挂载 Codex API 和入口控制。共存时由客户端启动图为每个页面选择会话与工作区控制器，并把解析后的模式固定在页面 URL。Web 的状态和认证服务由两种入口共享。Codex 的上传路由和工作区文件作用域分别标明来源，原生 DSH 会话继续走原来的文件服务。
 
 Codex 页的客户端启动图跳过依赖 DSH 原生会话的反馈、侧栏终端、后台任务、技能和自动化插件。会话标题栏沿用 DSH 的菜单与 Markdown 复制反馈，复制和下载从同一 Codex 导出接口读取完整历史。DSH 页使用官方 ZIP 日志导出。
 
@@ -24,7 +24,9 @@ Codex 页的客户端启动图跳过依赖 DSH 原生会话的反馈、侧栏终
 
 ### 发布
 
-Build 工作流在分支和 tag 推送时测试、打包并上传产物。推送与 `package.json` 版本一致的 `v<版本>` tag 时，同一次构建的两个包附到对应的 GitHub Release，普通 Web 版通过 npm Trusted Publishing 发布为 `@lingsamuel/dsh-codex`。npm 端的授权指向 `lingsamuel/dsh-codex` 仓库的 `build.yml`，并允许 `npm publish`。
+Build 工作流在分支和 tag 推送时测试、打包并上传产物。推送与 `package.json` 版本一致的 `v<版本>` tag 时，同一次构建的两个包附到对应的 GitHub Release，普通 Web 版通过 npm Trusted Publishing 发布为 `dsh-for-codex`。
+
+首次发布需用有发布权限的 npm 账号创建新包。可以用 [`npm stage publish`](https://docs.npmjs.com/staged-publishing/) 提交待审核版本，再为新包配置 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers/)。授权指向 `lingsamuel/dsh-codex` 仓库的 `build.yml`，并允许 `npm publish`。首次发布所用的 npm 版本如果已发布，后续 tag 发布使用新的版本号。
 
 ## 工作区与会话目录
 

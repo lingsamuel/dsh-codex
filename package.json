@@ -1,5 +1,5 @@
 {
-  "name": "@lingsamuel/dsh-codex",
+  "name": "dsh-for-codex",
   "version": "0.1.1",
   "icon": "./assets/plugin-icon.svg",
   "description": "在 DeepSeek Harness 中展示和操作本机 Codex 会话",

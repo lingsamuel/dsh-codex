@@ -1,6 +1,6 @@
 # 给 AI 助手的安装指南
 
-一般用户使用 `dsh-codex-<版本>.tgz`，给已有的 DSH Web 加入 Codex。用户需要单独启动极简 DSH Web 服务时，使用 `dsh-codex-min-<版本>.tgz`。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
+一般用户使用 `dsh-for-codex-<版本>.tgz`，给已有的 DSH Web 加入 Codex。用户需要单独启动极简 DSH Web 服务时，使用 `dsh-for-codex-min-<版本>.tgz`。用户要求启动时，再用浏览器核对本机 Codex 会话是否可见。
 
 ## 1. 检查目标环境
 
@@ -26,7 +26,7 @@ npm ci
 npm run package:plugin
 ```
 
-两种包的 npm 名称都是 `@lingsamuel/dsh-codex`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
+两种包的 npm 名称都是 `dsh-for-codex`，各自都包含相同的代码和两份 YAML。以归档中 `package/package.json` 的 `dsh.bundle.patch` 为准。文件名和加载行为的对应关系见 [选择插件包](guide.md#选择插件包)。
 
 ## 3. 安装并验证配置
 
@@ -34,10 +34,10 @@ npm run package:plugin
 
 ### 给已有的 DSH Web 加入 Codex
 
-使用 `dsh-codex-<版本>.tgz`。将 `web` 替换为当前 Web 实例实际使用的 Profile 名称，将包路径替换为实际绝对路径。
+使用 `dsh-for-codex-<版本>.tgz`。将 `web` 替换为当前 Web 实例实际使用的 Profile 名称，将包路径替换为实际绝对路径。
 
 ```sh
-dsh plugin --profile web add '/absolute/path/to/dsh-codex-<版本>.tgz'
+dsh plugin --profile web add '/absolute/path/to/dsh-for-codex-<版本>.tgz'
 dsh --profile web --dump-config
 ```
 
@@ -48,7 +48,7 @@ dsh --profile web --dump-config
 使用带 `-min` 的包，示例沿用 `codex` 作为 Profile 名称。DSH 会在安装时创建尚不存在的 Profile。极简网页没有 DSH 插件管理入口，因此通过 CLI 安装 DSH 插件。网页里的「设置 → Codex 插件」仍可管理 Codex 插件。
 
 ```sh
-dsh plugin --profile codex add '/absolute/path/to/dsh-codex-min-<版本>.tgz'
+dsh plugin --profile codex add '/absolute/path/to/dsh-for-codex-min-<版本>.tgz'
 dsh --profile codex --dump-config
 ```
 

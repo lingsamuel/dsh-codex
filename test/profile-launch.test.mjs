@@ -10,7 +10,7 @@ const project = fileURLToPath(new URL('../', import.meta.url))
 const dshManifest = fileURLToPath(import.meta.resolve('@deepseek-ai/dsh/package.json'))
 const savedSetting = '- id: ui-conversation\n  config:\n    busyEnterBehavior: steer\n'
 const fileActions = { id: 'ui-file-actions', name: '@deepseek-ai/dsh-client-ui-file-actions' }
-const pluginName = '@lingsamuel/dsh-codex'
+const pluginName = 'dsh-for-codex'
 
 async function fixture(t) {
   await mkdir(join(project, '.runtime'), { recursive: true })

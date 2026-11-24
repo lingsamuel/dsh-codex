@@ -54,7 +54,7 @@ jobs:
         with:
           name: dsh-codex
           path: artifacts
-      - run: npm publish "./artifacts/dsh-codex-${RELEASE_VERSION}.tgz" --access public
+      - run: npm publish "./artifacts/dsh-for-codex-${RELEASE_VERSION}.tgz" --access public
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
 
@@ -71,7 +71,7 @@ jobs:
           path: artifacts
       - run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
-            "artifacts/dsh-codex-${RELEASE_VERSION}.tgz" "artifacts/dsh-codex-min-${RELEASE_VERSION}.tgz"
+            "artifacts/dsh-for-codex-${RELEASE_VERSION}.tgz" "artifacts/dsh-for-codex-min-${RELEASE_VERSION}.tgz"
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.build.outputs.release-version }}
