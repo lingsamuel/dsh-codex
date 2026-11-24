@@ -7,7 +7,7 @@ import { readConversationQueue } from './thread-runtime.mjs'
 const recentTurns = 6
 const settleMs = 120
 
-/** 首次拟题及后续计数使用同一个原生起点，跳过没有用户消息的前置轮次。 */
+/** 首次拟标题及后续计数使用同一个原生起点，跳过没有用户消息的前置轮次。 */
 export async function readFirstTitleMessage(request, threadId) {
   const pages = iterateCodexPages(cursor => readThreadTurns(request,
     { threadId, limit: 1, sortDirection: 'asc', itemsView: 'summary', cursor }))

@@ -14,18 +14,18 @@ const defaultEffortOption = 'effort-default'
 const labels = {
   zh: {
     model: '拟标题模型', default: '{model}（默认）', unavailable: '{model}（不可用）',
-    modelHelp: '首次拟题和后续更新会把少量用户发言交给所选提供商，并使用这里设置的思考强度。菜单会标明默认档位。模型不可用时保留原标题或正文预览。',
+    modelHelp: '首次拟标题和后续更新会把少量用户发言交给所选提供商。模型不可用时保留原标题或正文预览。',
     modelMenu: '模型', effort: '思考强度', effortDefault: '默认（{effort}）',
-    costHelp: '即使标题没有变化，拟题也可能增加订阅用量或 API 费用。',
+    costHelp: '即使标题没有变化，拟标题也可能增加订阅用量或 API 费用。',
     follow: '随会话更新标题',
     followHelp: '每累计两轮含网页发言的对话后检查任务是否变化。新增正文很短时跳过请求，手动起的标题会保留。',
     showHistory: '在会话历史中显示标题更新',
-    showHistoryHelp: '在触发轮次下显示额外的拟题请求和结果。待确认表示请求或结果尚未核实，Token 用量以模型服务计量为准。关闭时仍记录。',
+    showHistoryHelp: '在触发轮次下显示额外的拟标题请求和结果。待确认表示请求或结果尚未核实，Token 用量以模型服务计量为准。关闭时仍记录。',
     loading: '正在读取…', retry: '重试', catalogError: '无法读取可用模型。',
   },
   en: {
     model: 'Title generation model', default: '{model} (default)', unavailable: '{model} (unavailable)',
-    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider and use the reasoning effort set here. The menu shows the default level. If the model is unavailable, the title or message preview stays as is.',
+    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider. If the model is unavailable, the title or message preview stays as is.',
     modelMenu: 'Model', effort: 'Reasoning effort', effortDefault: 'Default ({effort})',
     costHelp: 'Requests may use additional plan allowance or incur API costs even when the title stays the same.',
     follow: 'Update titles as the conversation evolves',
@@ -157,7 +157,7 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
   </>
 }
 
-/** 注册独立的拟题模型与更新开关，页面间通过同源通知重新读取 Host 偏好。 */
+/** 注册独立的拟标题模型与更新开关，页面间通过同源通知重新读取 Host 偏好。 */
 export function installThreadTitleSettings(ctx, ownerSignal) {
   const channel = new BroadcastChannel(locale)
   ctx.effect(() => () => channel.close())

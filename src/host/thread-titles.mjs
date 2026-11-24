@@ -214,7 +214,7 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
   }
 }
 
-/** 首次拟题、后续更新和手动改名共用一份 Profile 偏好及自动标题记录。 */
+/** 首次拟标题、后续更新和手动改名共用一份 Profile 偏好及自动标题记录。 */
 export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirectory) {
   const lifetime = ownerSignal ?? new AbortController().signal
   const preference = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-title-settings.json'), 'settings')

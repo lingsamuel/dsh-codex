@@ -316,7 +316,7 @@ async function queueAction(request, threadId, { operation, queuedSubmissionId, e
     throw uncertainQueueSteer()
   }
   steers.removed(queued)
-  // 原生接纳与回执可能分开，拟题仍由原生历史确认。
+  // 原生接纳与回执可能分开，拟标题仍由原生历史确认。
   scheduleTitle(thread, item.clientUserMessageId, expectedTurnId, true)
   let result
   try {

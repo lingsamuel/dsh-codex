@@ -31,7 +31,7 @@ function ThreadTitleHistory({ turn, useProjection, t }) {
   return updates?.map((update, index) => <TitleHistoryRow key={index} update={update} t={t} />) ?? null
 }
 
-/** 用原生轮次尾部展示拟题注记，不把注记写进 DSH 的对话事件流。 */
+/** 用原生轮次尾部展示拟标题注记，不把注记写进 DSH 的对话事件流。 */
 export function installThreadTitleHistory(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.slots.inject(slot, () => ctx.slots.register({

@@ -10,7 +10,7 @@ export async function readVisibleProviderModels(request, provider) {
   return rows.filter(model => !model.hidden)
 }
 
-/** 目录和依目录执行的拟题使用相同的模型与档位表示。 */
+/** 目录和依目录执行的拟标题使用相同的模型与档位表示。 */
 export function codexModelOption(model) {
   return {
     id: model.model,

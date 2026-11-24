@@ -6,7 +6,7 @@ function titleEntry(stored) {
   return typeof stored === 'string' ? { name: stored } : stored ?? {}
 }
 
-/** 在同一份 Profile 数据中记录拟题请求和最新自动标题，展示开关只过滤读回。 */
+/** 在同一份 Profile 数据中记录拟标题请求和最新自动标题，展示开关只过滤读回。 */
 export function createThreadTitleHistory(cacheDirectory) {
   const store = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-automatic-titles.json'), 'names')
   const observers = new Set()

@@ -1205,7 +1205,7 @@ test('网页首条消息进入历史后只用一个临时轮次拟标题，并�
   }
 })
 
-test('默认拟题模型不可用时保留首条消息预览并跳过推理', async t => {
+test('默认拟标题模型不可用时保留首条消息预览并跳过推理', async t => {
   const title = await titleFixture(t, { luna: false })
   const history = title.wait('history-read')
   assert.equal((await title.send()).status, 200)
@@ -1217,7 +1217,7 @@ test('默认拟题模型不可用时保留首条消息预览并跳过推理', as
   assert.equal(title.messages.some(({ method }) => method === 'thread/start'), false)
 })
 
-test('首次拟题使用所选提供商和强度，推理失败时沿用预览', async t => {
+test('首次拟标题使用所选提供商和强度，推理失败时沿用预览', async t => {
   const title = await titleFixture(t, { modelResult: 'failure' })
   const selection = { provider: 'custom', model: 'title-only-model', reasoningEffort: 'high' }
   assert.equal((await postCodex(title.get, 'title-settings', { selection })).status, 200)
@@ -1286,7 +1286,7 @@ test('后续标题只按网页已结束轮次计数，两轮短输入跳过模�
   }])
 })
 
-test('同一轮的两次网页插话合计一轮，并且可触发新任务拟题', async t => {
+test('同一轮的两次网页插话合计一轮，并且可触发新任务拟标题', async t => {
   const title = await titleFixture(t, { followTitle: null })
   assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
   const first = title.wait('title-saved')
@@ -1333,7 +1333,7 @@ test('拟标题模型、强度和开关保存到 Profile，换模型时清除强
   assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true, showHistory: false })
 })
 
-test('拟题注记关闭显示时仍保存，并可在线显示和隐藏', async t => {
+test('拟标题注记关闭显示时仍保存，并可在线显示和隐藏', async t => {
   const model = Promise.withResolvers()
   const title = await titleFixture(t, { followTitle: null, waitForFollow: model.promise })
   assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
@@ -1387,7 +1387,7 @@ test('拟题注记关闭显示时仍保存，并可在线显示和隐藏', async
   await reader.cancel()
 })
 
-test('拟题注记存储不可用时跳过模型请求', async t => {
+test('拟标题注记存储不可用时跳过模型请求', async t => {
   const title = await titleFixture(t, { initialItem: {
     id: 'old', type: 'userMessage', content: [{ type: 'text', text: '已有会话' }],
   } })
@@ -1416,7 +1416,7 @@ test('拟标题在模型目录移除已保存档位后使用默认强度', async
   assert.equal(request.effort, 'low')
 })
 
-test('后续拟题等待同一会话的首次拟题完成后再读取标题', async t => {
+test('后续拟标题等待同一会话的首次拟标题完成后再读取标题', async t => {
   const pending = Promise.withResolvers()
   const title = await titleFixture(t, { waitForModel: pending.promise })
   assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
@@ -1436,7 +1436,7 @@ test('后续拟题等待同一会话的首次拟题完成后再读取标题', as
   assert.match(request.input[0].text, /检查网页标题/)
 })
 
-test('回退保留的网页轮次仍参与后续拟题计数', async t => {
+test('回退保留的网页轮次仍参与后续拟标题计数', async t => {
   const title = await titleFixture(t)
   assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
   const first = title.wait('title-saved')
@@ -1456,7 +1456,7 @@ test('回退保留的网页轮次仍参与后续拟题计数', async t => {
   assert.doesNotMatch(request.input[0].text, /即将被回退/)
 })
 
-test('已写入原生历史的网页插话即使丢失回执也计入拟题', async t => {
+test('已写入原生历史的网页插话即使丢失回执也计入拟标题', async t => {
   const title = await titleFixture(t, { loseSteerReceipt: true })
   assert.equal((await postCodex(title.get, 'title-settings', { follow: true })).status, 200)
   const first = title.wait('title-saved')
