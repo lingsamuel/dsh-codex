@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { before, test } from 'node:test'
 import { createFileReferenceRoute } from '../src/host/file-references.mjs'
+import { resolveWorkspaceFileScope } from '../src/host/workspace-paths.mjs'
+
+const runtime = join(process.cwd(), '.runtime')
+before(() => mkdir(runtime, { recursive: true }))
 
 test('文件补全以原生会话的工作目录为准，并将含空格的路径原样交给 DSH', async () => {
   const lookups = []
@@ -38,7 +42,7 @@ test('文件补全以原生会话的工作目录为准，并将含空格的路�
 })
 
 test('本地草稿从已选工作目录取得路径候选，无需查找原生线程', async t => {
-  const cwd = await mkdtemp(join(process.cwd(), '.runtime', 'draft-references-'))
+  const cwd = await mkdtemp(join(runtime, 'draft-references-'))
   const owner = new AbortController()
   t.after(async () => {
     owner.abort()
@@ -151,7 +155,7 @@ test('Codex 文件视图标记会话来源并在退出后恢复原生远程调�
   let dispose
   installCodexFileScope({ inject(keys, apply) {
     assert.ok(keys.includes('remote.workspaceFiles'))
-    apply({ remote: { workspaceFiles: provider }, effect: effect => { dispose = effect() } })
+    apply({ remote: { workspaceFiles: provider }, sessions: {}, effect: effect => { dispose = effect() } })
   } })
   const signal = new AbortController().signal
   assert.deepEqual(await provider.stat('thread', 'notes.md', signal), { exists: true })
@@ -160,4 +164,49 @@ test('Codex 文件视图标记会话来源并在退出后恢复原生远程调�
   assert.equal(provider.stat, original)
   provider.stat('native-session', 'notes.md', signal)
   assert.deepEqual(calls.at(-1), ['native-session', 'notes.md', signal])
+})
+
+test('双入口和独立实例的 Files 都用网页草稿的目录打开列表和监听', async t => {
+  const { installCodexFileScope } = await import('../src/client/native-dsh/dual-workspace-files.js')
+  const draft = 'web-new-5b8d04ea-3657-422f-9479-39d7dd5c4108'
+  const cwd = await mkdtemp(join(runtime, process.platform === 'win32' ? 'work space ' : 'work space: '))
+  t.after(() => rm(cwd, { recursive: true, force: true }))
+  const signal = new AbortController().signal
+  const sessions = { list: { getSnapshot: () => ({ byId: { [draft]: { cwd } } }) } }
+
+  for (const [sharedWeb, prefix] of [[true, 'codex:'], [false, '']]) {
+    const provider = {
+      changes: (...args) => args,
+      list: (...args) => args,
+    }
+    installCodexFileScope({ inject(_keys, apply) {
+      apply({ remote: { workspaceFiles: provider }, sessions, effect: effect => effect() })
+    } }, sharedWeb)
+    for (const name of ['changes', 'list']) {
+      const [id, path, cancellation] = provider[name](draft, '.', signal)
+      assert.ok(id.startsWith(prefix))
+      const files = await resolveWorkspaceFileScope(id.slice(prefix.length), () => assert.fail('草稿没有原生线程'))
+      assert.deepEqual(files, { sessionId: draft, workspaceRoot: cwd })
+      assert.equal(path, '.')
+      assert.equal(cancellation, signal)
+    }
+    assert.deepEqual(provider.list('thread', '.', signal), [`${prefix}thread`, '.', signal])
+  }
+})
+
+test('文件作用域拒绝失效的草稿目录，并按原 ID 查询正式线程', async t => {
+  const base = await mkdtemp(join(runtime, 'draft-file-scope-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const draft = 'web-new-5b8d04ea-3657-422f-9479-39d7dd5c4108'
+  const readDraft = id => resolveWorkspaceFileScope(id, () => assert.fail('草稿没有原生线程'))
+  const file = join(base, 'notes.md')
+  await writeFile(file, 'test')
+  for (const id of [draft, `${draft}:relative`, `${draft}:${file}`, `${draft}:${join(base, 'missing')}`]) {
+    assert.equal(await readDraft(id), undefined)
+  }
+  const thread = 'urn:uuid:5b8d04ea-3657-422f-9479-39d7dd5c4108'
+  assert.deepEqual(await resolveWorkspaceFileScope(thread, id => {
+    assert.equal(id, thread)
+    return base
+  }), { sessionId: thread, workspaceRoot: base })
 })

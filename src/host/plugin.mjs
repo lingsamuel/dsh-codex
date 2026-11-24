@@ -7,6 +7,7 @@ import { createFileReferenceRoute } from './file-references.mjs'
 import { createSessionExportRoute } from './session-export.mjs'
 import { installDualWebEntry } from './dual-web-entry.mjs'
 import { createWebModeRoute, openWebModes } from './web-mode.mjs'
+import { resolveWorkspaceFileScope } from './workspace-paths.mjs'
 import { codexFileScopePrefix } from '../shared/dual-web-entry.js'
 import { webModeFor } from '../shared/web-mode.js'
 
@@ -40,10 +41,14 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
     const { thread } = await readCodex('thread/read', { threadId }, process.env.DSH_CODEX_SOCKET, owner.signal)
     return thread.cwd
   }
+  const readCodexFileScope = id => resolveWorkspaceFileScope(id, readWorkspace)
   if (!state) {
-    // 独立实例的文件服务只需冷读工作目录。共存入口直接复用 DSH 的服务。
+    // 独立实例通过会话头适配原生文件服务。无法解析的草稿保持无作用域，避免退回默认目录。
     ctx.provide('sessions', { get: () => undefined })
-    ctx.provide('sessionPersistence', { stat: async threadId => ({ header: { cwd: await readWorkspace(threadId) } }) })
+    ctx.provide('sessionPersistence', { async stat(id) {
+      const files = await readCodexFileScope(id)
+      if (files) return { header: { cwd: files.workspaceRoot } }
+    } })
     ctx.provide('sandboxPolicy', { workspaceRoot: process.cwd() })
   }
   for (const route of createHistoryRoutes(undefined, owner.signal, cacheDirectory, ctx.attachments)) {
@@ -65,7 +70,7 @@ export async function apply(ctx, { sharedWeb = false } = {}) {
   ctx.inject(['workspaceFiles', 'typert'], scope => {
     const workspaceFileScope = scope.typert.lookups.get('workspaceFileScope')
     const readFileScope = state
-      ? async threadId => ({ sessionId: threadId, workspaceRoot: await readWorkspace(threadId) })
+      ? readCodexFileScope
       : threadId => workspaceFileScope?.resolve(threadId)
     if (state && workspaceFileScope) {
       // 来源标记只用于浏览器的 Codex 文件请求，原生 DSH 会话继续按自己的规则解析。

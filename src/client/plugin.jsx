@@ -59,7 +59,10 @@ export async function apply(ctx) {
   ctx.slots.provideRoot({ hooks: { codexHistory: catalog.store } })
   // 复用原生上传组件，文件走 Codex 的独立路由。
   ctx.plugin(CodexFileUploadRuntime)
-  if (!mode) installSidebarBrand(ctx)
+  if (!mode) {
+    installSidebarBrand(ctx)
+    installCodexFileScope(ctx, false)
+  }
   installComposer(ctx, catalog.store)
   const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installStartupPage(ctx, startupReady)

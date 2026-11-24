@@ -1,5 +1,5 @@
-import { stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
+import { isWorkspaceDirectory } from './workspace-paths.mjs'
 
 const maximumWorkspaces = 8
 const refreshInterval = 5_000
@@ -44,7 +44,7 @@ export function createFileReferenceRoute(readScope, createSearch, ownerSignal) {
       try {
         // 原生会话继续按已有作用域查找。空草稿使用目录选择器提供的 Host 路径。
         const root = threadId ? (await readScope(threadId))?.workspaceRoot
-          : (await stat(cwd).catch(() => null))?.isDirectory() ? cwd : undefined
+          : await isWorkspaceDirectory(cwd) ? cwd : undefined
         signal.throwIfAborted()
         if (!isAbsolute(root ?? '')) {
           return Response.json({ error: '找不到 Codex 工作目录。' }, { status: 404, headers })
