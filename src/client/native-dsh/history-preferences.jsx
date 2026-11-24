@@ -3,7 +3,7 @@ import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useId, useState } from 'react'
 import { historyPreferenceLimits, isHistoryPreferenceValue } from '../../shared/history-preferences.js'
 import { readPage, writeCodexCapability } from '../api.js'
-import { codexSettingsItem } from './codex-settings.jsx'
+import { codexHistorySettings } from './codex-settings.jsx'
 
 const locale = 'codex.history-preferences'
 const endpoint = 'history-preferences'
@@ -128,7 +128,7 @@ function HistoryPreferences({ t, ownerSignal }) {
 /** 将逐项应用的历史偏好放到 Codex 设置页，沿用当前 Profile 的 Host 存储。 */
 export function installHistoryPreferences(ctx, ownerSignal) {
   ctx.effect(() => ctx.locale.register(locale, labels))
-  ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
-    name: codexSettingsItem, id: 'codex-history-preferences', order: -18, locale, inject: () => ({ ownerSignal }),
+  ctx.slots.inject(codexHistorySettings, () => ctx.slots.register({
+    name: codexHistorySettings, locale, inject: () => ({ ownerSignal }),
   }, HistoryPreferences))
 }

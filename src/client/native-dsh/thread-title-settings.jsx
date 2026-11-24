@@ -5,7 +5,7 @@ import { useId, useState } from 'react'
 import { configuredModelGroup } from '../../shared/model-selection.js'
 import { defaultTitleEffort, defaultTitleModel } from '../../shared/thread-title-settings.js'
 import { writeCodexCapability } from '../api.js'
-import { codexSettingsItem, createCodexPreference } from './codex-settings.jsx'
+import { codexTitleSettings, createCodexPreference } from './codex-settings.jsx'
 
 const locale = 'codex.thread-title-settings'
 const endpoint = 'title-settings'
@@ -148,8 +148,8 @@ export function installThreadTitleSettings(ctx, ownerSignal, modelCatalog, loadM
   void preference.load()
   ctx.effect(() => () => channel.close())
   ctx.effect(() => ctx.locale.register(locale, labels))
-  ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
-    name: codexSettingsItem, id: 'codex-thread-title-settings', order: -17, locale,
+  ctx.slots.inject(codexTitleSettings, () => ctx.slots.register({
+    name: codexTitleSettings, locale,
     inject: () => ({
       hooks: { titleSettings: preference.store, modelCatalog }, load: preference.load, loadModelCatalog,
       async save(patch) {
