@@ -14,27 +14,27 @@ const labels = {
   zh: {
     firstItems: '历史首屏条目数预算', firstMiB: '历史首屏体积预算（MiB）',
     openTurns: '打开时加载轮数', manualTurns: '每次加载更早的轮数', prefetch: '后台预读',
-    firstItemsHint: '首屏预算按消息、工具调用和工具结果等条目计数。预算不足时，最近三轮仍可先显示摘要。',
-    firstMiBHint: '限制首屏历史数据的大小。长回复或大量工具输出会用掉更多预算，减少首屏能完整显示的轮次。',
-    openTurnsHint: '打开会话时要加载的最近轮数，包含首屏已显示和后台预读补齐的轮次。',
-    manualTurnsHint: '每次点击「加载更早」最多往前读这么多轮。每读完一轮就显示，可以边加载边看。',
-    prefetchHint: '首屏显示后自动补齐到目标轮数。关闭后，点击「加载更早」继续读取。',
+    firstItemsHint: '调大后，打开会话时可以先看到更多对话记录。调小通常能更快打开很长的会话。',
+    firstMiBHint: '如果长回复或大段输出打开时经常只看到摘要，可以调大，以便直接看到全文。调小可缩短打开时的等待。',
+    openTurnsHint: '决定打开会话后准备多少轮近期对话。调大便于往上翻看，调小可以减少自动加载的历史。',
+    manualTurnsHint: '要一次往前翻很多轮，可以调大，每次点「加载更早」就多看几轮。调小则每次加载的量更少。',
+    prefetchHint: '开启后会自动准备更早的对话，往上翻时少等一点。关闭可省流量，想看时再点「加载更早」。',
     invalidCount: '请输入正整数。', invalidMiB: '请输入大于零的 MiB 数值。',
     invalidOpen: '请输入至少为 3 的整数。',
-    loading: '正在读取会话历史设置…', retry: '重试', loadFailed: '无法读取会话历史设置。',
+    loading: '正在读取设置…', retry: '重试', loadFailed: '无法读取会话历史设置。',
     writeFailed: '无法应用此项设置。请重试。',
   },
   en: {
     firstItems: 'Initial history item budget', firstMiB: 'Initial history size budget (MiB)',
     openTurns: 'Turns to load on open', manualTurns: 'Turns per Load earlier action', prefetch: 'Background prefetch',
-    firstItemsHint: 'Messages, tool calls, and tool results all count toward the initial budget. The latest three turns can appear as summaries if they exceed it.',
-    firstMiBHint: 'Limits the size of the initial history. Long replies and large tool outputs use more of the budget, so fewer turns may appear in full.',
-    openTurnsHint: 'Target number of recent turns to load when opening a session, including turns shown initially and those added by background prefetch.',
-    manualTurnsHint: 'Each click on Load earlier fetches up to this many older turns. Each turn appears as soon as it is ready.',
-    prefetchHint: 'Fill in older turns up to the target after the initial history appears. When off, click Load earlier to continue.',
+    firstItemsHint: 'Raise this to see more of the conversation right away. Lower it to open very long sessions faster.',
+    firstMiBHint: 'If long replies or large outputs often appear as previews, raise this to see more of them in full on open. Lower it to reduce the wait.',
+    openTurnsHint: 'Choose how much recent conversation to have ready when you open a session. Raise this to scroll further back, or lower it to load less history automatically.',
+    manualTurnsHint: 'Raise this to load more older turns with each click on Load earlier. Lower it to load fewer at a time.',
+    prefetchHint: 'Turn on to have older conversation ready when you scroll up. Turn off to save data and click Load earlier when needed.',
     invalidCount: 'Enter a positive integer.', invalidMiB: 'Enter a MiB value greater than zero.',
     invalidOpen: 'Enter an integer of at least 3.',
-    loading: 'Loading session history settings…', retry: 'Retry', loadFailed: 'Could not load session history settings.',
+    loading: 'Loading settings…', retry: 'Retry', loadFailed: 'Could not load session history settings.',
     writeFailed: 'Could not apply this setting. Try again.',
   },
 }
@@ -42,8 +42,8 @@ const labels = {
 function HistoryNumberField({ field, invalidLabel, value, status, apply, t }) {
   const id = useId()
   const [draft, setDraft] = useState(null)
-  const next = draft === null ? value : Number(draft)
-  const invalid = !isHistoryPreferenceValue(field, next)
+  const next = Number(draft)
+  const invalid = draft !== null && !isHistoryPreferenceValue(field, next)
   const description = t(invalid ? invalidLabel : status === 'failed' ? 'writeFailed' : `${field}Hint`)
 
   async function commit() {
@@ -58,7 +58,7 @@ function HistoryNumberField({ field, invalidLabel, value, status, apply, t }) {
         role={status === 'failed' ? 'alert' : undefined}>{description}</div>
     </div>
     <Input id={id} size={8} inputMode={historyPreferenceLimits[field].step === 'any' ? 'decimal' : 'numeric'}
-      value={draft ?? String(value)} disabled={status === 'pending'} aria-invalid={invalid || undefined}
+      value={draft ?? String(value ?? '')} disabled={value === undefined || status === 'pending'} aria-invalid={invalid || undefined}
       aria-describedby={`${id}-description`}
       onChange={event => setDraft(event.target.value)} onBlur={() => void commit()}
       onKeyDown={event => {
@@ -103,26 +103,24 @@ function HistoryPreferences({ t, ownerSignal }) {
     }
   }
 
-  if (!settings) return <div className={css.row}>
-    <div className={css.rowText} role={loadFailed ? 'alert' : 'status'}>{t(loadFailed ? 'loadFailed' : 'loading')}</div>
-    {loadFailed && <Button size="sm" variant="outline" onClick={() => {
-      setLoadFailed(false)
-      setAttempt(value => value + 1)
-    }}>{t('retry')}</Button>}
-  </div>
-
   return <>
     {Object.entries(numericFields).map(([field, invalidLabel]) => <HistoryNumberField key={field}
-      {...{ field, invalidLabel, apply, t }} value={settings[field]} status={status[field]} />)}
+      {...{ field, invalidLabel, apply, t }} value={settings?.[field]} status={status[field]} />)}
     <div className={css.row}>
       <div className={css.rowText}>
         <div className={css.title}>{t('prefetch')}</div>
         <div id={id} className={css.desc} role={status.prefetch === 'failed' ? 'alert' : undefined}>
           {t(status.prefetch === 'failed' ? 'writeFailed' : 'prefetchHint')}
         </div>
+        {loadFailed && <div className={css.desc} role="alert">{t('loadFailed')}</div>}
       </div>
-      <Switch checked={settings.prefetch} label={t('prefetch')} describedBy={id} disabled={status.prefetch === 'pending'}
+      {settings ? <Switch checked={settings.prefetch} label={t('prefetch')} describedBy={id} disabled={status.prefetch === 'pending'}
         onChange={value => void apply('prefetch', value)} />
+        : loadFailed ? <Button size="sm" variant="outline" onClick={() => {
+          setLoadFailed(false)
+          setAttempt(value => value + 1)
+        }}>{t('retry')}</Button>
+          : <span className={css.desc} role="status">{t('loading')}</span>}
     </div>
   </>
 }
