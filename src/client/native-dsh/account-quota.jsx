@@ -5,11 +5,15 @@ import css from './account-quota.module.css'
 const slot = 'conversation.input.right'
 const locale = 'codex.accountQuota'
 const copy = {
-  zh: { label: '额度', title: 'Codex 账户额度', summary: 'Codex 账户额度，剩余 {percent}%',
-    remaining: '剩余 {percent}%', resets: '{time} 重置', minutes: '{count} 分钟额度', hours: '{count} 小时额度',
+  zh: { title: 'Codex 账户额度', summary: 'Codex 账户额度，剩余 {percent}%',
+    remaining: '剩余 {percent}%', resetsAt: '{time} 重置', resetsIn: '{duration}后重置',
+    shortDays: '{count} 天', shortHours: '{count} 小时', shortMinutes: '{count} 分钟',
+    minutes: '{count} 分钟额度', hours: '{count} 小时额度',
     days: '{count} 天额度', weekly: '周额度', primary: '主要额度', secondary: '次要额度', dateLocale: 'zh-CN' },
-  en: { label: 'Usage', title: 'Codex account limits', summary: 'Codex usage, {percent}% left',
-    remaining: '{percent}% left', resets: 'Resets {time}', minutes: '{count}-minute limit', hours: '{count}-hour limit',
+  en: { title: 'Codex account limits', summary: 'Codex usage, {percent}% left',
+    remaining: '{percent}% left', resetsAt: 'Resets {time}', resetsIn: 'Resets in {duration}',
+    shortDays: '{count}d', shortHours: '{count}h', shortMinutes: '{count}m',
+    minutes: '{count}-minute limit', hours: '{count}-hour limit',
     days: '{count}-day limit', weekly: 'Weekly limit', primary: 'Primary limit', secondary: 'Secondary limit', dateLocale: 'en' },
 }
 
@@ -22,11 +26,37 @@ function windowLabel({ key, minutes }, t) {
 }
 
 function QuotaRing({ remaining }) {
-  return <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
-    <circle className={css.track} cx="10" cy="10" r="7.5" />
-    {remaining > 0 && <circle className={css.arc} cx="10" cy="10" r="7.5" pathLength="100"
+  return <svg viewBox="0 0 20 20" width="20" height="20" data-low={remaining <= 10 || undefined} aria-hidden="true">
+    <circle className={css.track} cx="10" cy="10" r="8" />
+    <circle className={css.center} cx="10" cy="10" r="2.5" />
+    {remaining > 0 && <circle className={css.arc} cx="10" cy="10" r="8" pathLength="100"
       strokeDasharray={`${remaining} 100`} transform="rotate(-90 10 10)" />}
   </svg>
+}
+
+function resetLabel(resetsAt, t) {
+  const minutes = Math.ceil((resetsAt * 1000 - Date.now()) / 60_000)
+  if (minutes <= 0) {
+    const format = new Intl.DateTimeFormat(t('dateLocale'), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    return t('resetsAt', { time: format.format(resetsAt * 1000) })
+  }
+  const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  const parts = days ? [['shortDays', days], ['shortHours', hours % 24]]
+    : [['shortHours', hours], ['shortMinutes', minutes % 60]]
+  return t('resetsIn', { duration: parts.filter(([, count]) => count).map(([key, count]) => t(key, { count })).join(' ') })
+}
+
+function QuotaWindow({ window, t }) {
+  const values = <><span>{windowLabel(window, t)}</span>
+    <span className={css.remaining}>{t('remaining', { percent: window.remaining })}</span></>
+  return <li>
+    {window.resetsAt == null ? <div className={css.row}>{values}</div>
+      // 详情本身在浏览器顶层，提示也留在详情内，避免被浮层盖住。
+      : <Tooltip label={() => resetLabel(window.resetsAt, t)} side="right" delayMs={160} openOnClick>
+        <Button className={css.row} size="sm" variant="ghost">{values}</Button>
+      </Tooltip>}
+  </li>
 }
 
 function AccountQuota({ store, active, t }) {
@@ -36,24 +66,18 @@ function AccountQuota({ store, active, t }) {
   const anchorName = `--codex-account-quota-${id.replaceAll(':', '')}`
   const remaining = Math.min(...windows.map(window => window.remaining))
   const summary = t('summary', { percent: remaining })
-  const resetFormat = new Intl.DateTimeFormat(t('dateLocale'), { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
   return <>
     <Tooltip label={summary} side="top" delayMs={300} portal>
-      <Button size="sm" variant="ghost" popovertarget={id} aria-label={summary} style={{ anchorName }}
-        icon={<QuotaRing remaining={remaining} />}>{t('label')}</Button>
+      <Button className={css.trigger} size="sm" variant="ghost" popovertarget={id} aria-label={summary} style={{ anchorName }}>
+        <QuotaRing remaining={remaining} />
+      </Button>
     </Tooltip>
     <section id={id} popover="auto" aria-label={t('title')} className={css.panel} style={{ positionAnchor: anchorName }}>
-      <MenuSurface className={css.content}>
-        <h2 className={css.title}>{t('title')}</h2>
-        <dl className={css.windows}>
-          {windows.map(window => <div className={css.window} key={window.key}>
-            <dt>{windowLabel(window, t)}</dt>
-            <dd>{t('remaining', { percent: window.remaining })}</dd>
-            {window.resetsAt != null && <dd className={css.reset}>
-              {t('resets', { time: resetFormat.format(window.resetsAt * 1000) })}
-            </dd>}
-          </div>)}
-        </dl>
+      <MenuSurface compact className={css.content}>
+        <p className={css.caption}>{t('title')}</p>
+        <ul className={css.windows}>
+          {windows.map(window => <QuotaWindow key={window.key} window={window} t={t} />)}
+        </ul>
       </MenuSurface>
     </section>
   </>
