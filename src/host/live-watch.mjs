@@ -11,6 +11,7 @@ import { defaultHistoryPreferences } from '../shared/history-preferences.js'
 
 const encoder = new TextEncoder()
 const heartbeatFrame = encoder.encode('event: heartbeat\ndata: {}\n\n')
+const restartFrame = encoder.encode('event: watch-restart\ndata: {}\n\n')
 const maxQueuedBytes = 2 * 1024 * 1024
 const maxPendingNotifications = 512
 const chunkBytes = 64 * 1024
@@ -350,7 +351,9 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
             }
             send({ type: 'notification', notification: message })
             if (!signal.aborted && (message.method === 'thread/archived' || message.method === 'thread/unarchived')) {
-              // 原生归档会移动 rollout。先把已排队的通知发完，再让浏览器按新路径观察。
+              // 归档状态变化会移动 rollout。让浏览器处理完已有帧后立即按新路径观察。
+              push(restartFrame)
+              if (signal.aborted) return
               ended = true
               flush()
               abort.abort()

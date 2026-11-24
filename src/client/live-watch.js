@@ -21,6 +21,7 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
     const attempt = new AbortController()
     connection = attempt
     let idleTimer
+    let restart = false
 
     function waitForBytes() {
       clearTimeout(idleTimer)
@@ -53,6 +54,10 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
       for await (const { event, data, id } of frames) {
         stopWaiting()
         attempt.signal.throwIfAborted()
+        if (event === 'watch-restart') {
+          restart = true
+          break
+        }
         if (event === 'history-checkpoint') {
           // 只有先前帧成功投影并保存检查点后，后续连接才可以从这里续读。
           const cursor = id ?? ''
@@ -75,6 +80,11 @@ export function openLiveWatch(threadId, { receive, changeMode, queue, questions,
     }
 
     if (signal.aborted) return
+    if (restart) {
+      // Host 主动切换历史源时，沿用最后成功应用的游标立即建立观察。
+      void connect()
+      return
+    }
     retryTimer = setTimeout(connect, retryDelayMs)
     // 首次断开可补读 HTTP 历史。让补读跟随观察器，避免上一次连接终止时取消补读。
     await changeMode?.('disconnected', signal)

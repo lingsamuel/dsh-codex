@@ -71,6 +71,34 @@ test('慢投影期间不处理后续帧或检查点，重连使用已应用游�
   assert.equal(requests[1].url.searchParams.get('itemCursor'), 'applied')
 })
 
+test('归档切换后立即从已应用的游标重连，后续意外断开仍报告中断', async t => {
+  const applied = []
+  const modes = []
+  const { requests, advance } = watch(t, {
+    receive: frame => applied.push(frame.notification.method),
+    checkpoint: cursor => applied.push(cursor),
+    changeMode: mode => modes.push(mode),
+  })
+  const [first] = requests
+  first.send('id: saved\nevent: history-checkpoint\ndata: {}\n\n')
+  first.send('data: {"type":"notification","notification":{"method":"thread/unarchived"}}\n\n')
+  first.send('event: watch-restart\ndata: {}\n\n')
+  first.end()
+  await nextTurn()
+
+  assert.deepEqual(applied, ['saved', 'thread/unarchived'])
+  assert.deepEqual(modes, ['connecting', 'connecting'])
+  assert.equal(requests.length, 2)
+  assert.equal(requests[1].url.searchParams.get('itemCursor'), 'saved')
+
+  requests[1].end()
+  await nextTurn()
+  assert.deepEqual(modes, ['connecting', 'connecting', 'disconnected'])
+  assert.equal(requests.length, 2)
+  await advance(3_000)
+  assert.equal(requests.length, 3)
+})
+
 test('投影失败后从最后成功的检查点继续', async t => {
   const applied = []
   const { requests, advance } = watch(t, {
