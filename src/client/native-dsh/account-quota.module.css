@@ -13,6 +13,16 @@
   background: var(--dsw-alias-interactive-bg-hover);
 }
 
+.arc,
+.meter {
+  --quota-fill: var(--dsw-alias-label-secondary);
+}
+
+[data-low] > .arc,
+.meter[data-low] {
+  --quota-fill: var(--dsw-alias-state-error-primary);
+}
+
 .track,
 .arc {
   fill: none;
@@ -24,7 +34,7 @@
 }
 
 .arc {
-  stroke: var(--dsw-alias-label-secondary);
+  stroke: var(--quota-fill);
   stroke-linecap: round;
 }
 
@@ -34,12 +44,10 @@
 
 .reading {
   color: var(--dsw-alias-label-secondary);
-  font: 500 9px/1 var(--dsw-font-family);
-  font-variant-numeric: tabular-nums;
+  font: var(--dsw-font-xs-13);
 }
 
 [data-low] > .arc {
-  stroke: var(--dsw-alias-state-error-primary);
   stroke-linecap: butt;
 }
 
@@ -104,7 +112,6 @@
 }
 
 .meter {
-  --quota-fill: var(--dsw-alias-label-secondary);
   appearance: none;
   display: block;
   width: 100%;
@@ -114,10 +121,6 @@
   border: 0;
   border-radius: var(--dsw-radius-sm);
   background: var(--dsw-alias-border-l2);
-}
-
-.meter[data-low] {
-  --quota-fill: var(--dsw-alias-state-warn-label);
 }
 
 .meter::-webkit-progress-bar {
