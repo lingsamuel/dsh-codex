@@ -2,9 +2,16 @@ import { build } from 'esbuild'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { dshTrajectorySource } from './dsh-trajectory.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const { name } = JSON.parse(await readFile(new URL('../package.json', import.meta.url)))
+const trajectoryLicenses = await Promise.all([
+  '@deepseek-ai/dsh-client-ui-trajectory', '@tanstack/react-virtual', '@tanstack/virtual-core',
+].map(async name => {
+  const notice = await readFile(new URL('./LICENSE', import.meta.resolve(`${name}/package.json`)), 'utf8')
+  return `/*! ${name}\n${notice.trimEnd()}\n*/`
+}))
 
 const client = await build({
   absWorkingDir: root,
@@ -13,6 +20,7 @@ const client = await build({
   bundle: true,
   format: 'cjs',
   jsx: 'automatic',
+  plugins: [await dshTrajectorySource()],
   platform: 'browser',
   write: false,
   external: [
@@ -24,7 +32,7 @@ const client = await build({
     '@deepseek-ai/dsh-client-ui-primitives',
   ],
   banner: {
-    js: `window.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,
+    js: `${trajectoryLicenses.join('\n')}\nwindow.__ModuleLoader__.load({ id: ${JSON.stringify(name)}, factory: (require) => { const module = { exports: {} };`,
   },
   footer: { js: 'return module.exports; }' },
 })

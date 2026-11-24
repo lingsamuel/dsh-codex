@@ -32,6 +32,7 @@ import { installCodexMcpInteractions } from './native-dsh/mcp-interaction.jsx'
 import { installWorktrees } from './native-dsh/worktree.jsx'
 import { installSidebarBrand } from './native-dsh/branding.jsx'
 import { installStartupPage } from './native-dsh/startup.jsx'
+import { installTrajectory } from './native-dsh/trajectory.jsx'
 import { installWebMode } from './web-mode.jsx'
 import { webModePath } from '../shared/web-mode.js'
 
@@ -62,6 +63,7 @@ export async function apply(ctx) {
   installComposer(ctx, catalog.store)
   const { deleteSession, startupReady } = provideCodexControllers(ctx, catalog, installForkFeedback(ctx))
   installStartupPage(ctx, startupReady)
+  installTrajectory(ctx)
   installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx, catalog.store)
   installWorkspaceLinks(ctx)

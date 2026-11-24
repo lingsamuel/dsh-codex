@@ -1,0 +1,221 @@
+--- a/layout.ts
++++ b/layout.ts
+@@ -42,4 +42,5 @@
+   eventLocations?: ReadonlyMap<number, ConversationLocation>
+   partial: TrajectorySnapshot['partial']
++  locateTool?: (tool: ToolResultNode) => { turn: number; step: number } | undefined
+   runningCalls: TrajectorySnapshot['runningCalls']
+   requests?: readonly RequestView[]
+@@ -180,5 +181,5 @@
+ ): readonly TrajectoryTurnModel[] {
+   const {
+-    nodes, eventLocations, partial, runningCalls, requests = [], callSchemas,
++    nodes, eventLocations, partial, runningCalls, requests = [], callSchemas, locateTool,
+   } = input
+   const resultByCall = indexResults(nodes)
+@@ -479,5 +480,6 @@
+           index = laid.cell.index
+         }
+-        pushStep(0, 1, laidList)
++        const location = locateTool?.(node)
++        pushStep(location?.turn ?? 0, location?.step ?? 1, laidList)
+       }
+       prevAbsTime = finiteTime(node.time) ?? prevAbsTime
+--- a/TrajectoryView.tsx
++++ b/TrajectoryView.tsx
+@@ -11,4 +11,5 @@
+ import {
+   TrajectoryTable,
++  type TrajectoryTableProps,
+   type TrajectoryRequestNumber,
+   type TrajectoryUsage,
+@@ -19,4 +20,5 @@
+ import {
+   appendTrajectoryPartialLayout, deriveTrajectoryLayout,
++  type TrajectoryLayoutInput,
+   type TrajectoryTurnModel,
+ } from './layout.ts'
+@@ -134,9 +136,11 @@
+ export function TrajectoryView({
+   useSession, useTrajectory, useDuration, watchToolResult, loadOlder, loadImage, setActualDuration,
+-  viewRequest, completeViewRequest, renderSlot, t, jsonStringWrapping,
++  viewRequest, completeViewRequest, renderSlot, t, jsonStringWrapping, locateTool, labelTurn,
+ }: ConvViewProps
+   & Pick<PropsRenderSlots<'conversation.trajectory.images'>, 'renderSlot'>
+   & InjectFace<TrajectoryViewInjected>
+-  & PropsLocale<'trajectory'>) {
++  & PropsLocale<'trajectory'>
++  & Pick<TrajectoryLayoutInput, 'locateTool'>
++  & Pick<TrajectoryTableProps, 'labelTurn'>) {
+   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<number>>(EMPTY_TURN_IDS)
+   const [collapsedAssistants, setCollapsedAssistants] =
+@@ -320,4 +324,5 @@
+       nodes,
+       eventLocations,
++      locateTool,
+       partial: partialTurn === null || partialStep === null
+         ? null
+@@ -330,5 +335,5 @@
+     return { turns, lastIndex: lastCellIndex(turns) }
+   }, [
+-    nodes, eventLocations, partialTurn, partialStep,
++    nodes, eventLocations, locateTool, partialTurn, partialStep,
+     runningCalls, requests, inspection.systemPrompts, callSchemas, t,
+   ])
+@@ -360,10 +365,12 @@
+     [finalized, partialSearchTurns],
+   )
+-  const latestSearchLayouts = useRef(searchLayouts)
+-  latestSearchLayouts.current = searchLayouts
++  const latestSearch = useRef({ layouts: searchLayouts, labelTurn })
++  latestSearch.current = { layouts: searchLayouts, labelTurn }
++  const indexedTurnLabel = useRef(labelTurn)
+   useEffect(() => {
+-    if (!searchIndexInitialized.current) {
++    if (!searchIndexInitialized.current || indexedTurnLabel.current !== labelTurn) {
+       searchIndexInitialized.current = true
+-      if (searchIndex.update(searchLayouts)) {
++      indexedTurnLabel.current = labelTurn
++      if (searchIndex.update(searchLayouts, labelTurn)) {
+         setSearchIndexRevision(revision => revision + 1)
+       }
+@@ -373,9 +380,10 @@
+     searchIndexTimer.current = setTimeout(() => {
+       searchIndexTimer.current = null
+-      if (searchIndex.update(latestSearchLayouts.current)) {
++      const latest = latestSearch.current
++      if (searchIndex.update(latest.layouts, latest.labelTurn)) {
+         setSearchIndexRevision(revision => revision + 1)
+       }
+     }, SEARCH_INDEX_THROTTLE_MS)
+-  }, [searchIndex, searchLayouts])
++  }, [searchIndex, searchLayouts, labelTurn])
+   useEffect(() => () => {
+     if (searchIndexTimer.current !== null) clearTimeout(searchIndexTimer.current)
+@@ -588,4 +596,5 @@
+           renderSlot={renderSlot}
+           loadImage={loadImage}
++          labelTurn={labelTurn}
+           requestNumbers={requestNumbers}
+           turns={timelineTurns}
+--- a/TrajectoryTable.tsx
++++ b/TrajectoryTable.tsx
+@@ -397,4 +397,5 @@
+ /** Props for the trajectory ledger. */
+ export interface TrajectoryTableProps {
++  labelTurn?: (turn: number) => { title: string; compact: string }
+   /** Observe the selected result while the Result tab is open. */
+   watchToolResult?: WatchToolResult | undefined
+@@ -579,8 +580,4 @@
+ }
+
+-function sectionLabel(turn: number | null, t: TrajectoryTranslate): string {
+-  return turn === null ? t('section.betweenTurns') : t('turn.label', { turn })
+-}
+-
+ function indexRequestNumbers(
+   sessionNumbers: readonly TrajectoryRequestNumber[] | undefined,
+@@ -2100,4 +2097,5 @@
+   loadImage,
+   requestNumbers: sessionRequestNumbers,
++  labelTurn = turn => ({ title: t('turn.label', { turn }), compact: `#${turn}` }),
+   turns,
+   streamingCells = [],
+@@ -2123,4 +2121,5 @@
+   onInspectApplied,
+ }: TrajectoryTableProps) {
++  const sectionLabel = (turn: number | null) => turn === null ? t('section.betweenTurns') : labelTurn(turn).title
+   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+   const [selectedRequest, setSelectedRequest] = useState<SelectedRequest | null>(null)
+@@ -2884,15 +2883,15 @@
+                               ? `${css.turnLabel} ${css.turnLabelActive}`
+                               : css.turnLabel}
+-                            aria-label={sectionLabel(record.turn, t)}
++                            aria-label={sectionLabel(record.turn)}
+                           >
+                             {record.turn === null
+-                              ? sectionLabel(record.turn, t)
++                              ? sectionLabel(record.turn)
+                               : (
+                                 <>
+                                   <span className={css.turnLabelFull} aria-hidden="true">
+-                                    {sectionLabel(record.turn, t)}
++                                    {sectionLabel(record.turn)}
+                                   </span>
+                                   <span className={css.turnLabelCompact} aria-hidden="true">
+-                                    #{record.turn}
++                                    {labelTurn(record.turn).compact}
+                                   </span>
+                                 </>
+@@ -3091,6 +3090,6 @@
+                     <span className={css.detailsLocation}>
+                       {selectedRequestInfo.purpose === 'compaction'
+-                        ? t('request.compaction', { section: sectionLabel(selectedRequestInfo.turn, t) })
+-                        : sectionLabel(selectedRequestInfo.turn, t)}
++                        ? t('request.compaction', { section: sectionLabel(selectedRequestInfo.turn) })
++                        : sectionLabel(selectedRequestInfo.turn)}
+                     </span>
+                   </>
+@@ -3123,6 +3122,6 @@
+                       <span className={css.detailsLocation}>
+                         {selected.cell.kind === 'compacted'
+-                          ? sectionLabel(selected.turn, t)
+-                          : `${sectionLabel(selected.turn, t)} · ${selected.group}`}
++                          ? sectionLabel(selected.turn)
++                          : `${sectionLabel(selected.turn)} · ${selected.group}`}
+                       </span>
+                     </>
+--- a/trajectory-search-index.ts
++++ b/trajectory-search-index.ts
+@@ -2,4 +2,5 @@
+
+ import type { TrajectoryTurnModel } from './layout.ts'
++import type { TrajectoryTableProps } from './TrajectoryTable.tsx'
+ import type { TrajectoryCellProps } from './trajectory-record.ts'
+ import { trajectoryRecordId } from './trajectory-record.ts'
+@@ -38,5 +39,5 @@
+
+ function recordSources(
+-  turn: number | null,
++  turn: string,
+   group: string,
+   cell: TrajectoryCellProps,
+@@ -47,5 +48,5 @@
+   ]
+   return [
+-    turn === null ? 'between turns' : `turn ${turn}`,
++    turn,
+     group,
+     cell.kind,
+@@ -77,21 +78,28 @@
+   private readonly entries = new Map<string, SearchEntry>()
+   private layouts: readonly (readonly TrajectoryTurnModel[])[] | undefined
++  private labelTurn: TrajectoryTableProps['labelTurn']
+
+   /**
+    * Incrementally synchronize one or more current trajectory layout slices.
+    * @param layouts - Finalized and optional streaming layouts from the same view.
++   * @param labelTurn - Labels to index for each visible turn.
+    * @returns Whether the indexed layout version changed.
+    */
+-  update(layouts: readonly (readonly TrajectoryTurnModel[])[]): boolean {
+-    if (this.layouts === layouts) return false
++  update(layouts: readonly (readonly TrajectoryTurnModel[])[], labelTurn?: TrajectoryTableProps['labelTurn']): boolean {
++    if (this.layouts === layouts && this.labelTurn === labelTurn) return false
+     this.layouts = layouts
++    this.labelTurn = labelTurn
+     const seen = new Set<string>()
+     for (const turns of layouts) {
+       for (const turn of turns) {
++        const labels = turn.turn === null ? undefined : labelTurn?.(turn.turn)
++        const section = labels === undefined
++          ? turn.turn === null ? 'between turns' : `turn ${turn.turn}`
++          : `${labels.title}\n${labels.compact}`
+         for (const group of turn.groups) {
+           for (const cell of group.cells) {
+             if (cell.requestOnly === true) continue
+             const id = trajectoryRecordId(cell)
+-            const sources = recordSources(turn.turn, group.title, cell)
++            const sources = recordSources(section, group.title, cell)
+             const previous = this.entries.get(id)
+             const entry = previous !== undefined && sameSources(previous.sources, sources)

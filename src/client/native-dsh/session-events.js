@@ -5,6 +5,7 @@ import { openLiveWatch } from '../live-watch.js'
 import { inlineAttachmentId, readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
 import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
+import { trajectoryCoordinates } from '../native-chat/trajectory.js'
 import { remoteFailure } from './catalog.js'
 import { allowsDirectInput, subagentAddress } from './subagents.js'
 import { messageAnchor } from './message-anchor.js'
@@ -16,6 +17,7 @@ import { userInputText } from '../../shared/user-input.js'
 import { projectAsyncQuestions, projectNativeQuestions } from './native-questions.js'
 
 const emptyProjection = { getSnapshot: () => undefined, subscribe: () => () => {} }
+const emptyTrajectory = trajectoryCoordinates([])
 
 function questionItem(item) {
   return item?.type === 'userMessage' || (item?.type === 'agentMessage' && item.questions?.length)
@@ -59,6 +61,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   })
   const events = createSnapshotStore({
     entries: [],
+    readCodexTrajectory: () => emptyTrajectory,
     hasMore: false,
     revision: 0,
     change: { kind: 'replace', entries: [] },
@@ -139,9 +142,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     const backing = windowEntries
     const length = backing.length
     let entries
+    let trajectory
     const readEntries = () => entries ??= backing.slice(0, length)
     change ??= { kind: 'replace', get entries() { return readEntries() } }
-    events.set({ get entries() { return readEntries() }, hasMore, revision: previous.revision + 1, change })
+    events.set({
+      get entries() { return readEntries() },
+      readCodexTrajectory: () => trajectory ??= trajectoryCoordinates(backing, length),
+      hasMore, revision: previous.revision + 1, change,
+    })
   }
 
   function publishState({ mode, reconnecting, status, historyMode, canAcceptDirectInput, archived } = {}) {
