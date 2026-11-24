@@ -42,6 +42,7 @@ export const conflictingClientPackages = new Set([
   '@deepseek-ai/dsh-client-ui-plan',
   '@deepseek-ai/dsh-client-ui-schedule',
   '@deepseek-ai/dsh-client-ui-skill',
+  '@deepseek-ai/dsh-experimental-client-ui-forge',
   '@deepseek-ai/dsh-session-log-export',
 ])
 

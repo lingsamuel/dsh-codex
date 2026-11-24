@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { webModeFor } from '../src/shared/web-mode.js'
 
+const forgePanel = '@deepseek-ai/dsh-experimental-client-ui-forge'
+
 test('共存页各自搜集待关闭终端，保留原来的终端 shell 偏好', async () => {
   const { installCodexStorageScope } = await import('../src/shared/dual-web-entry.js')
   class Storage {
@@ -142,6 +144,7 @@ test('Codex 启动图跳过原生会话功能并保留共用组件和独立插�
     '@deepseek-ai/dsh-client-ui-message-feedback',
     '@deepseek-ai/dsh-client-ui-schedule',
     '@deepseek-ai/dsh-client-ui-skill',
+    forgePanel,
     '@deepseek-ai/dsh-session-log-export',
   ]
   const shared = '@deepseek-ai/dsh-client-ui-context-menu'
@@ -178,7 +181,7 @@ test('Codex 热更新沿用启动筛选，更新会话控制器前提示重新�
   }) }
   installCodexGraphSync(loader, boot, adapter.id, selectCodexBoot, () => { reloads++ })
   const { entries } = loader.create()
-  await entries.sync(graph([{ id: native }, adapter, feature]))
+  await entries.sync(graph([{ id: native }, adapter, { id: forgePanel }, feature]))
   await entries.reload(feature.id, 'new')
   await entries.sync(graph([feature]))
   await entries.sync(graph([{ ...adapter, rev: 'new' }, feature]))
