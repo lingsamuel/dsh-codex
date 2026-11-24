@@ -13,14 +13,16 @@ const defaultOption = 'default'
 const labels = {
   zh: {
     model: '拟标题模型', default: '{model}（默认）', unavailable: '{model}（不可用）',
-    modelHelp: '首次和后续拟题会把少量用户发言交给所选提供商单独请求。默认使用 {model}（低推理强度）。模型不可用时保留原标题或正文预览。即使标题没有变化，拟题也可能增加订阅用量或 API 费用。',
+    modelHelp: '首次拟题和后续更新会把少量用户发言交给所选提供商。OpenAI 的 {model} 固定使用低推理强度，其他模型的推理强度由 Codex 决定。模型不可用时保留原标题或正文预览。',
+    costHelp: '即使标题没有变化，拟题也可能增加订阅用量或 API 费用。',
     follow: '随会话更新标题',
     followHelp: '每累计两轮含网页发言的对话后检查任务是否变化。新增正文很短时跳过请求，手动起的标题会保留。',
     loading: '正在读取…', retry: '重试', catalogError: '无法读取可用模型。',
   },
   en: {
     model: 'Title generation model', default: '{model} (default)', unavailable: '{model} (unavailable)',
-    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider in a separate request. The default is {model} with low reasoning. If the model is unavailable, the title or message preview stays as is. Requests may use additional plan allowance or incur API costs even when the title stays the same.',
+    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider. OpenAI {model} always uses low reasoning effort. Codex resolves the reasoning effort for other models. If the model is unavailable, the title or message preview stays as is.',
+    costHelp: 'Requests may use additional plan allowance or incur API costs even when the title stays the same.',
     follow: 'Update titles as the conversation evolves',
     followHelp: 'Check for a task change every two turns with web messages. Skip requests when the new text is very short. Keep manually set titles.',
     loading: 'Loading…', retry: 'Retry', catalogError: 'Could not load available models.',
@@ -90,7 +92,7 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
       : catalog ? t('unavailable', { model: selection.model }) : selection.model)
 
   return <>
-    <PreferenceRow title={t('model')} description={t('modelHelp', { model: defaultTitleModel.name })}
+    <PreferenceRow title={t('model')} description={<>{t('modelHelp', { model: defaultTitleModel.name })}<br />{t('costHelp')}</>}
       value={value} selectedLabel={settings ? label : t('loading')}
       options={settings && !saving ? [{ id: defaultOption, label: defaultLabel }, ...models.map(model => ({
         id: optionId(model), label: model.label,

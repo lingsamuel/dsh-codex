@@ -12,20 +12,26 @@ const numericFields = {
 }
 const labels = {
   zh: {
-    applyHint: '在下次打开会话时生效。',
     firstItems: '历史首屏条目数预算', firstMiB: '历史首屏体积预算（MiB）',
     openTurns: '打开时加载轮数', manualTurns: '每次加载更早的轮数', prefetch: '后台预读',
-    prefetchHint: '首屏显示后，自动向前加载直到达到打开时的目标轮数。',
+    firstItemsHint: '首屏预算按消息、工具调用和工具结果等条目计数。预算不足时，最近三轮仍可先显示摘要。',
+    firstMiBHint: '限制首屏历史数据的大小。长回复或大量工具输出会用掉更多预算，减少首屏能完整显示的轮次。',
+    openTurnsHint: '打开会话时要加载的最近轮数，包含首屏已显示和后台预读补齐的轮次。',
+    manualTurnsHint: '每次点击「加载更早」最多往前读这么多轮。每读完一轮就显示，可以边加载边看。',
+    prefetchHint: '首屏显示后自动补齐到目标轮数。关闭后，点击「加载更早」继续读取。',
     invalidCount: '请输入正整数。', invalidMiB: '请输入大于零的 MiB 数值。',
     invalidOpen: '请输入至少为 3 的整数。',
     loading: '正在读取会话历史设置…', retry: '重试', loadFailed: '无法读取会话历史设置。',
     writeFailed: '无法应用此项设置。请重试。',
   },
   en: {
-    applyHint: 'Applies the next time you open a session.',
     firstItems: 'Initial history item budget', firstMiB: 'Initial history size budget (MiB)',
     openTurns: 'Turns to load on open', manualTurns: 'Turns per Load earlier action', prefetch: 'Background prefetch',
-    prefetchHint: 'After the initial history appears, load older turns up to the target for opening a session.',
+    firstItemsHint: 'Messages, tool calls, and tool results all count toward the initial budget. The latest three turns can appear as summaries if they exceed it.',
+    firstMiBHint: 'Limits the size of the initial history. Long replies and large tool outputs use more of the budget, so fewer turns may appear in full.',
+    openTurnsHint: 'Target number of recent turns to load when opening a session, including turns shown initially and those added by background prefetch.',
+    manualTurnsHint: 'Each click on Load earlier fetches up to this many older turns. Each turn appears as soon as it is ready.',
+    prefetchHint: 'Fill in older turns up to the target after the initial history appears. When off, click Load earlier to continue.',
     invalidCount: 'Enter a positive integer.', invalidMiB: 'Enter a MiB value greater than zero.',
     invalidOpen: 'Enter an integer of at least 3.',
     loading: 'Loading session history settings…', retry: 'Retry', loadFailed: 'Could not load session history settings.',
@@ -38,8 +44,7 @@ function HistoryNumberField({ field, invalidLabel, value, status, apply, t }) {
   const [draft, setDraft] = useState(null)
   const next = draft === null ? value : Number(draft)
   const invalid = !isHistoryPreferenceValue(field, next)
-  const description = invalid ? t(invalidLabel) : status === 'failed' ? t('writeFailed')
-    : field === 'firstItems' ? t('applyHint') : undefined
+  const description = t(invalid ? invalidLabel : status === 'failed' ? 'writeFailed' : `${field}Hint`)
 
   async function commit() {
     if (draft === null || invalid || status === 'pending') return
@@ -49,12 +54,12 @@ function HistoryNumberField({ field, invalidLabel, value, status, apply, t }) {
   return <div className={css.row}>
     <div className={css.rowText}>
       <label className={css.title} htmlFor={id}>{t(field)}</label>
-      {description && <div className={css.desc} id={`${id}-description`}
-        role={status === 'failed' ? 'alert' : undefined}>{description}</div>}
+      <div className={css.desc} id={`${id}-description`}
+        role={status === 'failed' ? 'alert' : undefined}>{description}</div>
     </div>
     <Input id={id} size={8} inputMode={historyPreferenceLimits[field].step === 'any' ? 'decimal' : 'numeric'}
       value={draft ?? String(value)} disabled={status === 'pending'} aria-invalid={invalid || undefined}
-      aria-describedby={description ? `${id}-description` : undefined}
+      aria-describedby={`${id}-description`}
       onChange={event => setDraft(event.target.value)} onBlur={() => void commit()}
       onKeyDown={event => {
         if (event.key === 'Enter') {
