@@ -1,4 +1,5 @@
 import { DisclosureRow, IconEditOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { ToolDetails } from '@deepseek-ai/dsh-client-ui-tool/src/client/tool/components/ToolDetails.tsx'
 import { useState } from 'react'
 import css from './thread-title-history.module.css'
 
@@ -15,22 +16,22 @@ const labels = {
   },
 }
 
-function TitleHistoryRow({ update, t }) {
+function TitleHistoryRow({ update, t, toolText }) {
   const [open, setOpen] = useState(false)
   const renamed = update.outcome === 'renamed'
-  const names = renamed ? t('names', { oldTitle: update.oldTitle ?? t('unnamed'), newTitle: update.newTitle }) : null
+  const names = open && renamed ? t('names', { oldTitle: update.oldTitle ?? t('unnamed'), newTitle: update.newTitle }) : null
   const result = t(update.outcome)
   const title = renamed || update.outcome === 'kept' ? result : `${t('title')} · ${result}`
   return <DisclosureRow icon={<IconEditOutlineRegular />} title={title} rowClassName={css.row} titleClassName={css.title}
     open={open} expandable={renamed} expandOnRowClick onToggle={() => setOpen(value => !value)}>
-    {renamed && <p className={css.details}>{names}</p>}
+    {names !== null && <ToolDetails t={toolText} model={{ compact: true, items: [{ title: names, fields: [] }] }} />}
   </DisclosureRow>
 }
 
-function ThreadTitleHistory({ turn, useProjection, t }) {
+function ThreadTitleHistory({ turn, useProjection, t, toolText }) {
   const turnId = turn.start?.data.codexTurnId
   const updates = useProjection('titleHistory', byTurn => byTurn?.get(turnId))
-  return updates?.map((update, index) => <TitleHistoryRow key={index} update={update} t={t} />) ?? null
+  return updates?.map((update, index) => <TitleHistoryRow key={index} update={update} t={t} toolText={toolText} />) ?? null
 }
 
 /** 用原生轮次尾部展示拟标题注记，不把注记写进 DSH 的对话事件流。 */
@@ -38,5 +39,6 @@ export function installThreadTitleHistory(ctx) {
   ctx.effect(() => ctx.locale.register(locale, labels))
   ctx.slots.inject(slot, () => ctx.slots.register({
     name: slot, id: 'codex-thread-title-history', locale,
+    inject: () => ({ toolText: ctx.locale.bind('conversation') }),
   }, ThreadTitleHistory))
 }

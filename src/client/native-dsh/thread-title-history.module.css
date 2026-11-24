@@ -8,9 +8,5 @@
   flex: 0 1 auto;
   min-width: 0;
   white-space: normal;
-}
-
-.title,
-.details {
   overflow-wrap: anywhere;
 }
