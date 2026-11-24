@@ -1,0 +1,29 @@
+--- a/client/queue/QueueDock.tsx
++++ b/client/queue/QueueDock.tsx
+@@ -25,4 +25,5 @@
+ function textOf(content: InboxState['next-turn'][number]['content']): string | null {
+-  if (!content.every(block => block.type === 'text')) return null
++  // Codex 更新的只是正文，Host 从原生队列项保留图片和文件。
++  if (!content.every(block => block.type === 'text' || block.type === 'image' || block.type === 'file')) return null
+   return extractTextContent(content)
+ }
+@@ -160,5 +161,9 @@
++  const editingRow = editing === null ? undefined : queue.find(row => row.id === editing.id)
++  const canSave = editing !== null && editingRow !== undefined
++    && (editing.text.trim() !== '' || queueAttachments(editingRow.content).length > 0)
++
+   const saveEdit = async (): Promise<void> => {
+-    if (editing === null || editing.text.trim() === '') return
++    if (editing === null || !canSave || busy !== null) return
+     if (await applyAction(
+       editing.id,
+       { kind: 'edit', content: [{ type: 'text', text: editing.text }] },
+@@ -244,7 +249,7 @@
+                             type="button"
+                             className={css.action}
+                             aria-label={t('queue.save')}
+-                            disabled={busy !== null || editing.text.trim() === ''}
++                            disabled={busy !== null || !canSave}
+                             onClick={() => { void saveEdit() }}
+                           >
+                             <IconCheckOutlineRegular size={14} />

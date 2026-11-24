@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { dshTrajectorySource } from './dsh-trajectory.mjs'
+import { patchedDshSource } from './patched-dsh-source.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 const outdir = process.argv[2] ?? 'dist'
@@ -10,7 +11,8 @@ const { name } = JSON.parse(await readFile(new URL('../package.json', import.met
 const scheduleFork = new URL('../forks/dsh-schedule-for-codex/', import.meta.url)
 const scheduleLicense = (await readFile(new URL('LICENSE', scheduleFork), 'utf8')).trimEnd()
 const clientLicenses = await Promise.all([
-  '@deepseek-ai/dsh-client-ui-tool', '@deepseek-ai/dsh-client-ui-trajectory', '@tanstack/react-virtual', '@tanstack/virtual-core',
+  '@deepseek-ai/dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-tool', '@deepseek-ai/dsh-client-ui-trajectory',
+  '@tanstack/react-virtual', '@tanstack/virtual-core',
 ].map(async name => {
   const notice = await readFile(new URL('./LICENSE', import.meta.resolve(`${name}/package.json`)), 'utf8')
   return `/*! ${name}\n${notice.trimEnd()}\n*/`
@@ -27,7 +29,7 @@ const client = await build({
   jsx: 'automatic',
   // DSH 时间模块从 rrule 的 CommonJS 入口读取默认导出。
   alias: { rrule: 'rrule/dist/es5/rrule.js' },
-  plugins: [await dshTrajectorySource()],
+  plugins: [await dshTrajectorySource(), await patchedDshSource('@deepseek-ai/dsh-client-ui-conversation', './dsh-queue.patch')],
   platform: 'browser',
   write: false,
   external: [

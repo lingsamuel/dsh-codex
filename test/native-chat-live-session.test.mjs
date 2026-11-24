@@ -28,7 +28,10 @@ const hook = registerHooks({
     const source = {
       '@deepseek-ai/dsh-client-ui-primitives': `export const Button = null, DisclosureRow = null, IconApiOutlineMedium = null,
         IconChevronDownOutlineRegular = null, IconQuestionOutlineRegular = null, IconRefreshOutlineRegular = null,
-        InlineEditor = null, Modal = null, Tag = null, Toast = null`,
+        InlineEditor = null, Modal = null, Tag = null, Toast = null, IconCheckOutlineRegular = null,
+        IconChevronUpOutlineRegular = null, IconCloseOutlineRegular = null, FileTypeIcon = null, fileSizeText = null,
+        IconEditOutlineRegular = null, IconQueueOutlineRegular = null, IconSendOutlineRegular = null,
+        IconTrashOutlineRegular = null, Tooltip = null`,
       react: `export const createElement = (type, props, ...children) => ({ type, props, children });
         export const useState = value => [value, () => {}], useEffect = null, useId = null, useLayoutEffect = null,
           useMemo = read => read(), useRef = value => ({ current: value }), useSyncExternalStore = null`,
@@ -104,11 +107,12 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
   const emit = frame => source().onmessage({ data: JSON.stringify(frame) })
   const snapshot = fields => emit({ type: 'snapshot', mode: 'live', status: child.status, page: { data: [] }, ...fields })
   const useSession = select => select(session.getSnapshot())
-  const useProjection = (key, select) => select(session.projections.faceOf(key).getSnapshot())
+  const useProjection = (key, select = value => value) => select(session.projections.faceOf(key).getSnapshot())
   let block
   let continueQueue
   let starts = 0
-  const dock = { options: { id: 'queue' }, component() {}, inject() {} }
+  const nativeQueue = () => null
+  const dock = { options: { id: 'queue' }, component: nativeQueue, inject: () => ({}) }
   const readonly = { locale: 'subagent', component: SubagentReadOnlyComposer }
   const locales = new Map()
   Object.assign(document, { createElement: () => ({ remove() {} }), head: { append() {} } })
@@ -127,12 +131,17 @@ test('子会话按原生能力开启输入、插话和继续队列，保留父�
       if (services.length === 1) install({
         slots: { inject: (name, activate) => activate(), register: (options, component) => { continueQueue = component },
           entries: name => [name === 'conversation.composer' ? readonly : dock] },
+          sessions: { binding: id => id === child.id ? { session } : undefined },
         effect: activate => t.after(activate()), on: () => () => {},
       })
     },
   })
   const continueButton = () => continueQueue({ useSession, useProjection, t: key => key, startQueue: () => { starts++ } })
-  const queueAddress = () => dock.component({ useSession }).props.children[0].props.useSession(state => state.subagent.address)
+  const queueAddress = () => {
+    const queue = dock.component({ ...dock.inject(child.id), useSession, useProjection })
+    return queue.type(queue.props).props.children[0].props.useSession(state => state.subagent.address)
+  }
+  assert.equal(dock.component(dock.inject('dsh-session')).type, nativeQueue)
   const address = () => session.getSnapshot().subagent.address
   function readOnlyNotice() {
     const output = readonly.component({ session: session.getSnapshot(), matched: { reason: 'unknown' }, t: key => subagentCopy[key] })
