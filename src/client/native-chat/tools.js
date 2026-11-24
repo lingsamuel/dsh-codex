@@ -26,13 +26,16 @@ function fileChange(item, cwd) {
       path, diffs: hunks[index] ?? [], raw: hunks[index] ? undefined : diff,
     })),
   }
-  // 原版 edit 工具行会在同一条结果中显示多文件差异。无法解析时保留原始补丁。
-  if (first && hunks.every(Boolean)) {
+  const parsed = first && hunks.every(Boolean)
+  const grouped = item.status === 'completed' && changes.length > 1
+  // 多文件结果由同一个编辑工具行展示，单个文件的解析失败只影响其差异视图。
+  if (parsed || grouped) {
     return {
       name: 'edit',
-      args: { file_path: first.path, old_string: first.oldText ?? '', new_string: first.newText },
+      args: grouped ? { paths: changes.map(change => change.path) }
+        : { file_path: first.path, old_string: first.oldText ?? '', new_string: first.newText },
       output,
-      meta: { ...meta, diffs: hunks.flat() },
+      meta: parsed ? { ...meta, diffs: hunks.flat() } : meta,
       isError,
     }
   }

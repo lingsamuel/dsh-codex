@@ -198,6 +198,27 @@ test('projects command output and parsed or raw file changes into DSH tool entri
   assert.equal(rawResult.data.message.content[0].text, 'raw\nunparsed patch')
 })
 
+test('一次多文件补丁保留一个编辑工具行及各文件自己的差异', () => {
+  const update = '@@ -1 +1 @@\n-old\n+new\n'
+  const entries = projectCodexTurns([turn('turn-id', [
+    { id: 'patch', type: 'fileChange', status: 'completed', changes: [
+      { path: 'one.txt', kind: { type: 'update' }, diff: update },
+      { path: 'two.txt', kind: { type: 'update' }, diff: '原始补丁' },
+    ] },
+  ])], { turnWorkingDirectories: { 'turn-id': '/work' } })
+  const calls = types(entries, 'tool/call')
+  const results = types(entries, 'tool/result')
+  assert.deepEqual(calls.map(({ data }) => [data.callId, data.name, JSON.parse(data.arguments)]), [
+    ['patch', 'edit', { paths: ['/work/one.txt', '/work/two.txt'] }],
+  ])
+  assert.deepEqual(results.map(({ data }) => [data.message.toolCallId, data.meta.codexFileChanges]), [
+    ['patch', [
+      { path: '/work/one.txt', diffs: [{ path: '/work/one.txt', oldText: 'old\n', newText: 'new\n' }], raw: undefined },
+      { path: '/work/two.txt', diffs: [], raw: '原始补丁' },
+    ]],
+  ])
+})
+
 test('Codex 协作等待进入 DSH 原生等待工具行，保留目标、结果和超时状态', () => {
   const wait = {
     type: 'collabAgentToolCall', tool: 'wait', receiverThreadIds: ['child'],
