@@ -82,7 +82,8 @@ export function installCodexQuestions(ctx) {
         const asynchronous = request.kind === 'async'
         const { answers, replies } = asynchronous ? asyncQuestionSubmission(questions, submitted)
           : nativeQuestionSubmission(questions, submitted, translate('secretAnswer'))
-        if (!replies.length) return { ok: true, value: false }
+        // 异步题全部跳过时，让原生面板收起，题目仍可重新打开。
+        if (!replies.length) return { ok: true, value: true }
         const echo = session.beginQuestionReply(turnId, replies.map(({ question, answer }) =>
           `${question}\n${answer || translate('skipped')}`).join('\n\n'), !asynchronous)
         try {
@@ -129,12 +130,19 @@ export function installCodexQuestions(ctx) {
           const request = questionRequest(session, matched.callId)
           const archived = useSyncExternalStore(session?.subscribe ?? subscribeMissing,
             () => request?.kind === 'async' && session.getSnapshot().archived)
-          const index = props.useStore(state => state.progressByRequest[matched.key]?.index ?? 0)
+          const progress = props.useStore(state => state.progressByRequest[matched.key])
+          const index = progress?.index ?? 0
           const translateQuestion = (key, ...args) => {
             if (request && key === 'nav.close') return translate('close')
             if (archived && key === 'submit') return translate('unarchiveAndSubmit')
-            // 原生最后一页的跳过也会提交，此时按钮需要说明同样的后果。
-            if (archived && key === 'action.skip' && index === matched.questions.length - 1) return translate('skipAndSubmit')
+            // 跳过最后一题仅在还有其它答复需要提交时才解除归档。
+            if (archived && key === 'action.skip' && index === matched.questions.length - 1 && progress) {
+              const answers = matched.questions.slice(0, index).flatMap(({ id }, draftIndex) => {
+                const draft = progress.drafts[draftIndex]
+                return draft && !draft.skipped ? [{ id, selected: draft.selected, custom: draft.custom }] : []
+              })
+              if (asyncQuestionSubmission(request.questions, { answers }).replies.length) return translate('skipAndSubmit')
+            }
             if (key === 'submitting' && request?.kind === 'async'
               && session.getSnapshot().live.status?.type === 'notLoaded') {
               return translate('loadingAndSubmitting')

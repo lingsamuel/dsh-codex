@@ -1174,6 +1174,11 @@ test('问答面板提交后立即显示答案，原生异步历史接手，实�
   }
 
   const asyncId = '["request_user_input_async","async",0]'
+  assert.equal((await remote.answer('questions', asyncItem.id, { answers: [{ id: asyncId, selected: [] }] })).value, true)
+  assert.equal(url, undefined)
+  assert.deepEqual(echoes(), [])
+  assert.equal(session.projections.faceOf('userQuestions').getSnapshot().active[0]?.callId, asyncItem.id)
+
   const sending = remote.answer('questions', asyncItem.id, { answers: [{ id: asyncId, selected: ['测试环境'] }] })
   assert.equal(url, '/api/codex/async-question-answer')
   assert.equal(echoes()[0]?.text, '部署到哪里？\n测试环境')
