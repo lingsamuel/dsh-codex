@@ -1247,6 +1247,98 @@ test('归档会话从只读历史同时显示异步问题正文与原生问答�
   assert.deepEqual(history.session.getSnapshot().live.status, { type: 'notLoaded' })
 })
 
+test('轮内详情按原生顺序补齐摘要，保留已有消息身份', async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const firstReply = { ...answer, id: 'earlier-reply', text: '前面的消息' }
+  await source().onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live', page: { data: [
+    { ...turn('summary', 'completed', [ask, answer]), itemsView: 'summary' },
+  ] } }) })
+  const detail = history.session.projections.faceOf('historyDetails')
+  assert.ok(detail.getSnapshot().summary)
+  const cursors = []
+  globalThis.fetch = async input => {
+    const url = new URL(input)
+    assert.equal(url.pathname, '/api/codex/history-items')
+    assert.equal(url.searchParams.get('turnId'), 'summary')
+    const cursor = url.searchParams.get('cursor')
+    cursors.push(cursor)
+    return Response.json(cursor ? { data: [answer], nextCursor: null } : { data: [ask, firstReply], nextCursor: 'next' })
+  }
+  const replies = () => history.events.getSnapshot().entries.filter(({ event }) => event.type === 'assistant/message')
+    .map(({ event }) => event.data.message.id)
+  await history.session.loadHistoryDetails('summary')
+  assert.deepEqual(replies(), ['earlier-reply', 'answer'])
+  assert.ok(detail.getSnapshot().summary)
+  await history.session.loadHistoryDetails('summary')
+  assert.deepEqual(replies(), ['earlier-reply', 'answer'])
+  assert.equal(detail.getSnapshot().summary, undefined)
+  assert.deepEqual(cursors, [null, 'next'])
+})
+
+test('手动继续读取时先发布已收到的一轮，后续轮次到达后再向前插入', async t => {
+  const source = mockTransport(t)
+  const second = Promise.withResolvers()
+  t.after(() => second.resolve())
+  const first = Promise.withResolvers()
+  const history = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const turns = () => history.events.getSnapshot().entries.filter(({ event }) => event.type === 'turn/start')
+    .map(({ event }) => event.data.codexTurnId)
+  const stop = history.events.subscribe(() => {
+    if (turns().includes('near')) first.resolve()
+  })
+  t.after(stop)
+  const preferences = { firstItems: 1000, firstMiB: 1, openTurns: 15, manualTurns: 2, prefetch: false }
+  const encode = (id, nextCursor, done) => new TextEncoder().encode(`data: ${JSON.stringify({
+    page: { data: [turn(id, 'completed', [])], nextCursor }, done,
+  })}\n\n`)
+  globalThis.fetch = async url => {
+    assert.equal(new URL(url).pathname, '/api/codex/history-older')
+    async function* pages() {
+      yield encode('near', 'older', false)
+      await second.promise
+      yield encode('far', 'more', true)
+    }
+    return new Response(ReadableStream.from(pages()), { headers: { 'Content-Type': 'text/event-stream' } })
+  }
+  await source().onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live', preferences,
+    page: { data: [turn('current', 'completed', [])], nextCursor: 'near' } }) })
+  const finished = Promise.withResolvers()
+  t.after(history.events.subscribe(() => { if (turns().includes('far')) finished.resolve() }))
+  assert.equal(history.session.startEarlier(), true)
+  await first.promise
+  assert.deepEqual(turns(), ['near', 'current'])
+  second.resolve()
+  await finished.promise
+  assert.deepEqual(turns(), ['far', 'near', 'current'])
+})
+
+test('手动读取接续滚动预读时，预读失败仍能从相同游标继续', { timeout: 1000 }, async t => {
+  const source = mockTransport(t)
+  const history = createCodexHistory({ effect: install => t.after(install()) }, { id: 'thread' })
+  const first = Promise.withResolvers()
+  const loaded = Promise.withResolvers()
+  let calls = 0
+  globalThis.fetch = async () => {
+    if (!calls++) return first.promise
+    return new Response(`data: ${JSON.stringify({ page: { data: [turn('older', 'completed', [])] }, done: true })}\n\n`,
+      { headers: { 'Content-Type': 'text/event-stream' } })
+  }
+  t.after(history.events.subscribe(() => {
+    if (history.events.getSnapshot().entries.some(({ event }) => event.data.codexTurnId === 'older')) loaded.resolve()
+  }))
+  await source().onmessage({ data: JSON.stringify({ type: 'snapshot', mode: 'live',
+    preferences: { openTurns: 15, manualTurns: 15, prefetch: false },
+    page: { data: [turn('current', 'completed', [])], nextCursor: 'older' } }) })
+  const automatic = history.session.loadOlder({ deferConsumption: true })
+  await Promise.resolve()
+  assert.equal(history.session.startEarlier(), true)
+  first.resolve(new Response('暂时不可用', { status: 503 }))
+  await automatic
+  await loaded.promise
+  assert.equal(calls, 2)
+})
+
 test('stock window appends native tail changes, prepends older history, and keeps both during reconnect', async t => {
   const currentSource = mockTransport(t)
   const received = []

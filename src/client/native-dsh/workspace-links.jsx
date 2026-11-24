@@ -1,5 +1,6 @@
 import { childPath } from '@deepseek-ai/dsh-client-ui-sidebar-files/src/client/store.ts'
 import { useEffect, useRef } from 'react'
+import { useHistoryViewport } from './history-viewport.js'
 import { adaptSlot } from './slot-adapter.js'
 
 const filesSlot = 'sidebar.right.pane.tab'
@@ -42,15 +43,17 @@ function DirectoryReveal({ useTabInfo, useStore, setQuery, toggle, page }) {
 
 /** 复用 DSH 的链接解析和工作区目录权限，目录请求交给会话自己的 Files 页。 */
 export function installWorkspaceLinks(ctx) {
-  ctx.inject(['sidebarRight', 'sidebarRightTabs', 'remote', 'remote.workspaceFiles'], scope => {
+  ctx.inject(['sessions', 'sidebarRight', 'sidebarRightTabs', 'remote', 'remote.workspaceFiles'], scope => {
     let pending
     scope.effect(() => () => pending?.abort())
 
     adaptSlot(scope, 'conversation.view', entry => entry.options.id === 'chat', (inject, Native) => ({
       inject(sessionId, ...args) {
         const chat = inject(sessionId, ...args)
+        const session = scope.sessions.binding(sessionId)?.session
         return {
           ...chat,
+          historySession: typeof session?.attachHistoryView === 'function' && typeof session.startEarlier === 'function' ? session : undefined,
           async openFile(path, options) {
             pending?.abort()
             const request = new AbortController()
@@ -68,7 +71,13 @@ export function installWorkspaceLinks(ctx) {
           },
         }
       },
-      component: Native,
+      component: function ChatWithHistory({ historySession, ...props }) {
+        const occurrence = useHistoryViewport(historySession)
+        if (!historySession) return <Native {...props} />
+        return <div {...occurrence} style={{ display: 'contents' }} data-codex-history-view="">
+          <Native {...props} />
+        </div>
+      },
     }))
 
     adaptSlot(scope, filesSlot, entry => entry.options.key === filesEntry, (inject, Native) => ({

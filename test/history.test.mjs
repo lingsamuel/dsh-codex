@@ -81,6 +81,36 @@ function postCodex(get, path, fields) {
   })
 }
 
+test('手动历史读取先交付最近的一轮，再等待下一轮', async t => {
+  const blocked = Promise.withResolvers()
+  t.after(() => blocked.resolve())
+  const next = Promise.withResolvers()
+  const server = await fakeCodex(t, {
+    'thread/read': () => ({ result: { thread: { id: 'thread', historyMode: 'paginated' } } }),
+    'thread/turns/list': async ({ cursor }) => {
+      if (cursor === 'next') {
+        next.resolve()
+        await blocked.promise
+      }
+      return { result: { data: [{ id: cursor, items: [], status: 'completed' }],
+        nextCursor: cursor === 'next' ? 'last' : 'next' } }
+    },
+  })
+  const response = await server.get('/api/codex/history-older?threadId=thread&cursor=start&limit=2')
+  assert.equal(response.status, 200)
+  const reader = response.body.getReader()
+  const read = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).trim().slice(6))
+  assert.deepEqual((await read()).page.data.map(turn => turn.id), ['start'])
+  const second = read()
+  await next.promise
+  blocked.resolve()
+  const result = await second
+  assert.deepEqual(result.page.data.map(turn => turn.id), ['next'])
+  assert.equal(result.page.nextCursor, 'last')
+  assert.equal(result.done, true)
+  assert.equal((await reader.read()).done, true)
+})
+
 function openHistoryProjection(directory) {
   const db = new DatabaseSync(join(directory, 'thread_history_1.sqlite'))
   db.exec(`PRAGMA journal_mode = WAL;
@@ -3054,6 +3084,9 @@ test('SSE 大快照分块发送，续读检查点在完整快照之后到达', {
       items: [{ id: 'reply', type: 'agentMessage', text }] }] } }),
     'thread/items/list': () => ({ result: { data: [], backwardsCursor: 'after-snapshot' } }),
   })
+  // 显式允许送出这条大记录，继续覆盖快照分块与检查点顺序。
+  const defaults = await (await get('/api/codex/history-preferences')).json()
+  assert.equal((await postCodex(get, 'history-preferences', { ...defaults, firstMiB: 8 })).status, 200)
   const reader = (await get('/api/codex/watch?threadId=large')).body.getReader()
   t.after(() => reader.cancel())
   const decoder = new TextDecoder()

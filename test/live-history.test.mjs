@@ -8,6 +8,25 @@ async function readChanges(tail) {
   return await tail.readChanges(update => updates.push(update)) ? updates : null
 }
 
+test('摘要轮次只跟随快照之后的新条目，不再次读取隐藏的整轮详情', async () => {
+  const input = { id: 'user', type: 'userMessage' }
+  const historical = { id: 'hidden', type: 'commandExecution', status: 'completed' }
+  const fresh = { id: 'new', type: 'agentMessage', completedAtMs: 10 }
+  const active = { id: 'active', status: 'inProgress' }
+  const request = async (method, { turnId, sortDirection, cursor }) => {
+    if (method === 'thread/turns/list') return { data: [{ ...active, itemsView: 'notLoaded', items: [] }] }
+    const row = item => ({ item, turnId: 'active' })
+    if (turnId) return { data: [row(historical), row(fresh)] }
+    if (sortDirection === 'desc') return { data: [row(fresh)], backwardsCursor: 'new-cursor' }
+    assert.equal(cursor, 'saved-history')
+    return { data: [row(historical), row(fresh)] }
+  }
+  const tail = createHistoryTail(request, { id: 'thread', historyMode: 'paginated' }, {
+    data: [{ ...active, itemsView: 'summary', items: [input] }],
+  }, 'saved-history', { turnId: 'active', itemId: historical.id })
+  assert.deepEqual((await readChanges(tail)).flatMap(change => change.items.map(item => item.id)), ['new'])
+})
+
 test('分页历史跟随只读取尾部增量，同一轮次结束时不重发旧条目', async () => {
   const completed = { id: 'old-item', type: 'agentMessage', text: '旧输出', completedAtMs: 2 }
   const fresh = { id: 'new-item', type: 'agentMessage', text: '新输出', completedAtMs: 3 }

@@ -1,11 +1,13 @@
 import { codexSqliteHome, openCodexReader } from './app-server.mjs'
 import { readCatalogEvent } from './catalog-events.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
-import { createHistoryTail, readItemTailCursor, readThreadTurns } from './live-history.mjs'
+import { createHistoryTail, readItemTail, readThreadTurns } from './live-history.mjs'
 import { createRolloutFacts } from './rollout-facts.mjs'
 import { createNativeUnreadMonitor } from './unread-watch.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
+import { readOpeningHistory } from './history-window.mjs'
+import { defaultHistoryPreferences } from '../shared/history-preferences.js'
 
 const encoder = new TextEncoder()
 const heartbeatFrame = encoder.encode('event: heartbeat\ndata: {}\n\n')
@@ -53,7 +55,7 @@ function* historyChangeFrames({ turn, items, onlyIfLoaded }, lastPage) {
 }
 
 /** 只消费 daemon 广播和原生历史读取增量，连接生命周期归当前 SSE 请求。 */
-export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers) {
+export function createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, readPreferences) {
   const watchNativeUnread = createNativeUnreadMonitor()
   return {
     path: '/api/codex/watch',
@@ -248,6 +250,8 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
                   } else {
                     if (changed && steers?.list(observedThread.id).length) wakeQueue?.()
                     checkpoint(tail.itemCursor())
+                    const partial = tail.partialTurns()
+                    if (partial.length) send({ type: 'history-details-changed', turnIds: partial })
                     if (sawUserInput) {
                       // 状态可能先于首条消息落盘。观察到已保存的用户条目后读回原生预览。
                       const result = await connection.request('thread/read', { threadId }).catch(() => null)
@@ -368,17 +372,18 @@ export function createWatchRoute(socketPath, ownerSignal, questions, backgroundT
           async function sendSnapshot({ thread, readState }, replace = false, goal) {
             followHistory(thread)
             confirmedCwd = thread.cwd
-            const itemCursor = thread.historyMode === 'paginated' ? await readItemTailCursor(connection.request, threadId) : undefined
-            const page = await readThreadTurns(connection.request, {
-              threadId, limit: 25, sortDirection: 'desc', itemsView: 'full',
-            })
+            const itemHead = thread.historyMode === 'paginated' ? await readItemTail(connection.request, threadId) : undefined
+            const itemCursor = itemHead?.cursor
+            const preferences = await readPreferences?.().catch(() => defaultHistoryPreferences)
+            const page = preferences ? await readOpeningHistory(connection.request, thread, sqliteHome, preferences)
+              : await readThreadTurns(connection.request, { threadId, limit: 25, sortDirection: 'desc', itemsView: 'full' })
             const fromCursor = !replace && itemCursor && resumeCursor ? resumeCursor : itemCursor
-            tail = createHistoryTail(connection.request, thread, page, fromCursor)
+            tail = createHistoryTail(connection.request, thread, page, fromCursor, fromCursor === itemCursor ? itemHead : undefined)
             awaitingPreview = !thread.name && !thread.preview
             const writing = writeHistory(encodeFrame({ type: 'snapshot', page, status: thread.status, readState, historyMode: thread.historyMode,
               planMode: readDraftPlanMode?.(threadId), goal,
               selection: modelSelectionOf(thread), canAcceptDirectInput: thread.canAcceptDirectInput, archived: thread.archived,
-              mode, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) }))
+              mode, preferences, ...(!awaitingPreview && { threadSummary: thread }), ...(replace && { replace: true }) }))
             if (fromCursor === itemCursor) checkpoint(itemCursor)
             else wake()
             questionObserver?.update(thread.status)

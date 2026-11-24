@@ -39,15 +39,21 @@ function readThrough(request, method, parameters, cursor) {
   return iterateCodexPages(next => request(method, { ...parameters, ...(next != null && { cursor: next }) }), cursor)
 }
 
-function flattenItem({ item, startedAtMs, completedAtMs }) {
+export function flattenHistoryItem({ item, startedAtMs, completedAtMs }) {
   return { ...item, startedAtMs: startedAtMs ?? item.startedAtMs, completedAtMs: completedAtMs ?? item.completedAtMs }
+}
+
+export async function readHistoryItemsById(request, threadId, turnId, itemIds) {
+  const result = await request('thread/items/read', { threadId, turnId, itemIds })
+  return { data: result.data.map(flattenHistoryItem) }
 }
 
 function invalidHistoryCursor(error) {
   return error instanceof CodexRpcError && (error.code === -32600 || error.code === -32602)
 }
 
-async function readItemTail(request, threadId) {
+/** 线程级倒序页返回续读位置及其包含的原生锚点。 */
+export async function readItemTail(request, threadId) {
   try {
     const { data, backwardsCursor } = await request(itemList, { threadId, limit: 1, sortDirection: 'desc' })
     const { item, turnId } = data?.[0] ?? {}
@@ -58,19 +64,14 @@ async function readItemTail(request, threadId) {
   }
 }
 
-/** 线程级条目按写入顺序分页，可以发现追加到已经结束的旧轮次的记录。 */
-export async function readItemTailCursor(request, threadId) {
-  return (await readItemTail(request, threadId))?.cursor ?? null
-}
-
 /** 跟随活跃尾部。分页历史通过原生条目锚点读取新增记录和需要刷新的未完成项。 */
-export function createHistoryTail(request, thread, initialPage, itemCursor) {
+export function createHistoryTail(request, thread, initialPage, itemCursor, itemAnchor) {
   const threadId = thread.id
   const paginated = thread.historyMode === 'paginated'
   const itemsView = paginated ? 'notLoaded' : 'full'
   const seen = new Map()
-  for (const { items, ...turn } of initialPage.data) {
-    seen.set(turn.id, { turn, items: new Map(items.map(item => [item.id, item])) })
+  for (const { items = [], itemsView, ...turn } of initialPage.data) {
+    seen.set(turn.id, { turn, items: new Map(items.map(item => [item.id, item])), partial: itemsView === 'summary' })
   }
   let lastTurnId = initialPage.data[0]?.id
   let tailCursor = initialPage.backwardsCursor
@@ -85,18 +86,32 @@ export function createHistoryTail(request, thread, initialPage, itemCursor) {
       anchor ? { type: 'item', itemId: anchor.id } : null)
   }
 
-  async function deliverTurn({ items, ...turn }, consume, scanned, isCurrent) {
+  async function deliverTurn({ items = [], itemsView: _view, ...turn }, consume, scanned, isCurrent) {
     const previous = seen.get(turn.id)
     const sameTurn = previous && same(previous.turn, turn)
     if (paginated && sameTurn && turn.status !== 'inProgress') return true
     const rows = previous?.items ?? new Map()
+    if (paginated && previous?.partial) {
+      // 摘要不是连续前缀。从线程级检查点交付新条目，仅点读已知且尚会变化的记录。
+      const itemIds = [...rows.values()].filter(item => !item.historyPreview && needsUpdate(item)).slice(-100).map(item => item.id)
+      const result = itemIds.length ? await readHistoryItemsById(request, threadId, turn.id, itemIds).catch(error => {
+        if (error instanceof CodexRpcError && [-32600, -32601, -32602].includes(error.code)) return null
+        throw error
+      }) : null
+      if (!isCurrent()) return false
+      const changed = (result?.data ?? []).filter(item => !same(rows.get(item.id), item))
+      if ((changed.length || !sameTurn) && await consume({ turn, items: changed }, true) === false) return false
+      for (const item of changed) rows.set(item.id, item)
+      seen.set(turn.id, { ...previous, turn })
+      return true
+    }
     const pages = paginated ? readItems(turn.id, rows) : [{ data: items }]
     try {
       for await (const { data, nextCursor } of pages) {
         if (!isCurrent()) return false
         const changed = []
         for (const entry of data) {
-          const item = paginated ? flattenItem(entry) : entry
+          const item = paginated ? flattenHistoryItem(entry) : entry
           if (same(rows.get(item.id), item)) continue
           rows.set(item.id, item)
           changed.push(item)
@@ -127,8 +142,15 @@ export function createHistoryTail(request, thread, initialPage, itemCursor) {
         const byTurn = Map.groupBy(included.filter(row => !scanned.has(row.turnId)), row => row.turnId)
         for (const [id, appended] of byTurn) {
           const previous = seen.get(id)
-          const items = appended.map(flattenItem).filter(item => !same(previous?.items.get(item.id), item))
+          const items = appended.map(flattenHistoryItem).filter(item => {
+            const known = previous?.items.get(item.id)
+            if (previous?.partial && !known && itemAnchor?.turnId === id && itemAnchor.itemId === item.id) return false
+            return !same(known, item)
+          })
           if (items.length && await consume({ turn: previous?.turn ?? { id }, items, onlyIfLoaded: true }, true) === false) return false
+          if (previous?.partial && previous.turn.status === 'inProgress') {
+            for (const item of items) if (needsUpdate(item)) previous.items.set(item.id, item)
+          }
         }
         if (boundary >= 0) return true
       }
@@ -184,9 +206,16 @@ export function createHistoryTail(request, thread, initialPage, itemCursor) {
     }
     lastTurnId = latest.id
     tailCursor = head.backwardsCursor
-    if (latestCursor) itemCursor = latestCursor
+    if (latestCursor) {
+      itemCursor = latestCursor
+      itemAnchor = latestItem
+    }
     return true
   }
 
-  return { itemCursor: () => itemCursor, readChanges }
+  return {
+    itemCursor: () => itemCursor,
+    partialTurns: () => paginated ? [...seen].filter(([, view]) => view.partial).map(([id]) => id) : [],
+    readChanges,
+  }
 }

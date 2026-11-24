@@ -18,7 +18,7 @@ export function createLiveTranscript() {
   const byId = new Map()
 
   /** 合并原生条目。投影失败时，可在下一次合并前回退本次修改。 */
-  function reconcile(turn, updates = turn.items ?? []) {
+  function reconcile(turn, updates = turn.items ?? [], prefixIds) {
     const record = byId.get(turn.id)
     const { items = [], ...previous } = record?.turn ?? {}
     const { items: _snapshotItems, ...metadata } = turn
@@ -53,9 +53,19 @@ export function createLiveTranscript() {
         ids.set(item.id, index)
         items[index] = item
       }
-      if (record && !changes.size && JSON.stringify(next) === JSON.stringify(previous)) return
-      const merged = { ...next, items }
-      byId.set(turn.id, { turn: merged, ids })
+      if (record && !changes.size && !prefixIds && JSON.stringify(next) === JSON.stringify(previous)) return
+      // 摘要中的最终答复先于详情到达。以原生详情顺序重排已读前缀，同时保留摘要和实时尾部。
+      let orderedItems = items
+      let orderedIds = ids
+      if (prefixIds) {
+        const prefix = new Set(prefixIds)
+        orderedItems = [...prefix].map(id => items[ids.get(id)]).concat(items.filter(item => !prefix.has(item.id)))
+        orderedIds = new Map(orderedItems.map((item, index) => [item.id, index]))
+        const moved = orderedItems.findIndex((item, index) => items[index] !== item)
+        if (moved !== -1) firstChanged = Math.min(firstChanged, moved)
+      }
+      const merged = { ...next, items: orderedItems }
+      byId.set(turn.id, { turn: merged, ids: orderedIds })
       return { turn: merged, firstChanged, changes: [...changes].map(([index, previous]) => ({ item: items[index], previous })), rollback }
     } catch (error) {
       rollback()

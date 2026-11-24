@@ -2,15 +2,19 @@ import { watch } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
+/** 回退会更换 rollout ID，历史统计和实时检查点须指向同一个原生文件。 */
+export function historyIndexLocation(thread, databaseHome) {
+  const database = databaseHome && isAbsolute(databaseHome) && thread?.historyMode !== 'legacy'
+    ? join(databaseHome, 'thread_history_1.sqlite') : undefined
+  const replacement = thread?.path && /^rollout-.*_([\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})\.jsonl(?:\.zst)?$/i.exec(basename(thread.path))
+  const projectionId = replacement?.[1].toLowerCase() ?? thread?.id
+  return { database, projectionId }
+}
+
 /** 监听本地 Codex 历史文件的变更提示，调用方须通过 App Server 获取内容。 */
 export function watchNativeHistory({ thread, codexHome, sqliteHome }, onChange, signal, onRolloutChange = onChange) {
   if (signal.aborted) return false
-  const databaseHome = sqliteHome ?? codexHome
-  const database = databaseHome && isAbsolute(databaseHome) && thread?.historyMode !== 'legacy'
-    ? join(databaseHome, 'thread_history_1.sqlite') : undefined
-  // 原生回退保留会话 ID，在文件名末尾用下划线追加新的 rollout ID。
-  const replacement = thread?.path && /^rollout-.*_([\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})\.jsonl(?:\.zst)?$/i.exec(basename(thread.path))
-  const projectionId = replacement?.[1].toLowerCase() ?? thread?.id
+  const { database, projectionId } = historyIndexLocation(thread, sqliteHome ?? codexHome)
   let checkpoint
   let timer
 

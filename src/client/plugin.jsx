@@ -14,6 +14,7 @@ import { installFileDownloads } from './native-dsh/file-downloads.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
 import { installPlanDocuments } from './native-dsh/plan-document.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
+import { installHistoryPreferences } from './native-dsh/history-preferences.jsx'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
 import { installComposer } from './native-dsh/composer.jsx'
 import { installCodexQuestions } from './native-dsh/question-ui.jsx'
@@ -23,6 +24,7 @@ import { installSubagentActivity } from './native-dsh/subagent-activity.jsx'
 import { installProjectWorkspaces } from './native-dsh/project-workspaces.js'
 import { installFileReferences } from './native-dsh/file-references.js'
 import { installWorkspaceLinks } from './native-dsh/workspace-links.jsx'
+import { installHistoryDetails } from './native-dsh/history-details.jsx'
 import { installThreadReferences } from './native-dsh/thread-references.jsx'
 import { installPermissions } from './native-dsh/permissions.js'
 import { installBackgroundTerminals } from './native-dsh/background-terminals.jsx'
@@ -70,6 +72,7 @@ export async function apply(ctx) {
   installProjectWorkspaces(ctx, catalog)
   installFileReferences(ctx, catalog.store)
   installWorkspaceLinks(ctx)
+  installHistoryDetails(ctx)
   installThreadReferences(ctx, catalog, controller.signal)
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)
@@ -89,6 +92,7 @@ export async function apply(ctx) {
   installMessageEdit(ctx)
   installFileDownloads(ctx)
   installModelPicker(ctx, controller.signal)
+  installHistoryPreferences(ctx, controller.signal)
   installCommands(ctx)
   installPlanDocuments(ctx)
   installBackgroundTerminals(ctx, catalog.backgroundTerminals)

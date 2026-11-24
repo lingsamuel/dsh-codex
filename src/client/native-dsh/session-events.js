@@ -2,6 +2,7 @@ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { mergePages } from '../../shared/pages.js'
 import { modelDefaultChanged, readPage } from '../api.js'
 import { openLiveWatch } from '../live-watch.js'
+import { afterHistoryPaint, readOlderHistory } from '../history-pages.js'
 import { inlineAttachmentId, readInlineCodexAttachments, readInlineUserImages } from '../native-chat/attachments.js'
 import { projectCodexTurnUpdate, projectCodexTurns, projectUserContent } from '../native-chat/events.js'
 import { createLiveTranscript } from '../native-chat/live.js'
@@ -82,6 +83,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const codexQuestions = createSnapshotStore([])
   const codexApprovals = createSnapshotStore([])
   const codexMcpRequests = createSnapshotStore([])
+  const historyDetails = createSnapshotStore({})
   const goalProjection = createSnapshotStore(undefined)
   const planProjection = createSnapshotStore(confirmedPlan(planModeOf(thread)))
   const permissions = createSnapshotStore({ permission: thread.webPermission })
@@ -95,7 +97,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   const modelSelection = createSnapshotStore({ lastUsed: null, next: modelSelectionOf(thread) })
   const projections = new Map([['todos', todos], ['contextPressure', contextPressure], ['goal', goalProjection], ['plan', planProjection],
     ['modelSelection', modelSelection], ['inbox', inbox], ['codexQuestions', codexQuestions], ['userQuestions', userQuestions],
-    ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions]])
+    ['codexApprovals', codexApprovals], ['codexMcpRequests', codexMcpRequests], ['permissions', permissions],
+    ['historyDetails', historyDetails]])
+  const partialTurns = new Map()
   const rows = []
   const rowsById = new Map()
   const liveTurns = new Map()
@@ -109,6 +113,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   let nextCursor
   let olderRequest
   let historyView
+  let historyPreferences
+  let progressiveHistory
+  let prefetchView
+  const historyViews = new Set()
   let queue = Promise.resolve()
   let opened = false
   let triedFallback = false
@@ -282,6 +290,12 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     }
     rows.unshift(...older)
     nextCursor = page.nextCursor
+    for (const turn of turns) {
+      if (turn.itemsView === 'summary') {
+        partialTurns.set(turn.id, { ids: [], error: false })
+        publishHistoryDetail(turn.id)
+      }
+    }
     return pageEntries
   }
 
@@ -290,16 +304,16 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     return replies ? [...items, ...replies] : items
   }
 
-  async function updateTurn(turn, updates = turn.items ?? []) {
-    const merged = transcript.reconcile(turn, withQuestionReplies(turn.id, updates))
+  async function updateTurn(turn, updates = turn.items ?? [], prefixIds, lifetime = signal) {
+    const merged = transcript.reconcile(turn, withQuestionReplies(turn.id, updates), prefixIds)
     if (!merged) return
     const { turn: next, firstChanged, changes, rollback } = merged
     let rollbackAttachments
     try {
       const items = changes.flatMap(({ item }) => item.type === 'userMessage' ? [item] : [])
       if (items.length) {
-        const images = await readInlineCodexAttachments([{ items }], signal)
-        signal.throwIfAborted()
+        const images = await readInlineCodexAttachments([{ items }], lifetime)
+        lifetime.throwIfAborted()
         rollbackAttachments = cacheAttachments(images, true)
       }
       renderTurn(next, firstChanged)
@@ -428,7 +442,12 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   }
 
   async function loadPage(cursor, lifetime = signal) {
-    const page = await readPage('turns', { threadId: thread.id, ...(cursor ? { cursor } : {}) }, lifetime)
+    if (cursor && historyPreferences) {
+      let page
+      await readOlderHistory(thread.id, cursor, 1, value => { page = value }, lifetime)
+      return page
+    }
+    const page = await readPage('turns', { threadId: thread.id, ...(cursor ? { cursor } : { opening: '1' }) }, lifetime)
     lifetime.throwIfAborted()
     return page
   }
@@ -442,12 +461,15 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     transcript.forgetTurn(id)
     rowsById.delete(id)
     liveTurns.delete(id)
+    partialTurns.get(id)?.controller?.abort()
+    if (partialTurns.delete(id)) publishHistoryDetail(id)
     pendingRolloutTurns.delete(id)
     if (asyncQuestionInputs?.turnId === id) asyncQuestionInputs = undefined
     rebuildWindow = true
   }
 
   function clearHistory(cursor) {
+    cancelProgressiveHistory()
     nextCursor = cursor
     clearOlder()
     for (const { id } of rows) forgetTurn(id)
@@ -455,7 +477,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     attachments.clear()
   }
 
-  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace, reconnecting }, lifetime = signal) {
+  async function receiveSnapshot({ page, status, mode, readState, historyMode, selection, planMode, goal, canAcceptDirectInput, archived, threadSummary, replace, reconnecting, preferences = page.preferences }, lifetime = signal) {
     if (!opened || replace) {
       const images = await readInlineCodexAttachments(page.data, lifetime)
       lifetime.throwIfAborted()
@@ -489,7 +511,27 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
         }
       }
       if (!rows.length) nextCursor = cursor
-      for (const turn of refreshed) await updateTurn(turn)
+      for (const turn of refreshed) {
+        const previous = transcript.getTurn(turn.id)
+        if (previous && turn.itemsView === 'summary') {
+          const known = new Map(previous.items.map(item => [item.id, item]))
+          // 摘要可能首次包含刚完成的答复，同时避免预览覆盖已经读到的完整内容。
+          const updates = turn.items.filter(item => !known.has(item.id)
+            || (partialTurns.has(turn.id) && (!item.historyPreview || known.get(item.id).historyPreview)))
+          await updateTurn({ ...turn, itemsView: previous.itemsView }, updates)
+        } else if (partialTurns.has(turn.id) && turn.itemsView === 'full') {
+          partialTurns.get(turn.id).controller?.abort()
+          await updateTurn(turn, turn.items, turn.items.map(item => item.id))
+          partialTurns.delete(turn.id)
+          publishHistoryDetail(turn.id)
+        } else {
+          await updateTurn(turn)
+          if (turn.itemsView === 'summary') {
+            partialTurns.set(turn.id, { ids: [], error: false })
+            publishHistoryDetail(turn.id)
+          }
+        }
+      }
     }
     publish()
     // 已开始合并的轮次保留在缓存中，旧连接不能在释放后更新实时状态或阅读回执。
@@ -512,7 +554,9 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (replace) catalog?.setReadState(thread.id, readState)
       else catalog?.seedReadState(thread.id, readState)
     }
+    historyPreferences ??= preferences
     markReady()
+    scheduleHistoryPrefetch()
   }
 
   function fail(error) {
@@ -604,6 +648,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       if (frame.type === 'approvals' && watchingInteractions) return codexApprovals.set(frame.requests)
       if (frame.type === 'mcp-requests' && watchingInteractions) return codexMcpRequests.set(frame.requests)
       if (frame.type === 'thread-summary') return publishThreadSummary(frame.thread)
+      if (frame.type === 'history-details-changed') return refreshShownHistoryItems(frame.turnIds, lifetime)
       if (frame.type === 'queue') return publishQueue(frame.submissions, lifetime, frame.steers)
       if (frame.type === 'reading-receipt') {
         publishReadingReceipt(frame.readState)
@@ -719,6 +764,184 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     if (state.getSnapshot().historyLoadStatus !== status) setHistoryLoadStatus(status)
   }
 
+  function cancelProgressiveHistory() {
+    prefetchView?.abort()
+    prefetchView = undefined
+    const pending = progressiveHistory
+    progressiveHistory = undefined
+    pending?.controller.abort()
+  }
+
+  /** 预取和手动加载共享当前游标。手动点击可接续已经发出的预读。 */
+  function startProgressiveHistory(limit, manual) {
+    if (!historyView || !nextCursor || limit <= 0) return
+    if (progressiveHistory) {
+      if (manual && progressiveHistory.delivered >= progressiveHistory.manualUntil) {
+        progressiveHistory.manualUntil = progressiveHistory.delivered + limit
+        progressiveHistory.limit = Math.max(progressiveHistory.limit, progressiveHistory.manualUntil)
+      }
+      return progressiveHistory.promise
+    }
+    const job = { controller: new AbortController(), manualUntil: manual ? limit : 0, limit, delivered: 0 }
+    const lifetime = AbortSignal.any([signal, historyView.signal, job.controller.signal])
+    const isManual = () => job.delivered < job.manualUntil
+    progressiveHistory = job
+    job.promise = Promise.resolve().then(async () => {
+      let failed = false
+      try {
+        if (olderRequest) {
+          const pending = olderRequest
+          await pending.promise
+          if (lifetime.aborted) return
+          if (olderRequest === pending && pending.prepared) {
+            const before = rows.length
+            publishOlderInView(consumeOlder, isManual())
+            job.delivered += rows.length - before
+          }
+        }
+        // 每轮发布后让浏览器绘制，再推进下面一轮的游标。
+        while (nextCursor && job.delivered < job.limit && !lifetime.aborted) {
+          setHistoryLoadStatus('loading')
+          let cursor = nextCursor
+          await readOlderHistory(thread.id, cursor, job.limit - job.delivered, async page => {
+            if (page.nextCursor === cursor) throw new Error('Codex 返回了重复的分页游标。')
+            const images = await readInlineCodexAttachments(page.data, lifetime)
+            const committed = await enqueue(() => {
+              if (progressiveHistory !== job || nextCursor !== cursor) return false
+              const before = rows.length
+              try {
+                publishOlderInView(() => {
+                  publish(addOlderPage(page, images))
+                  publishState()
+                }, isManual())
+              } catch { return false }
+              job.delivered += rows.length - before
+              return true
+            }, lifetime)
+            if (!committed) throw new Error('无法合并更早的历史。')
+            cursor = page.nextCursor
+            await afterHistoryPaint(lifetime)
+            return !lifetime.aborted
+          }, lifetime)
+        }
+      } catch {
+        failed = !lifetime.aborted && isManual()
+      } finally {
+        if (progressiveHistory === job) {
+          progressiveHistory = undefined
+          setHistoryLoadStatus(failed ? 'error' : 'idle')
+        }
+      }
+    })
+    return job.promise
+  }
+
+  function publishOlderInView(operation, manual) {
+    const publish = [...historyViews].reduce((next, view) => () => view.prepend(next, { manual }), operation)
+    return publish()
+  }
+
+  function scheduleHistoryPrefetch() {
+    if (!historyPreferences?.prefetch || !historyView || !historyViews.size || !opened || !nextCursor
+      || prefetchView || !watchingInteractions || rows.length >= historyPreferences.openTurns) return
+    const pending = new AbortController()
+    prefetchView = pending
+    const lifetime = AbortSignal.any([signal, historyView.signal, pending.signal])
+    void afterHistoryPaint(lifetime).then(() => {
+      if (!lifetime.aborted && watchingInteractions) startProgressiveHistory(historyPreferences.openTurns - rows.length, false)
+    })
+  }
+
+  /** DSH 在挂载聊天视图时提供定位回调；视图释放后丢弃未显示的结果。 */
+  function attachHistoryView(view) {
+    historyViews.add(view)
+    scheduleHistoryPrefetch()
+    return () => {
+      historyViews.delete(view)
+      if (!historyViews.size) {
+        cancelProgressiveHistory()
+        if (!olderRequest) setHistoryLoadStatus('idle')
+      }
+    }
+  }
+
+  function startEarlier() {
+    if (!historyPreferences || !opened || !historyView || !nextCursor) return false
+    void startProgressiveHistory(historyPreferences.manualTurns, true)
+    return true
+  }
+
+  function publishHistoryDetail(turnId) {
+    const detail = partialTurns.get(turnId)
+    historyDetails.update(current => {
+      if (detail) current[turnId] = { loading: Boolean(detail.request), error: detail.error }
+      else delete current[turnId]
+    })
+  }
+
+  async function refreshShownHistoryItems(turnIds, lifetime) {
+    for (const turnId of turnIds) {
+      // 已展开的原生工具可能原地完成，线程级追加游标仍指向同一条记录。
+      const ids = transcript.getTurn(turnId)?.items.filter(item => item.status === 'inProgress').map(item => item.id) ?? []
+      for (let offset = 0; offset < ids.length && !lifetime.aborted; offset += 100) {
+        const params = new URLSearchParams({ threadId: thread.id, turnId })
+        for (const id of ids.slice(offset, offset + 100)) params.append('itemId', id)
+        try {
+          const { data } = await readPage('history-items', params, lifetime)
+          if (!lifetime.aborted) await updateTurn({ id: turnId }, data, undefined, lifetime)
+        } catch { /* 下次落盘再核对已经展开的活动条目。 */ }
+      }
+    }
+    publish()
+  }
+
+  /** 轮内读取与实时条目以同一个原生 ID 窗口合并，始终先发布已确认的新前缀。 */
+  async function loadHistoryDetails(turnId) {
+    const detail = partialTurns.get(turnId)
+    if (!detail || !historyView) return false
+    if (detail.request) return detail.request
+    const controller = new AbortController()
+    detail.controller = controller
+    const lifetime = AbortSignal.any([signal, historyView.signal, controller.signal])
+    const cursor = detail.cursor
+    detail.error = false
+    detail.request = Promise.resolve().then(async () => {
+      try {
+        const page = await readPage('history-items', { threadId: thread.id, turnId, ...(cursor && { cursor }) }, lifetime)
+        if (cursor && page.nextCursor === cursor) throw new Error('Codex 返回了重复的分页游标。')
+        return await enqueue(async () => {
+          if (partialTurns.get(turnId) !== detail) return false
+          const ids = detail.ids.concat(page.data.map(item => item.id))
+          try {
+            await updateTurn({ id: turnId, itemsView: page.nextCursor ? 'summary' : 'full' }, page.data, ids, lifetime)
+          } catch {
+            detail.error = !lifetime.aborted
+            return false
+          }
+          if (partialTurns.get(turnId) !== detail || lifetime.aborted) return false
+          detail.ids = ids
+          detail.cursor = page.nextCursor
+          if (!page.nextCursor) partialTurns.delete(turnId)
+          publishOlderInView(() => {
+            publish()
+            publishState()
+            publishQuestions()
+          }, true)
+          return true
+        }, lifetime)
+      } catch {
+        detail.error = !lifetime.aborted
+        return false
+      } finally {
+        detail.request = undefined
+        detail.controller = undefined
+        if (partialTurns.get(turnId) === detail || !partialTurns.has(turnId)) publishHistoryDetail(turnId)
+      }
+    })
+    publishHistoryDetail(turnId)
+    return detail.request
+  }
+
   /** DSH 在插入旧页前先记录当前阅读位置，搜索定位则直接使用同一页。 */
   async function loadOlder({ deferConsumption = false } = {}) {
     if (!historyView || signal.aborted) return
@@ -731,6 +954,10 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       return
     }
     if (!nextCursor) return
+    if (progressiveHistory) {
+      await progressiveHistory.promise
+      return
+    }
     if (!olderRequest) {
       const cursor = nextCursor
       const requestController = new AbortController()
@@ -803,10 +1030,14 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   /** 定位命中消息，沿用聊天的历史页和现有阅读窗口。 */
   async function findMessage({ turnId, itemId }, requestSignal) {
     const row = await loadTurn(turnId, requestSignal)
-    for (const { event } of row?.entries ?? []) {
-      if ((event.data.message?.id ?? event.data.id) !== itemId) continue
-      const anchor = messageAnchor(event)
-      if (anchor) return anchor
+    while (row && !requestSignal?.aborted) {
+      for (const { event } of row.entries) {
+        if ((event.data.message?.id ?? event.data.id) !== itemId) continue
+        if (partialTurns.has(turnId) && transcript.getTurn(turnId)?.items.some(item => item.id === itemId && item.historyPreview)) break
+        const anchor = messageAnchor(event)
+        if (anchor) return anchor
+      }
+      if (!partialTurns.has(turnId) || !await loadHistoryDetails(turnId)) return
     }
   }
 
@@ -833,7 +1064,7 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
   function editableInput(turn, sequence) {
     const row = rowAtTurn(turn)
     const source = transcript.getTurn(row?.id)
-    if (!source || source.status === 'inProgress') return
+    if (!source || source.status === 'inProgress' || partialTurns.has(source.id)) return
     const input = row.entries.find(({ event }) => event.type === 'user/message')?.event
     const message = source.items.find(item => item.type === 'userMessage')
     // 问答可在轮首投影为问答卡，后续第一个可见的普通气泡仍然属于插话。
@@ -863,9 +1094,12 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
     else {
       historyView?.abort()
       historyView = undefined
+      historyPreferences = undefined
+      cancelProgressiveHistory()
       clearOlder()
     }
     watchingInteractions = selected
+    if (selected) scheduleHistoryPrefetch()
     watch?.abort()
     const nextWatch = connected ? new AbortController() : undefined
     watch = nextWatch
@@ -919,12 +1153,20 @@ export function createCodexHistory(ctx, thread, catalog, retention) {
       getSnapshot: state.getSnapshot,
       subscribe: state.subscribe,
       loadOlder,
+      startEarlier,
+      attachHistoryView,
+      loadHistoryDetails,
       consumeOlder,
       loadThrough,
       planMarkdown,
       async readPlanMarkdown(turnId, itemId, requestSignal) {
         await loadTurn(turnId, requestSignal)
-        return planMarkdown(turnId, itemId)
+        let markdown = planMarkdown(turnId, itemId)
+        while (markdown === undefined && !requestSignal?.aborted && partialTurns.has(turnId)) {
+          if (!await loadHistoryDetails(turnId)) break
+          markdown = planMarkdown(turnId, itemId)
+        }
+        return markdown
       },
       findMessage,
       turnAtEnd,

@@ -24,6 +24,8 @@ import { createFileUploads } from './file-uploads.mjs'
 import { createFirstSubmission } from './first-submission.mjs'
 import { readThreadReferenceCandidates } from './thread-references.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
+import { createHistoryPreferences } from './history-preferences.mjs'
+import { createOlderHistoryRoute, readOpeningFallback, readTurnDetails } from './history-pages.mjs'
 
 function optionalParams(query, keys) {
   const result = {}
@@ -76,6 +78,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
   const permissions = createPermissionActions(socketPath, ownerSignal,
     cacheDirectory && join(cacheDirectory, 'web-permissions.json'), submit)
   const modelDefault = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-model-default.json'), 'selection')
+  const historyPreferences = createHistoryPreferences(cacheDirectory)
   const submitFirst = createFirstSubmission(socketPath, submit, permissions, openProject, modelDefault.get)
   const readDraftPlanMode = threadId => planModeOf(permissions.readDraftSettings(threadId))
   const enablePlan = (threadId, signal) => selectPlanMode(socketPath, signal, threadId, 'plan', false, permissions.observeDraftSettings)
@@ -106,6 +109,7 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     permissions.catalogRoute,
     permissions.actionRoute,
     createModelDefaultRoute(socketPath, ownerSignal, modelDefault),
+    historyPreferences.route,
     createThreadActionRoute(socketPath, ownerSignal, submit, backgroundTerminals, permissions),
     createCommandActionRoute(socketPath, ownerSignal, submit, permissions, submitFirst),
     createConversationActionRoute(socketPath, ownerSignal, submit, permissions, openProject, enablePlan, steers, files?.resolve, submitFirst),
@@ -113,7 +117,14 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     questions.approvalRoute,
     questions.mcpRoute,
     createAsyncQuestionActionRoute(socketPath, ownerSignal, submit, steers),
-    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers),
+    createWatchRoute(socketPath, ownerSignal, questions, backgroundTerminals, readDraftPlanMode, steers, historyPreferences.get),
+    createOlderHistoryRoute(socketPath, ownerSignal, historyPreferences.get),
+    route('history-items', (query, signal) => {
+      const itemIds = query.getAll('itemId')
+      if (itemIds.length > 100 || itemIds.some(id => !id)) throw new CodexRpcError({ code: -32602, message: '原生条目 ID 无效。' })
+      return readTurnDetails(socketPath, signal, requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
+        requiredParam(query, 'turnId', '缺少 Codex 轮次 ID。'), query.get('cursor'), itemIds)
+    }),
     route('catalog', query => readCatalog(query.get('complete') === '1', query.get('fresh') === '1')),
     route('archived', (_, signal) => readArchivedCatalog(socketPath, signal)),
     route('children', (query, signal) => {
@@ -188,12 +199,16 @@ export function createHistoryRoutes(socketPath = process.env.DSH_CODEX_SOCKET, o
     }))),
     route('thread-references', (query, signal) => withCodexReader(socketPath, signal, rpc =>
       readThreadReferenceCandidates(rpc, query.get('threadId'), query.get('cwd'), query.get('query') ?? ''))),
-    route('turns', (query, signal) => withCodexReader(socketPath, signal, request => readThreadTurns(request, {
-        threadId: requiredParam(query, 'threadId', '缺少 Codex 线程 ID。'),
+    route('turns', (query, signal) => {
+      const threadId = requiredParam(query, 'threadId', '缺少 Codex 线程 ID。')
+      if (query.get('opening') === '1') return readOpeningFallback(socketPath, signal, threadId, historyPreferences.get)
+      return withCodexReader(socketPath, signal, request => readThreadTurns(request, {
+        threadId,
         limit: 25,
         sortDirection: 'desc',
         itemsView: 'full',
         ...optionalParams(query, ['cursor']),
-    }))),
+      }))
+    }),
   ]
 }
