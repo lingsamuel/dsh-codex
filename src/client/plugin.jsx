@@ -14,6 +14,7 @@ import { installFileDownloads } from './native-dsh/file-downloads.jsx'
 import { installCommands } from './native-dsh/commands.jsx'
 import { installPlanDocuments } from './native-dsh/plan-document.jsx'
 import { installModelPicker } from './native-dsh/model-picker.js'
+import { installCodexSettings } from './native-dsh/codex-settings.jsx'
 import { installHistoryPreferences } from './native-dsh/history-preferences.jsx'
 import { installThreadTitleSettings } from './native-dsh/thread-title-settings.jsx'
 import { installReadReceipts } from './native-dsh/read-receipts.jsx'
@@ -82,6 +83,7 @@ export async function apply(ctx) {
   installCodexSkills(ctx)
   installCodexCapabilities(ctx)
   installWorktrees(ctx, catalog)
+  installCodexSettings(ctx)
   installPermissions(ctx, catalog.store, controller.signal)
   installCodexQuestions(ctx)
   installCodexApprovals(ctx)

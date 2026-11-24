@@ -1,119 +1,131 @@
-import { Button, SettingsForm, SettingsValueField, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import css from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.module.css'
+import { Button, Input, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useId, useState } from 'react'
 import { historyPreferenceLimits, isHistoryPreferenceValue } from '../../shared/history-preferences.js'
 import { readPage, writeCodexCapability } from '../api.js'
+import { codexSettingsItem } from './codex-settings.jsx'
 
 const locale = 'codex.history-preferences'
 const endpoint = 'history-preferences'
-const numericFields = Object.keys(historyPreferenceLimits)
+const numericFields = {
+  firstItems: 'invalidCount', firstMiB: 'invalidMiB', openTurns: 'invalidOpen', manualTurns: 'invalidCount',
+}
 const labels = {
   zh: {
-    title: 'Codex 会话历史加载', description: '保存后在下次打开会话时生效。',
-    firstItems: '首屏条目数预算', firstMiB: '首屏体积预算（MiB）',
+    applyHint: '在下次打开会话时生效。',
+    firstItems: '历史首屏条目数预算', firstMiB: '历史首屏体积预算（MiB）',
     openTurns: '打开时加载轮数', manualTurns: '每次加载更早的轮数', prefetch: '后台预读',
     prefetchHint: '首屏显示后，自动向前加载直到达到打开时的目标轮数。',
     invalidCount: '请输入正整数。', invalidMiB: '请输入大于零的 MiB 数值。',
     invalidOpen: '请输入至少为 3 的整数。',
-    loading: '正在读取…', retry: '重试', loadFailed: '无法读取会话历史设置。',
-    save: '保存', saving: '保存中…', saveFailed: '无法保存会话历史设置。修改已保留，请重试。',
+    loading: '正在读取会话历史设置…', retry: '重试', loadFailed: '无法读取会话历史设置。',
+    writeFailed: '无法应用此项设置。请重试。',
   },
   en: {
-    title: 'Codex session history loading', description: 'Saved settings apply the next time you open a session.',
-    firstItems: 'Initial item budget', firstMiB: 'Initial size budget (MiB)',
+    applyHint: 'Applies the next time you open a session.',
+    firstItems: 'Initial history item budget', firstMiB: 'Initial history size budget (MiB)',
     openTurns: 'Turns to load on open', manualTurns: 'Turns per Load earlier action', prefetch: 'Background prefetch',
     prefetchHint: 'After the initial history appears, load older turns up to the target for opening a session.',
     invalidCount: 'Enter a positive integer.', invalidMiB: 'Enter a MiB value greater than zero.',
     invalidOpen: 'Enter an integer of at least 3.',
-    loading: 'Loading…', retry: 'Retry', loadFailed: 'Could not load session history settings.',
-    save: 'Save', saving: 'Saving…', saveFailed: 'Could not save session history settings. Your edits are still here.',
+    loading: 'Loading session history settings…', retry: 'Retry', loadFailed: 'Could not load session history settings.',
+    writeFailed: 'Could not apply this setting. Try again.',
   },
 }
 
-const invalidLabel = { firstItems: 'invalidCount', firstMiB: 'invalidMiB', openTurns: 'invalidOpen', manualTurns: 'invalidCount' }
-const sectionStyle = { paddingBlock: 16, borderBottom: '1px solid var(--dsw-alias-border-l2)' }
-const hintStyle = { margin: '4px 0 12px', fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }
+function HistoryNumberField({ field, invalidLabel, value, status, apply, t }) {
+  const id = useId()
+  const [draft, setDraft] = useState(null)
+  const next = draft === null ? value : Number(draft)
+  const invalid = !isHistoryPreferenceValue(field, next)
+  const description = invalid ? t(invalidLabel) : status === 'failed' ? t('writeFailed')
+    : field === 'firstItems' ? t('applyHint') : undefined
+
+  async function commit() {
+    if (draft === null || invalid || status === 'pending') return
+    if (next === value || await apply(field, next)) setDraft(null)
+  }
+
+  return <div className={css.row}>
+    <div className={css.rowText}>
+      <label className={css.title} htmlFor={id}>{t(field)}</label>
+      {description && <div className={css.desc} id={`${id}-description`}
+        role={status === 'failed' ? 'alert' : undefined}>{description}</div>}
+    </div>
+    <Input id={id} size={8} inputMode={historyPreferenceLimits[field].step === 'any' ? 'decimal' : 'numeric'}
+      value={draft ?? String(value)} disabled={status === 'pending'} aria-invalid={invalid || undefined}
+      aria-describedby={description ? `${id}-description` : undefined}
+      onChange={event => setDraft(event.target.value)} onBlur={() => void commit()}
+      onKeyDown={event => {
+        if (event.key === 'Enter') {
+          event.preventDefault()
+          event.currentTarget.blur()
+        }
+      }} />
+  </div>
+}
 
 function HistoryPreferences({ t, ownerSignal }) {
   const id = useId()
-  const [accepted, setAccepted] = useState(null)
-  const [edits, setEdits] = useState({})
+  const [settings, setSettings] = useState(null)
   const [attempt, setAttempt] = useState(0)
   const [loadFailed, setLoadFailed] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [failed, setFailed] = useState(false)
+  const [status, setStatus] = useState({})
 
   useEffect(() => {
     const lifetime = new AbortController()
     const signal = AbortSignal.any([lifetime.signal, ownerSignal])
-    void readPage(endpoint, {}, signal).then(settings => {
-      if (!signal.aborted) setAccepted(settings)
+    void readPage(endpoint, {}, signal).then(result => {
+      if (!signal.aborted) setSettings(result)
     }).catch(() => {
       if (!signal.aborted) setLoadFailed(true)
     })
     return () => lifetime.abort()
   }, [attempt, ownerSignal])
 
-  function edit(key, value) {
-    setEdits(previous => ({ ...previous, [key]: value }))
-    setFailed(false)
-  }
-
-  const text = Object.fromEntries(numericFields.map(key => [key, edits[key] ?? String(accepted?.[key] ?? '')]))
-  const next = Object.fromEntries(numericFields.map(key => [key, Number(text[key])]))
-  next.prefetch = edits.prefetch ?? accepted?.prefetch
-  const invalid = key => !isHistoryPreferenceValue(key, next[key])
-  const state = {
-    available: Boolean(accepted), writable: Boolean(accepted), failed, saving,
-    invalid: numericFields.some(invalid),
-    dirty: Boolean(accepted && Object.keys(next).some(key => next[key] !== accepted[key])),
-  }
-
-  async function save() {
-    if (!state.dirty || state.invalid || saving) return
-    setSaving(true)
-    setFailed(false)
+  async function apply(field, value) {
+    setStatus(previous => ({ ...previous, [field]: 'pending' }))
     try {
-      setAccepted(await writeCodexCapability(endpoint, next, ownerSignal))
-      setEdits({})
+      const result = await writeCodexCapability(endpoint, { [field]: value }, ownerSignal)
+      if (ownerSignal.aborted) return false
+      // 不同字段的写入可以并发，应答只更新本次提交的字段。
+      setSettings(previous => ({ ...previous, [field]: result[field] }))
+      setStatus(previous => ({ ...previous, [field]: undefined }))
+      return true
     } catch {
-      if (!ownerSignal.aborted) setFailed(true)
-    } finally {
-      setSaving(false)
+      if (!ownerSignal.aborted) setStatus(previous => ({ ...previous, [field]: 'failed' }))
+      return false
     }
   }
 
-  return <section style={sectionStyle} aria-labelledby={`${id}-title`}>
-    <div id={`${id}-title`}>{t('title')}</div>
-    {!accepted ? <>
-      <p role={loadFailed ? 'alert' : 'status'} style={hintStyle}>{t(loadFailed ? 'loadFailed' : 'loading')}</p>
-      {loadFailed && <Button size="sm" variant="outline" onClick={() => {
-        setLoadFailed(false)
-        setAttempt(value => value + 1)
-      }}>{t('retry')}</Button>}
-    </> : <>
-      <p style={hintStyle}>{t('description')}</p>
-      <SettingsForm labels={{ save: t('save'), saving: t('saving'), saveFailed: t('saveFailed') }}
-        state={state} onSave={save} onDiscard={() => setEdits({})}>
-        {numericFields.map(key => <SettingsValueField key={key} id={`${id}-${key}`} label={t(key)}
-          numeric={key !== 'firstMiB'} text={text[key]} disabled={saving}
-          invalid={invalid(key)} invalidLabel={t(invalidLabel[key])} onEdit={value => edit(key, value)} />)}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-          <div>
-            <div>{t('prefetch')}</div>
-            <p id={`${id}-prefetch`} style={hintStyle}>{t('prefetchHint')}</p>
-          </div>
-          <Switch checked={next.prefetch} label={t('prefetch')} describedBy={`${id}-prefetch`}
-            disabled={saving} onChange={value => edit('prefetch', value)} />
+  if (!settings) return <div className={css.row}>
+    <div className={css.rowText} role={loadFailed ? 'alert' : 'status'}>{t(loadFailed ? 'loadFailed' : 'loading')}</div>
+    {loadFailed && <Button size="sm" variant="outline" onClick={() => {
+      setLoadFailed(false)
+      setAttempt(value => value + 1)
+    }}>{t('retry')}</Button>}
+  </div>
+
+  return <>
+    {Object.entries(numericFields).map(([field, invalidLabel]) => <HistoryNumberField key={field}
+      {...{ field, invalidLabel, apply, t }} value={settings[field]} status={status[field]} />)}
+    <div className={css.row}>
+      <div className={css.rowText}>
+        <div className={css.title}>{t('prefetch')}</div>
+        <div id={id} className={css.desc} role={status.prefetch === 'failed' ? 'alert' : undefined}>
+          {t(status.prefetch === 'failed' ? 'writeFailed' : 'prefetchHint')}
         </div>
-      </SettingsForm>
-    </>}
-  </section>
+      </div>
+      <Switch checked={settings.prefetch} label={t('prefetch')} describedBy={id} disabled={status.prefetch === 'pending'}
+        onChange={value => void apply('prefetch', value)} />
+    </div>
+  </>
 }
 
-/** 将历史加载表单放进 DSH 通用设置，保存与读取走同一个 Profile 的 Host。 */
+/** 将逐项应用的历史偏好放到 Codex 设置页，沿用当前 Profile 的 Host 存储。 */
 export function installHistoryPreferences(ctx, ownerSignal) {
   ctx.effect(() => ctx.locale.register(locale, labels))
-  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
-    name: 'settings.general.item', id: 'codex-history-preferences', order: -18, locale, inject: () => ({ ownerSignal }),
+  ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
+    name: codexSettingsItem, id: 'codex-history-preferences', order: -18, locale, inject: () => ({ ownerSignal }),
   }, HistoryPreferences))
 }

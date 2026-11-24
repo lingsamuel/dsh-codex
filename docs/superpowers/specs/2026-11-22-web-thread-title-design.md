@@ -2,7 +2,7 @@
 
 ## 设置
 
-在「通用」中提供「拟标题模型」和「随会话更新标题」，按 DSH Profile 保存。模型用于网页首次拟题和开启后的标题更新。默认项显示「GPT‑6 Luna（默认）」，对通过 ChatGPT 登录且目录提供 `gpt-6-luna` 的 OpenAI 会话使用低推理强度。用户可从 Codex 模型目录明确选择提供商和模型。所选模型不可用或请求失败时，未命名会话显示 Codex 正文预览，已有标题继续显示当前名称。自动更新默认关闭。 [GPT‑6 Luna 模型说明](https://developers.openai.com/api/docs/models/gpt-6-luna)
+在「Codex on DSH」中提供「拟标题模型」和「随会话更新标题」，按 DSH Profile 保存。模型用于网页首次拟题和开启后的标题更新。默认项显示「GPT‑6 Luna（默认）」，对通过 ChatGPT 登录且目录提供 `gpt-6-luna` 的 OpenAI 会话使用低推理强度。菜单与新会话默认模型共用 Codex 当前配置的提供商目录，已经保存的模型继续按原提供商标识解析。所选模型不可用或请求失败时，未命名会话显示 Codex 正文预览，已有标题继续显示当前名称。自动更新默认关闭。 [GPT‑6 Luna 模型说明](https://developers.openai.com/api/docs/models/gpt-6-luna)
 
 设置页说明拟题根据少量用户发言在后台单独请求所选模型。即使最后保留原标题，请求也可能增加订阅用量或 API 费用。模型的提供商与主会话可不同，发言由所选提供商处理。
 

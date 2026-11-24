@@ -57,3 +57,15 @@ test('无效输入保留此前保存的历史加载偏好', async () => {
   }
   assert.deepEqual(await get(), saved)
 })
+
+test('不同设置的自动应用并发提交时合并到同一 Profile', async t => {
+  const directory = await profiles(t)
+  const { route } = createHistoryPreferences(directory)
+  const responses = await Promise.all([
+    post(route, { firstMiB: 0.5 }),
+    post(route, { openTurns: 20 }),
+    post(route, { prefetch: false }),
+  ])
+  assert.deepEqual(responses.map(response => response.status), [200, 200, 200])
+  assert.deepEqual(await createHistoryPreferences(directory).get(), { ...defaults, firstMiB: 0.5, openTurns: 20, prefetch: false })
+})

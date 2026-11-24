@@ -9,20 +9,25 @@ const fields = Object.keys(defaultHistoryPreferences)
 export function createHistoryPreferences(cacheDirectory) {
   const stored = createDefaultPreference(cacheDirectory && join(cacheDirectory, 'web-history-preferences.json'), 'preferences')
 
-  async function get() {
-    const saved = await stored.get()
+  function normalize(saved) {
     return Object.fromEntries(fields.map(key => [key, isHistoryPreferenceValue(key, saved?.[key])
       ? saved[key] : defaultHistoryPreferences[key]]))
   }
 
+  async function get() {
+    return normalize(await stored.get())
+  }
+
   const route = createCodexCapabilityRoute('history-preferences', undefined, get, async (body, signal) => {
-    if (!fields.every(key => isHistoryPreferenceValue(key, body[key]))) {
+    const changed = fields.filter(key => Object.hasOwn(body, key))
+    if (!changed.length || !changed.every(key => isHistoryPreferenceValue(key, body[key]))) {
       throw invalidCapabilityRequest('会话历史加载设置无效。')
     }
-    const value = Object.fromEntries(fields.map(key => [key, body[key]]))
-    signal.throwIfAborted()
-    await stored.set(value)
-    return value
+    const patch = Object.fromEntries(changed.map(key => [key, body[key]]))
+    return stored.update(previous => {
+      signal.throwIfAborted()
+      return { ...normalize(previous), ...patch }
+    })
   })
 
   return { route, get }

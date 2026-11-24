@@ -2,10 +2,11 @@ import { EventEmitter, once } from 'node:events'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { defaultTitleModel } from '../shared/thread-title-settings.js'
-import { codexSqliteHome, CodexRpcError, openCodexReader, readCodexPages, withCodexReader } from './app-server.mjs'
+import { codexSqliteHome, CodexRpcError, openCodexReader, withCodexReader } from './app-server.mjs'
 import { createCodexCapabilityRoute, invalidCapabilityRequest, requiredValue } from './codex-capability-route.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
+import { readVisibleProviderModels } from './models.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
 import { createThreadTitleUpdates, readFirstTitleMessage, readTitleContext } from './thread-title-updates.mjs'
 
@@ -109,10 +110,8 @@ async function waitForFirstMessage(socketPath, thread, job, ownerSignal) {
 }
 
 async function titleModelOption(request, { provider, model }) {
-  const models = await readCodexPages(cursor => request('model/list', {
-    modelProvider: provider, limit: 100, ...(cursor != null && { cursor }),
-  }))
-  return models.find(entry => !entry.hidden && entry.model === model)
+  const models = await readVisibleProviderModels(request, provider)
+  return models.find(entry => entry.model === model)
 }
 
 async function chooseTitleModel(request, thread, selection) {

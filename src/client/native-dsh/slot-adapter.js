@@ -17,6 +17,7 @@ export function adaptSlot(ctx, slot, find, adapt) {
       restore = () => {
         if (next.inject === replacement.inject) next.inject = inject
         if (next.component === replacement.component) next.component = component
+        replacement.dispose?.()
       }
     }
     const stop = ctx.on('slots/changed', name => { if (slot === name) sync() })

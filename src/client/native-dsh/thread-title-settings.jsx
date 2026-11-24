@@ -2,8 +2,10 @@ import { PreferenceRow } from '@deepseek-ai/dsh-client-ui-chat/src/client/settin
 import css from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.module.css'
 import { Button, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import { useEffect, useId, useState } from 'react'
+import { configuredModelGroup } from '../../shared/model-selection.js'
 import { defaultTitleModel } from '../../shared/thread-title-settings.js'
 import { readPage, writeCodexCapability } from '../api.js'
+import { codexSettingsItem } from './codex-settings.jsx'
 
 const locale = 'codex.thread-title-settings'
 const endpoint = 'title-settings'
@@ -75,14 +77,17 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
     }
   }
 
-  const models = catalog?.groups.flatMap(group => group.models.map(model => ({
-    provider: group.id, model: model.id, label: `${group.name} · ${model.name || model.id}`,
-  }))) ?? []
+  const group = configuredModelGroup(catalog)
+  const models = group?.models.map(model => ({ provider: group.id, model: model.id, label: model.name || model.id })) ?? []
   const modelOptions = new Map(models.map(model => [optionId(model), model]))
-  const value = optionId(settings?.selection)
+  const selection = settings?.selection
+  const value = optionId(selection)
   const defaultLabel = t('default', { model: defaultTitleModel.name })
+  const selectedProvider = selection && catalog?.groups.find(candidate => candidate.id === selection.provider)
+  const selectedModel = selectedProvider?.models.find(model => model.id === selection.model)
   const label = value === defaultOption ? defaultLabel : modelOptions.get(value)?.label
-    ?? (catalog ? t('unavailable', { model: settings.selection.model }) : settings.selection.model)
+    ?? (selectedModel ? `${selectedProvider.name} · ${selectedModel.name || selection.model}`
+      : catalog ? t('unavailable', { model: selection.model }) : selection.model)
 
   return <>
     <PreferenceRow title={t('model')} description={t('modelHelp', { model: defaultTitleModel.name })}
@@ -92,7 +97,11 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
       }))] : []}
       onSelect={next => {
         if (next === value) return
-        void save({ selection: next === defaultOption ? null : modelOptions.get(next) })
+        if (next === defaultOption) void save({ selection: null })
+        else {
+          const option = modelOptions.get(next)
+          if (option) void save({ selection: { provider: option.provider, model: option.model } })
+        }
       }} />
     <div className={css.row}>
       <div className={css.rowText}>
@@ -115,8 +124,8 @@ export function installThreadTitleSettings(ctx, ownerSignal) {
   const channel = new BroadcastChannel(locale)
   ctx.effect(() => () => channel.close())
   ctx.effect(() => ctx.locale.register(locale, labels))
-  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
-    name: 'settings.general.item', id: 'codex-thread-title-settings', order: -17, locale,
+  ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
+    name: codexSettingsItem, id: 'codex-thread-title-settings', order: -17, locale,
     inject: () => ({ ownerSignal, channel }),
   }, ThreadTitleSettings))
 }

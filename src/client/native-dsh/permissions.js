@@ -4,6 +4,7 @@ import { createElement } from 'react'
 import { readPage, writePermissionAction } from '../api.js'
 import { remoteFailure, sessionReadScope } from './catalog.js'
 import { adaptSlot } from './slot-adapter.js'
+import { codexSettingsItem } from './codex-settings.jsx'
 import { permissionOptionValue } from '../../shared/permissions.js'
 
 const locale = 'codex.permissions'
@@ -266,17 +267,21 @@ export function installPermissions(ctx, catalog, signal) {
     },
   })))
 
-  adaptSlot(ctx, 'settings.general.item', entry => entry.options.id === 'permission', (inject, Native) => ({
-    inject: (...args) => {
-      const props = inject(...args)
-      return { ...props, hooks: { ...props.hooks, permission: defaults }, load, select: selectDefault }
-    },
-    component: function DefaultPermission(props) {
+  // 移动原生权限行时，跟随原注册的生命周期并保留 DSH 的权限确认交互。
+  adaptSlot(ctx, 'settings.general.item', entry => entry.options.id === 'permission', (inject, Native) => {
+    const dispose = ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
+      name: codexSettingsItem, id: 'permission', order: -20, locale: 'settings.permission',
+      inject: (...args) => {
+        const props = inject(...args)
+        return { ...props, hooks: { ...props.hooks, permission: defaults }, load, select: selectDefault }
+      },
+    }, function DefaultPermission(props) {
       return createElement(Native, { ...props, t: (key, ...args) => {
         if (key === 'description') return t('defaultDescription')
         if (key === 'confirm.description') return t('defaultFullAccess')
         return props.t(key, ...args)
       } })
-    },
-  }))
+    }))
+    return { inject: () => ({}), component: () => null, dispose }
+  })
 }

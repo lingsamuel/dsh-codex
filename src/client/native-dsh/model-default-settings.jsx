@@ -1,6 +1,8 @@
 import { PreferenceRow } from '@deepseek-ai/dsh-client-ui-chat/src/client/settings/PreferenceRow.tsx'
 import { useEffect, useState } from 'react'
+import { configuredModelGroup } from '../../shared/model-selection.js'
 import { modelDefaultChanged, readPage, writeModelDefault } from '../api.js'
+import { codexSettingsItem } from './codex-settings.jsx'
 
 const locale = 'codex.model-default'
 const followCodex = 'follow-codex'
@@ -46,7 +48,7 @@ function ModelDefaultSettings({ t, load, save }) {
 
   const { catalog, saved } = data ?? {}
   const native = catalog?.default
-  const provider = catalog?.groups.find(group => group.id === native?.provider)
+  const provider = configuredModelGroup(catalog)
   const models = provider?.models ?? []
   const nativeModel = models.find(model => model.id === native?.model)
   const selectedModel = saved?.model ? catalog.groups.find(group => group.id === saved.provider)
@@ -129,7 +131,7 @@ export function installModelDefaultSettings(ctx, signal) {
   }
   ctx.effect(() => () => channel.close())
   ctx.effect(() => ctx.locale.register(locale, labels))
-  ctx.slots.inject('settings.general.item', () => ctx.slots.register({
-    name: 'settings.general.item', id: 'codex-model-default', order: -19, locale, inject: () => controls,
+  ctx.slots.inject(codexSettingsItem, () => ctx.slots.register({
+    name: codexSettingsItem, id: 'codex-model-default', order: -19, locale, inject: () => controls,
   }, ModelDefaultSettings))
 }

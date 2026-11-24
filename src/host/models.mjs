@@ -2,6 +2,14 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { CodexRpcError, readCodexPages, withCodexReader } from './app-server.mjs'
 import { modelSelectionOf } from '../shared/model-selection.js'
 
+/** 目录和模型核对均沿用同一提供商的原生分页与可见性规则。 */
+export async function readVisibleProviderModels(request, provider) {
+  const rows = await readCodexPages(cursor => request('model/list', {
+    modelProvider: provider, limit: 100, ...(cursor != null && { cursor }),
+  }))
+  return rows.filter(model => !model.hidden)
+}
+
 /** 用 Codex 各 provider 自己的模型列表为 DSH 选择器供应可用等级。 */
 export async function readModelCatalog(request, cwd) {
   const [{ data: providers, defaultProviderId }, settings] = await Promise.all([
@@ -14,10 +22,7 @@ export async function readModelCatalog(request, cwd) {
   const config = settings?.config
   const catalogs = await Promise.all(providers.map(async ({ id, name }) => {
     try {
-      const rows = await readCodexPages(cursor => request('model/list', {
-        modelProvider: id, limit: 100, ...(cursor != null && { cursor }),
-      }))
-      const visible = rows.filter(model => !model.hidden)
+      const visible = await readVisibleProviderModels(request, id)
       return {
         group: { id, name, models: visible.map(model => ({
           id: model.model,
