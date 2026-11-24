@@ -1,7 +1,7 @@
 import { EventEmitter, once } from 'node:events'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { defaultTitleModel } from '../shared/thread-title-settings.js'
+import { defaultTitleEffort, defaultTitleModel } from '../shared/thread-title-settings.js'
 import { codexSqliteHome, CodexRpcError, openCodexReader, withCodexReader } from './app-server.mjs'
 import { createCodexCapabilityRoute, invalidCapabilityRequest, requiredValue } from './codex-capability-route.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
@@ -114,14 +114,22 @@ async function titleModelOption(request, { provider, model }) {
   return models.find(entry => entry.model === model)
 }
 
+function supportsTitleEffort(option, effort) {
+  return option.supportedReasoningEfforts?.some(level => level.reasoningEffort === effort)
+}
+
 async function chooseTitleModel(request, thread, selection) {
-  if (!selection) {
+  const chosen = selection?.model ? selection : defaultTitleModel
+  if (chosen === defaultTitleModel) {
     if (thread.modelProvider !== defaultTitleModel.provider) return
     const { account } = await request('account/read', { refreshToken: false })
     if (account?.type !== 'chatgpt') return
   }
-  const chosen = selection ?? defaultTitleModel
-  return await titleModelOption(request, chosen) ? chosen : undefined
+  const option = await titleModelOption(request, chosen)
+  if (!option) return
+  // 目录可能在 Profile 保存后变化。过时档位回到相同模型的默认行为。
+  const effort = selection?.reasoningEffort
+  return { ...chosen, reasoningEffort: effort && supportsTitleEffort(option, effort) ? effort : defaultTitleEffort(chosen) }
 }
 
 function clipUtf8(text, limit) {
@@ -165,7 +173,7 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
   try {
     const chosen = await chooseTitleModel(request, thread, selection)
     if (!chosen) return
-    const { model, provider } = chosen
+    const { model, provider, reasoningEffort } = chosen
     const { config } = await request('config/read', { cwd: thread.cwd, includeLayers: false })
     ownerSignal?.throwIfAborted()
     if (!config) return
@@ -183,7 +191,7 @@ async function generateTitle(socketPath, thread, selection, prompt, ownerSignal,
       threadId, input: [{ type: 'text', text: prompt, text_elements: [] }],
       permissions: readOnly, runtimeWorkspaceRoots: [], outputSchema: allowKeep
         ? { ...titleSchema, properties: { title: { anyOf: [titleProperty, { type: 'null' }] } } } : titleSchema,
-      ...(model === defaultTitleModel.model && provider === defaultTitleModel.provider && { effort: 'low' }),
+      ...(reasoningEffort !== undefined && { effort: reasoningEffort }),
     })
     turnId = turn.id
     const timeout = AbortSignal.timeout(30_000)
@@ -215,7 +223,8 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
   const ready = preference.get().then(saved => { if (saved) applySettings({ ...settings, ...saved }) }).catch(() => {})
 
   function applySettings(next) {
-    if (settings.selection?.model !== next.selection?.model || settings.selection?.provider !== next.selection?.provider) {
+    if (settings.selection?.model !== next.selection?.model || settings.selection?.provider !== next.selection?.provider
+      || settings.selection?.reasoningEffort !== next.selection?.reasoningEffort) {
       modelController.abort()
       modelController = new AbortController()
     }
@@ -310,19 +319,29 @@ export function createThreadTitles(socketPath, ownerSignal, submit, cacheDirecto
     if ((follow === undefined && selection === undefined) || (follow !== undefined && typeof follow !== 'boolean')) {
       throw invalidCapabilityRequest('无效的拟标题设置。')
     }
-    let model
+    let nextSelection = null
     if (selection != null) {
-      const { provider, model: id } = selection
-      if (!requiredValue(provider) || !requiredValue(id)) throw invalidCapabilityRequest('无效的拟标题模型。')
-      model = { provider, model: id }
-      if (!await withCodexReader(socketPath, signal, request => titleModelOption(request, model))) {
+      const { provider, model, reasoningEffort } = selection
+      const selectedModel = provider === undefined && model === undefined ? null : { provider, model }
+      if (selectedModel && (!requiredValue(provider) || !requiredValue(model))) {
+        throw invalidCapabilityRequest('无效的拟标题模型。')
+      }
+      if ((!selectedModel || reasoningEffort !== undefined) && !requiredValue(reasoningEffort)) {
+        throw invalidCapabilityRequest('无效的拟标题思考强度。')
+      }
+      const option = await withCodexReader(socketPath, signal, request => titleModelOption(request, selectedModel ?? defaultTitleModel))
+      if (!option) {
         throw invalidCapabilityRequest('所选拟标题模型不在 Codex 目录中。')
       }
+      if (reasoningEffort !== undefined && !supportsTitleEffort(option, reasoningEffort)) {
+        throw invalidCapabilityRequest('所选模型未提供此拟标题思考强度。')
+      }
+      nextSelection = { ...selectedModel, ...(reasoningEffort !== undefined && { reasoningEffort }) }
     }
     const saved = await preference.update(previous => {
       signal.throwIfAborted()
       return { ...settings, ...previous, ...(follow !== undefined && { follow }),
-        ...(selection !== undefined && { selection: model ?? null }) }
+        ...(selection !== undefined && { selection: nextSelection }) }
     })
     applySettings(saved)
     return settings

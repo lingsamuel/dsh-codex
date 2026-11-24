@@ -1002,7 +1002,7 @@ test('目录转换部分失败后重试，仅向同目录已有项目迁移余�
 
 async function titleFixture(t, { initialItem, modelResult = 'success', waitForModel, waitForClaim, provider = 'openai',
   account = 'chatgpt', luna = true, defer = false, emptyRollout = false, unindexedHistory = false,
-  followTitle = '排查会话队列', waitForFollow, loseSteerReceipt = false } = {}) {
+  followTitle = '排查会话队列', waitForFollow, loseSteerReceipt = false, lunaEfforts = ['low', 'medium'] } = {}) {
   const thread = { id: 'main', cwd: '/workspace', historyMode: 'paginated', status: { type: 'idle' },
     model: 'main-model', modelProvider: provider, preview: initialItem ? '旧消息' : '' }
   const text = { type: 'text', text: '请检查网页标题逻辑', text_elements: [] }
@@ -1064,8 +1064,9 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
     },
     'account/read': () => ({ result: { account: { type: account } } }),
     'modelProvider/list': () => ({ result: { data: [{ id: 'openai', name: 'OpenAI' }, { id: 'custom', name: 'Custom' }] } }),
-    'model/list': ({ modelProvider }) => ({ result: { data: modelProvider === 'custom' ? [{ model: 'title-only-model' }]
-      : luna ? [{ model: 'gpt-6-luna' }] : [] } }),
+    'model/list': ({ modelProvider }) => ({ result: { data: modelProvider === 'custom' ? [
+      { model: 'title-only-model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }, { model: 'no-effort-model' },
+    ] : luna ? [{ model: 'gpt-6-luna', supportedReasoningEfforts: lunaEfforts.map(reasoningEffort => ({ reasoningEffort })) }] : [] } }),
     'config/read': () => ({ result: { config: { mcp_servers: { fixture: { enabled: true } } } } }),
     'thread/start': params => {
       assert.equal(params.ephemeral, true)
@@ -1211,13 +1212,14 @@ test('默认拟题模型不可用时保留首条消息预览并跳过推理', as
   assert.equal(title.messages.some(({ method }) => method === 'thread/start'), false)
 })
 
-test('首次拟题使用明确选择的提供商，推理失败时沿用预览', async t => {
+test('首次拟题使用所选提供商和强度，推理失败时沿用预览', async t => {
   const title = await titleFixture(t, { modelResult: 'failure' })
-  const selection = { provider: 'custom', model: 'title-only-model' }
+  const selection = { provider: 'custom', model: 'title-only-model', reasoningEffort: 'high' }
   assert.equal((await postCodex(title.get, 'title-settings', { selection })).status, 200)
   const started = title.wait('title-started')
   assert.equal((await title.send()).status, 200)
-  await started
+  const [request] = await started
+  assert.equal(request.effort, 'high')
   await delay(50)
   const opening = title.messages.find(({ method }) => method === 'thread/start').params
   assert.equal(opening.model, selection.model)
@@ -1228,7 +1230,7 @@ test('首次拟题使用明确选择的提供商，推理失败时沿用预览',
 
 test('后续标题只按网页已结束轮次计数，两轮短输入跳过模型', async t => {
   const title = await titleFixture(t)
-  const settings = await postCodex(title.get, 'title-settings', { follow: true })
+  const settings = await postCodex(title.get, 'title-settings', { selection: { reasoningEffort: 'medium' }, follow: true })
   assert.equal(settings.status, 200)
   const first = title.wait('title-saved')
   await title.send()
@@ -1250,7 +1252,9 @@ test('后续标题只按网页已结束轮次计数，两轮短输入跳过模�
   await web('confirm', '先检查发送和领取逻辑')
   assert.deepEqual(await saved, ['排查会话队列'])
   assert.equal(title.inferenceCount(), 2)
-  const input = title.messages.filter(({ method }) => method === 'turn/start').at(-1).params.input[0].text
+  const requests = title.messages.filter(({ method }) => method === 'turn/start')
+  assert.deepEqual(requests.map(({ params }) => params.effort), ['medium', 'medium'])
+  const input = requests.at(-1).params.input[0].text
   assert.match(input, /检查网页标题/)
   assert.match(input, /换个任务/)
   assert.match(input, /打包/)
@@ -1281,11 +1285,11 @@ test('同一轮的两次网页插话合计一轮，并且可触发新任务拟�
   assert.equal(title.thread.name, '检查网页标题')
 })
 
-test('拟标题模型和开关独立保存到 Profile', async t => {
+test('拟标题模型、强度和开关保存到 Profile，换模型时清除强度并拒绝无效档位', async t => {
   const fixture = await titleFixture(t)
   const directory = join(fixture.directory, 'profile')
   const get = fixture.openRoutes(directory)
-  const selection = { provider: 'custom', model: 'title-only-model' }
+  const selection = { provider: 'custom', model: 'title-only-model', reasoningEffort: 'high' }
   const [model, follow] = await Promise.all([
     postCodex(get, 'title-settings', { selection }),
     postCodex(get, 'title-settings', { follow: true }),
@@ -1294,8 +1298,24 @@ test('拟标题模型和开关独立保存到 Profile', async t => {
   assert.equal(follow.status, 200)
   const reopened = fixture.openRoutes(directory)
   assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection, follow: true })
+  const next = { provider: 'custom', model: 'no-effort-model' }
+  assert.equal((await postCodex(reopened, 'title-settings', { selection: { ...next, reasoningEffort: 'high' } })).status, 400)
+  assert.equal((await postCodex(reopened, 'title-settings', { selection: { reasoningEffort: 'high' } })).status, 400)
+  assert.equal((await postCodex(reopened, 'title-settings', { selection: next })).status, 200)
+  assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: next, follow: true })
   assert.equal((await postCodex(reopened, 'title-settings', { selection: null })).status, 200)
   assert.deepEqual(await (await reopened('/api/codex/title-settings')).json(), { selection: null, follow: true })
+})
+
+test('拟标题在模型目录移除已保存档位后使用默认强度', async t => {
+  const lunaEfforts = ['low', 'medium']
+  const title = await titleFixture(t, { lunaEfforts })
+  assert.equal((await postCodex(title.get, 'title-settings', { selection: { reasoningEffort: 'medium' } })).status, 200)
+  lunaEfforts.pop()
+  const started = title.wait('title-started')
+  assert.equal((await title.send()).status, 200)
+  const [request] = await started
+  assert.equal(request.effort, 'low')
 })
 
 test('后续拟题等待同一会话的首次拟题完成后再读取标题', async t => {
