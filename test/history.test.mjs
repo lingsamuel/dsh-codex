@@ -1065,7 +1065,10 @@ async function titleFixture(t, { initialItem, modelResult = 'success', waitForMo
     'account/read': () => ({ result: { account: { type: account } } }),
     'modelProvider/list': () => ({ result: { data: [{ id: 'openai', name: 'OpenAI' }, { id: 'custom', name: 'Custom' }] } }),
     'model/list': ({ modelProvider }) => ({ result: { data: modelProvider === 'custom' ? [
-      { model: 'title-only-model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] }, { model: 'no-effort-model' },
+      { model: 'title-only-model', defaultReasoningEffort: 'medium',
+        supportedReasoningEfforts: ['low', 'medium', 'high'].map(reasoningEffort => ({ reasoningEffort })) },
+      { model: 'no-default-effort-model', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] },
+      { model: 'no-effort-model' },
     ] : luna ? [{ model: 'gpt-6-luna', supportedReasoningEfforts: lunaEfforts.map(reasoningEffort => ({ reasoningEffort })) }] : [] } }),
     'config/read': () => ({ result: { config: { mcp_servers: { fixture: { enabled: true } } } } }),
     'thread/start': params => {
@@ -1226,6 +1229,21 @@ test('首次拟题使用所选提供商和强度，推理失败时沿用预览',
   assert.equal(opening.modelProvider, 'custom')
   assert.equal(title.thread.preview, title.text.text)
   assert.equal(title.thread.name, undefined)
+})
+
+test('拟标题请求显式使用所选模型的默认档位', async t => {
+  for (const [model, effort] of [['title-only-model', 'medium'], ['no-default-effort-model', 'high'], ['no-effort-model', undefined]]) {
+    await t.test(model, async t => {
+      const title = await titleFixture(t)
+      const selection = { provider: 'custom', model }
+      assert.equal((await postCodex(title.get, 'title-settings', { selection })).status, 200)
+      const started = title.wait('title-started')
+      assert.equal((await title.send()).status, 200)
+      const [request] = await started
+      if (effort === undefined) assert.equal(Object.hasOwn(request, 'effort'), false)
+      else assert.equal(request.effort, effort)
+    })
+  }
 })
 
 test('后续标题只按网页已结束轮次计数，两轮短输入跳过模型', async t => {

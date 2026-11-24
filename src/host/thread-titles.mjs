@@ -6,7 +6,7 @@ import { codexSqliteHome, CodexRpcError, openCodexReader, withCodexReader } from
 import { createCodexCapabilityRoute, invalidCapabilityRequest, requiredValue } from './codex-capability-route.mjs'
 import { createDefaultPreference } from './default-preference.mjs'
 import { watchNativeHistory } from './history-watch.mjs'
-import { readVisibleProviderModels } from './models.mjs'
+import { codexModelOption, readVisibleProviderModels } from './models.mjs'
 import { watchConversationQueue } from './queue-watch.mjs'
 import { createThreadTitleUpdates, readFirstTitleMessage, readTitleContext } from './thread-title-updates.mjs'
 
@@ -111,11 +111,12 @@ async function waitForFirstMessage(socketPath, thread, job, ownerSignal) {
 
 async function titleModelOption(request, { provider, model }) {
   const models = await readVisibleProviderModels(request, provider)
-  return models.find(entry => entry.model === model)
+  const entry = models.find(entry => entry.model === model)
+  return entry && codexModelOption(entry)
 }
 
 function supportsTitleEffort(option, effort) {
-  return option.supportedReasoningEfforts?.some(level => level.reasoningEffort === effort)
+  return option.reasoning?.efforts.some(level => level.id === effort)
 }
 
 async function chooseTitleModel(request, thread, selection) {
@@ -129,7 +130,7 @@ async function chooseTitleModel(request, thread, selection) {
   if (!option) return
   // 目录可能在 Profile 保存后变化。过时档位回到相同模型的默认行为。
   const effort = selection?.reasoningEffort
-  return { ...chosen, reasoningEffort: effort && supportsTitleEffort(option, effort) ? effort : defaultTitleEffort(chosen) }
+  return { ...chosen, reasoningEffort: effort && supportsTitleEffort(option, effort) ? effort : defaultTitleEffort(chosen, option.reasoning) }
 }
 
 function clipUtf8(text, limit) {

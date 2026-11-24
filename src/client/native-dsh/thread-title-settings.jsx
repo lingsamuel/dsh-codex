@@ -14,8 +14,8 @@ const defaultEffortOption = 'effort-default'
 const labels = {
   zh: {
     model: '拟标题模型', default: '{model}（默认）', unavailable: '{model}（不可用）',
-    modelHelp: '首次拟题和后续更新会把少量用户发言交给所选提供商。思考强度可选用该模型提供的档位。按默认强度时，OpenAI 的 {model} 使用 Low，其他模型由 Codex 决定。模型不可用时保留原标题或正文预览。',
-    modelMenu: '模型', effort: '思考强度', effortDefault: '默认', effortDefaultWithValue: '默认（{effort}）',
+    modelHelp: '首次拟题和后续更新会把少量用户发言交给所选提供商，并使用这里设置的思考强度。菜单会标明默认档位。模型不可用时保留原标题或正文预览。',
+    modelMenu: '模型', effort: '思考强度', effortDefault: '默认（{effort}）',
     costHelp: '即使标题没有变化，拟题也可能增加订阅用量或 API 费用。',
     follow: '随会话更新标题',
     followHelp: '每累计两轮含网页发言的对话后检查任务是否变化。新增正文很短时跳过请求，手动起的标题会保留。',
@@ -23,8 +23,8 @@ const labels = {
   },
   en: {
     model: 'Title generation model', default: '{model} (default)', unavailable: '{model} (unavailable)',
-    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider. You can choose from the reasoning levels offered by the model. By default, OpenAI {model} uses low effort, and Codex resolves the effort for other models. If the model is unavailable, the title or message preview stays as is.',
-    modelMenu: 'Model', effort: 'Reasoning effort', effortDefault: 'Default', effortDefaultWithValue: 'Default ({effort})',
+    modelHelp: 'Initial titles and updates send a small amount of user text to the selected provider and use the reasoning effort set here. The menu shows the default level. If the model is unavailable, the title or message preview stays as is.',
+    modelMenu: 'Model', effort: 'Reasoning effort', effortDefault: 'Default ({effort})',
     costHelp: 'Requests may use additional plan allowance or incur API costs even when the title stays the same.',
     follow: 'Update titles as the conversation evolves',
     followHelp: 'Check for a task change every two turns with web messages. Skip requests when the new text is very short. Keep manually set titles.',
@@ -97,18 +97,19 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
       : catalog ? t('unavailable', { model: activeModel.model }) : activeModel.model)
   const efforts = selectedModel?.reasoning?.efforts ?? []
   const selectedEffort = efforts.find(level => level.id === selection?.reasoningEffort)
-  const defaultEffort = defaultTitleEffort(activeModel)
-  const effortLabel = selectedEffort?.name ?? (defaultEffort || t('effortDefault'))
-  const effortOptions = [{ id: defaultEffortOption, label: defaultEffort
-    ? t('effortDefaultWithValue', { effort: defaultEffort }) : t('effortDefault') },
-  ...efforts.map(level => ({ id: `effort:${level.id}`, label: level.name, effort: level.id }))]
+  const defaultEffort = defaultTitleEffort(activeModel, selectedModel?.reasoning)
+  const effortLabel = selectedEffort?.name ?? defaultEffort
+  const effortOptions = defaultEffort ? [
+    { id: defaultEffortOption, label: t('effortDefault', { effort: defaultEffort }) },
+    ...efforts.map(level => ({ id: `effort:${level.id}`, label: level.name, effort: level.id })),
+  ] : []
   const modelChoices = [{ id: defaultOption, label: defaultLabel }, ...models.map(model => ({ id: optionId(model), label: model.label }))]
   const options = [{ id: 'model', label: `${t('modelMenu')} · ${label}`,
     submenu: modelChoices.map(option => ({ ...option,
       icon: option.id === value ? <IconCheckOutlineRegular size={14} /> : undefined,
     })),
   }]
-  if (efforts.length) options.push({
+  if (effortOptions.length) options.push({
     id: 'effort', label: `${t('effort')} · ${effortLabel}`,
     submenu: effortOptions.map(option => ({ ...option,
       icon: option.effort === selectedEffort?.id ? <IconCheckOutlineRegular size={14} /> : undefined,
@@ -133,8 +134,8 @@ function ThreadTitleSettings({ t, ownerSignal, channel }) {
   }
 
   return <>
-    <PreferenceRow title={t('model')} description={<>{t('modelHelp', { model: defaultTitleModel.name })}<br />{t('costHelp')}</>}
-      value={value} selectedLabel={settings ? (efforts.length || defaultEffort ? `${label} · ${effortLabel}` : label) : t('loading')}
+    <PreferenceRow title={t('model')} description={<>{t('modelHelp')}<br />{t('costHelp')}</>}
+      value={value} selectedLabel={settings ? (effortLabel ? `${label} · ${effortLabel}` : label) : t('loading')}
       options={settings && !saving ? options : []} onSelect={select} />
     <div className={css.row}>
       <div className={css.rowText}>

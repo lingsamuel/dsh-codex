@@ -10,6 +10,21 @@ export async function readVisibleProviderModels(request, provider) {
   return rows.filter(model => !model.hidden)
 }
 
+/** 目录和依目录执行的拟题使用相同的模型与档位表示。 */
+export function codexModelOption(model) {
+  return {
+    id: model.model,
+    name: model.displayName,
+    description: model.description,
+    reasoning: model.supportedReasoningEfforts?.length ? {
+      defaultEffort: model.defaultReasoningEffort,
+      efforts: model.supportedReasoningEfforts.map(({ reasoningEffort, description }) => ({
+        id: reasoningEffort, name: reasoningEffort, description,
+      })),
+    } : undefined,
+  }
+}
+
 /** 用 Codex 各 provider 自己的模型列表为 DSH 选择器供应可用等级。 */
 export async function readModelCatalog(request, cwd) {
   const [{ data: providers, defaultProviderId }, settings] = await Promise.all([
@@ -24,17 +39,7 @@ export async function readModelCatalog(request, cwd) {
     try {
       const visible = await readVisibleProviderModels(request, id)
       return {
-        group: { id, name, models: visible.map(model => ({
-          id: model.model,
-          name: model.displayName,
-          description: model.description,
-          reasoning: model.supportedReasoningEfforts?.length ? {
-            defaultEffort: model.defaultReasoningEffort,
-            efforts: model.supportedReasoningEfforts.map(({ reasoningEffort, description }) => ({
-              id: reasoningEffort, name: reasoningEffort, description,
-            })),
-          } : undefined,
-        })) },
+        group: { id, name, models: visible.map(codexModelOption) },
         defaultModel: visible.find(model => model.isDefault) ?? visible[0],
       }
     } catch (error) {
